@@ -48,9 +48,12 @@ if [ "$mode" != build ]; then
     export VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation
     # Alpine's sway (1.12) offers colour management, and with it the HDR10
     # swapchain the HDR scenarios want, only under wlroots' Vulkan renderer;
-    # the compositor then draws through lavapipe as the tool does
+    # the compositor then draws through lavapipe as the tool does: without
+    # a DRM node to match, wlroots takes the CPU device when told to, and
+    # allocates the headless output's buffers through udmabuf
     if [ -f /etc/alpine-release ]; then
         export IM_E2E_RENDERER=vulkan
+        export WLR_RENDERER_FORCE_SOFTWARE=1
     fi
 fi
 exec bash dev/ci.sh "$mode"
