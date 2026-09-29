@@ -35,13 +35,15 @@ struct wl_surface;
 #include <plt/window.h>
 #include <plt/platform.h>
 
-#include "imgui_wm.h"
 #include "imgui_plt.h"
+#include <imgui.h>
 #include <imgui_impl_vulkan.h>
 
-#include <fullscreen.spv.h>
-#include <screenshot_output.spv.h>
-#include <screenshot_scene.spv.h>
+#include <fullscreen_vert.spv.h>
+#include <screenshot_image_frag.spv.h>
+#include <screenshot_image_vert.spv.h>
+#include <screenshot_output_frag.spv.h>
+#include <screenshot_scene_frag.spv.h>
 
 #include <png.h>
 #include <jxl/color_encoding.h>
@@ -523,7 +525,7 @@ namespace {
         return Buffer(sv(StringBuilder() << sv(dir) << "/"_sv << StringView(stamp) << extension));
     }
 
-    // ---- vulkan plumbing (mirrors imgui's vulkan example) ----
+    // ---- vulkan plumbing ----
     VkAllocationCallbacks* gAlloc = nullptr;
     VkInstance gInstance = VK_NULL_HANDLE;
     VkPhysicalDevice gPhys = VK_NULL_HANDLE;
@@ -531,8 +533,47 @@ namespace {
     u32 gQueueFamily = (u32)-1;
     VkQueue gQueue = VK_NULL_HANDLE;
     VkDescriptorPool gDescPool = VK_NULL_HANDLE;
-    ImGui_ImplVulkanH_Window gWin;
-    u32 gMinImageCount = 2;
+
+    // one swapchain image and what records into it
+    struct Frame {
+        VkImage image;
+        VkImageView view;
+        VkFramebuffer framebuffer;
+        VkCommandPool commandPool;
+        VkCommandBuffer commandBuffer;
+        VkFence fence;
+    };
+
+    // the semaphores of one frame in flight: an image acquired, a frame
+    // rendered into it; one pair more than images, as an acquire hands its
+    // image out only afterwards
+    struct Sync {
+        VkSemaphore acquired;
+        VkSemaphore rendered;
+    };
+
+    // the window's surface, its swapchain and the frames drawn into it. The
+    // render pass outlives the swapchain: the format never changes
+    struct Presenter {
+        VkSurfaceKHR surface = VK_NULL_HANDLE;
+        VkSurfaceFormatKHR format = {};
+        VkRenderPass renderPass = VK_NULL_HANDLE;
+        VkSwapchainKHR swapchain = VK_NULL_HANDLE;
+        Vector<Frame> frames;
+        Vector<Sync> syncs;
+        // the frame whose image the last acquire handed out, and the sync
+        // pair the next acquire uses
+        u32 frameIndex = 0;
+        u32 syncIndex = 0;
+        int width = 0;
+        int height = 0;
+        VkClearValue clear = {};
+    };
+
+    Presenter gPresent;
+    constexpr u32 kMinImageCount = 2;
+    // the HDR scene's white in nits, what the output stage scales it by
+    float gSdrWhiteNits = 203.f;
     bool gRebuild = false;
     bool gLinearHdr = false;
     VkRenderPass gScenePass = VK_NULL_HANDLE;
@@ -545,6 +586,28 @@ namespace {
     VkDescriptorSet gOutputSet = VK_NULL_HANDLE;
     VkPipelineLayout gOutputPipelineLayout = VK_NULL_HANDLE;
     VkPipeline gOutputPipeline = VK_NULL_HANDLE;
+    // the screenshot's own pipeline in the HDR scene: it draws the image
+    // from an ImGui draw callback, PQ decoded into the scene's linear light
+    VkDescriptorSetLayout gImageSetLayout = VK_NULL_HANDLE;
+    VkPipelineLayout gImagePipelineLayout = VK_NULL_HANDLE;
+    VkPipeline gImagePipeline = VK_NULL_HANDLE;
+
+    // screenshot_image.vert's push constants: ImGui's own scale and
+    // translate, the quad in ImGui's screen space, the white the fragment
+    // stage divides its nits by
+    struct ImagePush {
+        float scale[2];
+        float translate[2];
+        float rect[4];
+        float sdrWhiteNits;
+    };
+
+    // what the draw callback is handed: ImGui copies it into the draw list
+    struct ImageDraw {
+        VkDescriptorSet texture;
+        float x0, y0, x1, y1;
+        float sdrWhiteNits;
+    };
 
     // ui scale handed down from the compositor via IMGUI_SCALE (its clients
     // otherwise render at scale 1, so the panel/text would be tiny on hidpi)
@@ -578,6 +641,53 @@ namespace {
         }
 
         return gChaos->deviceExtension(name, offered);
+    }
+
+    // a discrete GPU when there is one, the first device otherwise
+    VkPhysicalDevice selectPhysicalDevice() {
+        u32 count = 0;
+
+        vkc(vkEnumeratePhysicalDevices(gInstance, &count, nullptr));
+
+        if (!count) {
+            fail("no vulkan device"_sv);
+        }
+
+        Vector<VkPhysicalDevice> devices;
+
+        devices.zero(count);
+        vkc(vkEnumeratePhysicalDevices(gInstance, &count, devices.mutData()));
+
+        for (VkPhysicalDevice device : devices) {
+            VkPhysicalDeviceProperties props;
+
+            vkGetPhysicalDeviceProperties(device, &props);
+
+            if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
+                return device;
+            }
+        }
+
+        return devices[0];
+    }
+
+    u32 selectQueueFamily(VkPhysicalDevice device) {
+        u32 count = 0;
+
+        vkGetPhysicalDeviceQueueFamilyProperties(device, &count, nullptr);
+
+        Vector<VkQueueFamilyProperties> families;
+
+        families.zero(count);
+        vkGetPhysicalDeviceQueueFamilyProperties(device, &count, families.mutData());
+
+        for (u32 i = 0; i < count; i++) {
+            if (families[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
+                return i;
+            }
+        }
+
+        fail("no vulkan graphics queue"_sv);
     }
 
     void setupVulkan(ObjPool& shot, const char** exts, u32 nexts, const Image& img) {
@@ -638,10 +748,10 @@ namespace {
                 fail("shared screenshot gpu is unavailable"_sv);
             }
         } else {
-            gPhys = ImGui_ImplVulkanH_SelectPhysicalDevice(gInstance);
+            gPhys = selectPhysicalDevice();
         }
 
-        gQueueFamily = ImGui_ImplVulkanH_SelectQueueFamilyIndex(gPhys);
+        gQueueFamily = selectQueueFamily(gPhys);
 
         const char* devExts[] = {
             VK_KHR_SWAPCHAIN_EXTENSION_NAME,
@@ -691,16 +801,258 @@ namespace {
         });
     }
 
+    // the first of the wanted formats the surface offers in the color space,
+    // else whatever it offers first: the HDR caller checks the color space
+    VkSurfaceFormatKHR selectSurfaceFormat(VkSurfaceKHR surface, const VkFormat* wanted, u32 nwanted, VkColorSpaceKHR colorSpace) {
+        u32 count = 0;
+
+        vkc(vkGetPhysicalDeviceSurfaceFormatsKHR(gPhys, surface, &count, nullptr));
+
+        if (!count) {
+            fail("vulkan WSI offers no surface format"_sv);
+        }
+
+        Vector<VkSurfaceFormatKHR> available;
+
+        available.zero(count);
+        vkc(vkGetPhysicalDeviceSurfaceFormatsKHR(gPhys, surface, &count, available.mutData()));
+
+        for (u32 i = 0; i < nwanted; i++) {
+            for (const VkSurfaceFormatKHR& format : available) {
+                if (format.format == wanted[i] && format.colorSpace == colorSpace) {
+                    return format;
+                }
+            }
+        }
+
+        return available[0];
+    }
+
+    void createPresentPass() {
+        VkAttachmentDescription attachment{};
+
+        attachment.format = gPresent.format.format;
+        attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+        attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        attachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        attachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+        VkAttachmentReference color{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+        VkSubpassDescription subpass{};
+
+        subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        subpass.colorAttachmentCount = 1;
+        subpass.pColorAttachments = &color;
+
+        // the acquire's semaphore is waited at color output: the pass's
+        // write may not start before it
+        VkSubpassDependency dependency{};
+
+        dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
+        dependency.dstSubpass = 0;
+        dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+
+        VkRenderPassCreateInfo rpci{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+
+        rpci.attachmentCount = 1;
+        rpci.pAttachments = &attachment;
+        rpci.subpassCount = 1;
+        rpci.pSubpasses = &subpass;
+        rpci.dependencyCount = 1;
+        rpci.pDependencies = &dependency;
+        vkc(vkCreateRenderPass(gDevice, &rpci, gAlloc, &gPresent.renderPass));
+    }
+
+    void destroyFrames() {
+        for (size_t i = 0; i < gPresent.frames.length(); i++) {
+            const Frame& frame = gPresent.frames[i];
+
+            if (frame.framebuffer) {
+                vkDestroyFramebuffer(gDevice, frame.framebuffer, gAlloc);
+            }
+            if (frame.view) {
+                vkDestroyImageView(gDevice, frame.view, gAlloc);
+            }
+            if (frame.fence) {
+                vkDestroyFence(gDevice, frame.fence, gAlloc);
+            }
+            if (frame.commandPool) {
+                vkDestroyCommandPool(gDevice, frame.commandPool, gAlloc);
+            }
+        }
+
+        for (size_t i = 0; i < gPresent.syncs.length(); i++) {
+            const Sync& sync = gPresent.syncs[i];
+
+            if (sync.acquired) {
+                vkDestroySemaphore(gDevice, sync.acquired, gAlloc);
+            }
+            if (sync.rendered) {
+                vkDestroySemaphore(gDevice, sync.rendered, gAlloc);
+            }
+        }
+
+        gPresent.frames.clear();
+        gPresent.syncs.clear();
+    }
+
+    // the swapchain at the window's size; a swapchain already there is
+    // retired by the new one, its frames torn down once the device is idle
+    void createSwapchain(u32 width, u32 height) {
+        VkSurfaceCapabilitiesKHR caps;
+
+        vkc(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(gPhys, gPresent.surface, &caps));
+
+        // Wayland leaves the extent to the client: the window's size, held
+        // to what the surface allows
+        VkExtent2D extent = caps.currentExtent;
+
+        if (extent.width == 0xffffffffu) {
+            extent.width = width < caps.minImageExtent.width ? caps.minImageExtent.width : width > caps.maxImageExtent.width ? caps.maxImageExtent.width : width;
+            extent.height = height < caps.minImageExtent.height ? caps.minImageExtent.height : height > caps.maxImageExtent.height ? caps.maxImageExtent.height : height;
+        }
+
+        u32 images = caps.minImageCount > kMinImageCount ? caps.minImageCount : kMinImageCount;
+
+        if (caps.maxImageCount && images > caps.maxImageCount) {
+            images = caps.maxImageCount;
+        }
+
+        VkSwapchainCreateInfoKHR ci{VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};
+
+        ci.surface = gPresent.surface;
+        ci.minImageCount = images;
+        ci.imageFormat = gPresent.format.format;
+        ci.imageColorSpace = gPresent.format.colorSpace;
+        ci.imageExtent = extent;
+        ci.imageArrayLayers = 1;
+        ci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        ci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        ci.preTransform = caps.currentTransform;
+        ci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+        ci.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+        ci.clipped = VK_TRUE;
+        ci.oldSwapchain = gPresent.swapchain;
+
+        VkSwapchainKHR swapchain = VK_NULL_HANDLE;
+
+        // a driver that cannot present to this compositor's surface fails
+        // here, and that is the tool's own report
+        if (gChaos->vulkan(vkCreateSwapchainKHR(gDevice, &ci, gAlloc, &swapchain)) < 0) {
+            fail("vulkan cannot make a swapchain on this surface"_sv);
+        }
+
+        if (gPresent.swapchain) {
+            vkDeviceWaitIdle(gDevice);
+            destroyFrames();
+            vkDestroySwapchainKHR(gDevice, gPresent.swapchain, gAlloc);
+        }
+
+        gPresent.swapchain = swapchain;
+        gPresent.width = (int)extent.width;
+        gPresent.height = (int)extent.height;
+        gPresent.frameIndex = 0;
+        gPresent.syncIndex = 0;
+
+        u32 count = 0;
+
+        vkc(vkGetSwapchainImagesKHR(gDevice, swapchain, &count, nullptr));
+
+        Vector<VkImage> handles;
+
+        handles.zero(count);
+        vkc(vkGetSwapchainImagesKHR(gDevice, swapchain, &count, handles.mutData()));
+        gPresent.frames.zero(count);
+        gPresent.syncs.zero(count + 1);
+
+        for (u32 i = 0; i < count; i++) {
+            Frame& frame = gPresent.frames.mut(i);
+
+            frame.image = handles[i];
+
+            VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+
+            vci.image = frame.image;
+            vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+            vci.format = gPresent.format.format;
+            vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            vkc(vkCreateImageView(gDevice, &vci, gAlloc, &frame.view));
+
+            VkFramebufferCreateInfo fci{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+
+            fci.renderPass = gPresent.renderPass;
+            fci.attachmentCount = 1;
+            fci.pAttachments = &frame.view;
+            fci.width = extent.width;
+            fci.height = extent.height;
+            fci.layers = 1;
+            vkc(vkCreateFramebuffer(gDevice, &fci, gAlloc, &frame.framebuffer));
+
+            VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+
+            pci.queueFamilyIndex = gQueueFamily;
+            pci.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+            vkc(vkCreateCommandPool(gDevice, &pci, gAlloc, &frame.commandPool));
+
+            VkCommandBufferAllocateInfo cai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+
+            cai.commandPool = frame.commandPool;
+            cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+            cai.commandBufferCount = 1;
+            vkc(vkAllocateCommandBuffers(gDevice, &cai, &frame.commandBuffer));
+
+            // signaled: the first frame has nothing to wait for
+            VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+
+            fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+            vkc(vkCreateFence(gDevice, &fenceInfo, gAlloc, &frame.fence));
+        }
+
+        for (u32 i = 0; i <= count; i++) {
+            Sync& sync = gPresent.syncs.mut(i);
+            VkSemaphoreCreateInfo semaphoreInfo{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+
+            vkc(vkCreateSemaphore(gDevice, &semaphoreInfo, gAlloc, &sync.acquired));
+            vkc(vkCreateSemaphore(gDevice, &semaphoreInfo, gAlloc, &sync.rendered));
+        }
+    }
+
+    void destroyPresenter() {
+        destroyFrames();
+
+        if (gPresent.swapchain) {
+            vkDestroySwapchainKHR(gDevice, gPresent.swapchain, gAlloc);
+        }
+        if (gPresent.renderPass) {
+            vkDestroyRenderPass(gDevice, gPresent.renderPass, gAlloc);
+        }
+        if (gPresent.surface) {
+            vkDestroySurfaceKHR(gInstance, gPresent.surface, gAlloc);
+        }
+
+        gPresent.swapchain = VK_NULL_HANDLE;
+        gPresent.renderPass = VK_NULL_HANDLE;
+        gPresent.surface = VK_NULL_HANDLE;
+    }
+
     void setupVulkanWindow(ObjPool& shot, VkSurfaceKHR surface, int w, int h, bool hdr) {
-        ImGui_ImplVulkanH_Window* wd = &gWin;
+        // the surface is the presenter's from here: registered before
+        // anything can throw, the guard tears down whatever was made
+        gPresent.surface = surface;
+        pooledGuard(shot, [] {
+            destroyPresenter();
+        });
 
-        wd->Surface = surface;
+        VkBool32 supported = VK_FALSE;
 
-        VkBool32 sup = VK_FALSE;
+        vkc(vkGetPhysicalDeviceSurfaceSupportKHR(gPhys, gQueueFamily, surface, &supported));
 
-        vkGetPhysicalDeviceSurfaceSupportKHR(gPhys, gQueueFamily, surface, &sup);
-
-        if (!sup) {
+        if (!supported) {
             fail("no vulkan WSI support"_sv);
         }
 
@@ -717,28 +1069,16 @@ namespace {
             VK_FORMAT_R8G8B8_UNORM,
         };
         const VkFormat* fmts = hdr ? hdrFmts : sdrFmts;
-
         VkColorSpaceKHR colorSpace = hdr ? VK_COLOR_SPACE_HDR10_ST2084_EXT : VK_COLORSPACE_SRGB_NONLINEAR_KHR;
 
-        wd->SurfaceFormat = ImGui_ImplVulkanH_SelectSurfaceFormat(gPhys, surface, fmts, 4, colorSpace);
+        gPresent.format = selectSurfaceFormat(surface, fmts, 4, colorSpace);
 
-        if (hdr && wd->SurfaceFormat.colorSpace != colorSpace) {
+        if (hdr && gPresent.format.colorSpace != colorSpace) {
             fail("vulkan WSI has no BT.2020/PQ surface"_sv);
         }
 
-        VkPresentModeKHR modes[] = {VK_PRESENT_MODE_FIFO_KHR};
-
-        wd->PresentMode = ImGui_ImplVulkanH_SelectPresentMode(gPhys, surface, modes, 1);
-        ImGui_ImplVulkanH_CreateOrResizeWindow(gInstance, gPhys, gDevice, wd, gQueueFamily, gAlloc, w, h, gMinImageCount, 0);
-        pooledGuard(shot, [] {
-            ImGui_ImplVulkanH_DestroyWindow(gInstance, gDevice, &gWin, gAlloc);
-        });
-
-        // the helper checks nothing before the backend is up: a driver that
-        // cannot present to this compositor's surface leaves no swapchain
-        if (wd->Swapchain == VK_NULL_HANDLE) {
-            fail("vulkan cannot make a swapchain on this surface"_sv);
-        }
+        createPresentPass();
+        createSwapchain((u32)w, (u32)h);
     }
 
     u32 findMemoryType(u32 typeBits, VkMemoryPropertyFlags props) {
@@ -853,6 +1193,61 @@ namespace {
         vkUpdateDescriptorSets(gDevice, 1, &write, 0, nullptr);
     }
 
+    // a pipeline whose vertices come from gl_VertexIndex alone: no vertex
+    // input, no blending, the viewport and scissor set at draw time
+    VkPipeline vertexlessPipeline(const u32* vertCode, size_t vertBytes, const u32* fragCode, size_t fragBytes, VkPipelineLayout layout, VkRenderPass pass) {
+        VkShaderModule vert = shaderModule(vertCode, vertBytes);
+        VkShaderModule frag = shaderModule(fragCode, fragBytes);
+        VkPipelineShaderStageCreateInfo stages[2] = {
+            {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, vert, "main", nullptr},
+            {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, frag, "main", nullptr},
+        };
+        VkPipelineVertexInputStateCreateInfo vertex{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+        VkPipelineInputAssemblyStateCreateInfo assembly{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+        VkPipelineViewportStateCreateInfo viewport{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+        VkPipelineRasterizationStateCreateInfo raster{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+        VkPipelineMultisampleStateCreateInfo multisample{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+        VkPipelineColorBlendAttachmentState blendAttachment{};
+        VkPipelineColorBlendStateCreateInfo blend{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+        VkDynamicState dynamicStates[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+        VkPipelineDynamicStateCreateInfo dynamic{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+
+        assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        viewport.viewportCount = viewport.scissorCount = 1;
+        raster.polygonMode = VK_POLYGON_MODE_FILL;
+        raster.cullMode = VK_CULL_MODE_NONE;
+        raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+        raster.lineWidth = 1.f;
+        multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+        blendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+        blend.attachmentCount = 1;
+        blend.pAttachments = &blendAttachment;
+        dynamic.dynamicStateCount = 2;
+        dynamic.pDynamicStates = dynamicStates;
+
+        VkGraphicsPipelineCreateInfo gpci{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+
+        gpci.stageCount = 2;
+        gpci.pStages = stages;
+        gpci.pVertexInputState = &vertex;
+        gpci.pInputAssemblyState = &assembly;
+        gpci.pViewportState = &viewport;
+        gpci.pRasterizationState = &raster;
+        gpci.pMultisampleState = &multisample;
+        gpci.pColorBlendState = &blend;
+        gpci.pDynamicState = &dynamic;
+        gpci.layout = layout;
+        gpci.renderPass = pass;
+
+        VkPipeline pipeline = VK_NULL_HANDLE;
+
+        vkc(vkCreateGraphicsPipelines(gDevice, VK_NULL_HANDLE, 1, &gpci, gAlloc, &pipeline));
+        vkDestroyShaderModule(gDevice, frag, gAlloc);
+        vkDestroyShaderModule(gDevice, vert, gAlloc);
+
+        return pipeline;
+    }
+
     void destroyLinearHdr();
 
     void setupLinearHdr(ObjPool& shot, u32 width, u32 height) {
@@ -922,57 +1317,41 @@ namespace {
         dlci.pBindings = &binding;
         vkc(vkCreateDescriptorSetLayout(gDevice, &dlci, gAlloc, &gOutputSetLayout));
 
+        // the scene holds SDR white at 1.0; the output stage scales it to
+        // nits by this constant
+        VkPushConstantRange outputRange{VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(float)};
         VkPipelineLayoutCreateInfo plci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
 
         plci.setLayoutCount = 1;
         plci.pSetLayouts = &gOutputSetLayout;
+        plci.pushConstantRangeCount = 1;
+        plci.pPushConstantRanges = &outputRange;
         vkc(vkCreatePipelineLayout(gDevice, &plci, gAlloc, &gOutputPipelineLayout));
 
-        VkShaderModule vert = shaderModule(fullscreen_spv, sizeof(fullscreen_spv));
-        VkShaderModule frag = shaderModule(screenshot_output_spv, sizeof(screenshot_output_spv));
-        VkPipelineShaderStageCreateInfo stages[2] = {
-            {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, vert, "main", nullptr},
-            {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, frag, "main", nullptr},
-        };
-        VkPipelineVertexInputStateCreateInfo vertex{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
-        VkPipelineInputAssemblyStateCreateInfo assembly{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
-        VkPipelineViewportStateCreateInfo viewport{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
-        VkPipelineRasterizationStateCreateInfo raster{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
-        VkPipelineMultisampleStateCreateInfo multisample{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
-        VkPipelineColorBlendAttachmentState blendAttachment{};
-        VkPipelineColorBlendStateCreateInfo blend{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
-        VkDynamicState dynamicStates[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
-        VkPipelineDynamicStateCreateInfo dynamic{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+        gOutputPipeline = vertexlessPipeline(fullscreen_vert_spv, sizeof(fullscreen_vert_spv), screenshot_output_frag_spv, sizeof(screenshot_output_frag_spv), gOutputPipelineLayout, gPresent.renderPass);
 
-        assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-        viewport.viewportCount = viewport.scissorCount = 1;
-        raster.polygonMode = VK_POLYGON_MODE_FILL;
-        raster.cullMode = VK_CULL_MODE_NONE;
-        raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-        raster.lineWidth = 1.f;
-        multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
-        blendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-        blend.attachmentCount = 1;
-        blend.pAttachments = &blendAttachment;
-        dynamic.dynamicStateCount = 2;
-        dynamic.pDynamicStates = dynamicStates;
+        VkDescriptorSetLayoutBinding imageBinding{};
 
-        VkGraphicsPipelineCreateInfo gpci{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+        imageBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        imageBinding.descriptorCount = 1;
+        imageBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
-        gpci.stageCount = 2;
-        gpci.pStages = stages;
-        gpci.pVertexInputState = &vertex;
-        gpci.pInputAssemblyState = &assembly;
-        gpci.pViewportState = &viewport;
-        gpci.pRasterizationState = &raster;
-        gpci.pMultisampleState = &multisample;
-        gpci.pColorBlendState = &blend;
-        gpci.pDynamicState = &dynamic;
-        gpci.layout = gOutputPipelineLayout;
-        gpci.renderPass = gWin.RenderPass;
-        vkc(vkCreateGraphicsPipelines(gDevice, VK_NULL_HANDLE, 1, &gpci, gAlloc, &gOutputPipeline));
-        vkDestroyShaderModule(gDevice, frag, gAlloc);
-        vkDestroyShaderModule(gDevice, vert, gAlloc);
+        VkDescriptorSetLayoutCreateInfo ilci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+
+        ilci.bindingCount = 1;
+        ilci.pBindings = &imageBinding;
+        vkc(vkCreateDescriptorSetLayout(gDevice, &ilci, gAlloc, &gImageSetLayout));
+
+        // one range for both stages, and the one push names both
+        VkPushConstantRange imageRange{VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(ImagePush)};
+        VkPipelineLayoutCreateInfo iplci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+
+        iplci.setLayoutCount = 1;
+        iplci.pSetLayouts = &gImageSetLayout;
+        iplci.pushConstantRangeCount = 1;
+        iplci.pPushConstantRanges = &imageRange;
+        vkc(vkCreatePipelineLayout(gDevice, &iplci, gAlloc, &gImagePipelineLayout));
+        gImagePipeline = vertexlessPipeline(screenshot_image_vert_spv, sizeof(screenshot_image_vert_spv), screenshot_image_frag_spv, sizeof(screenshot_image_frag_spv), gImagePipelineLayout, gScenePass);
 
         createSceneTarget(width, height);
         gLinearHdr = true;
@@ -980,6 +1359,15 @@ namespace {
 
     void destroyLinearHdr() {
         destroySceneTarget();
+        if (gImagePipeline) {
+            vkDestroyPipeline(gDevice, gImagePipeline, gAlloc);
+        }
+        if (gImagePipelineLayout) {
+            vkDestroyPipelineLayout(gDevice, gImagePipelineLayout, gAlloc);
+        }
+        if (gImageSetLayout) {
+            vkDestroyDescriptorSetLayout(gDevice, gImageSetLayout, gAlloc);
+        }
         if (gOutputPipeline) {
             vkDestroyPipeline(gDevice, gOutputPipeline, gAlloc);
         }
@@ -1002,7 +1390,9 @@ namespace {
         VkDeviceMemory memory = VK_NULL_HANDLE;
         VkImageView view = VK_NULL_HANDLE;
         VkSampler sampler = VK_NULL_HANDLE;
+        // ImGui's descriptor, for AddImage; the image pipeline's own, in HDR
         VkDescriptorSet ds = VK_NULL_HANDLE;
+        VkDescriptorSet imageSet = VK_NULL_HANDLE;
     };
 
     void finishTexture(const Image& img, Texture& tex) {
@@ -1029,6 +1419,24 @@ namespace {
         vkc(vkCreateSampler(gDevice, &sci, gAlloc, &tex.sampler));
 
         tex.ds = ImGui_ImplVulkan_AddTexture(tex.sampler, tex.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+        if (gLinearHdr) {
+            VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+
+            ai.descriptorPool = gDescPool;
+            ai.descriptorSetCount = 1;
+            ai.pSetLayouts = &gImageSetLayout;
+            vkc(vkAllocateDescriptorSets(gDevice, &ai, &tex.imageSet));
+
+            VkDescriptorImageInfo image{tex.sampler, tex.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+            VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+
+            write.dstSet = tex.imageSet;
+            write.descriptorCount = 1;
+            write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            write.pImageInfo = &image;
+            vkUpdateDescriptorSets(gDevice, 1, &write, 0, nullptr);
+        }
     }
 
     void importTexture(Image& img, Texture& tex) {
@@ -1397,10 +1805,8 @@ namespace {
     }
 
     void frameRender(ImDrawData* draw) {
-        ImGui_ImplVulkanH_Window* wd = &gWin;
-        VkSemaphore acq = wd->FrameSemaphores[wd->SemaphoreIndex].ImageAcquiredSemaphore;
-        VkSemaphore done = wd->FrameSemaphores[wd->SemaphoreIndex].RenderCompleteSemaphore;
-        VkResult e = gChaos->swapchain(vkAcquireNextImageKHR(gDevice, wd->Swapchain, UINT64_MAX, acq, VK_NULL_HANDLE, &wd->FrameIndex));
+        Sync& sync = gPresent.syncs.mut(gPresent.syncIndex);
+        VkResult e = gChaos->swapchain(vkAcquireNextImageKHR(gDevice, gPresent.swapchain, UINT64_MAX, sync.acquired, VK_NULL_HANDLE, &gPresent.frameIndex));
 
         if (e == VK_ERROR_OUT_OF_DATE_KHR || e == VK_SUBOPTIMAL_KHR) {
             gRebuild = true;
@@ -1410,25 +1816,23 @@ namespace {
             return;
         }
 
-        ImGui_ImplVulkanH_Frame* fd = &wd->Frames[wd->FrameIndex];
+        Frame& fd = gPresent.frames.mut(gPresent.frameIndex);
 
-        vkWaitForFences(gDevice, 1, &fd->Fence, VK_TRUE, UINT64_MAX);
-        vkResetFences(gDevice, 1, &fd->Fence);
-        vkResetCommandPool(gDevice, fd->CommandPool, 0);
+        vkWaitForFences(gDevice, 1, &fd.fence, VK_TRUE, UINT64_MAX);
+        vkResetFences(gDevice, 1, &fd.fence);
+        vkResetCommandPool(gDevice, fd.commandPool, 0);
 
-        VkCommandBufferBeginInfo bi = {};
+        VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
 
-        bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
         bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        vkBeginCommandBuffer(fd->CommandBuffer, &bi);
+        vkBeginCommandBuffer(fd.commandBuffer, &bi);
 
-        VkRenderPassBeginInfo rp = {};
+        VkRenderPassBeginInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
 
-        rp.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-        rp.renderArea.extent.width = wd->Width;
-        rp.renderArea.extent.height = wd->Height;
+        rp.renderArea.extent.width = (u32)gPresent.width;
+        rp.renderArea.extent.height = (u32)gPresent.height;
         rp.clearValueCount = 1;
-        rp.pClearValues = &wd->ClearValue;
+        rp.pClearValues = &gPresent.clear;
 
         if (gLinearHdr) {
             VkClearValue sceneClear{};
@@ -1436,44 +1840,46 @@ namespace {
             rp.renderPass = gScenePass;
             rp.framebuffer = gSceneFramebuffer;
             rp.pClearValues = &sceneClear;
-            vkCmdBeginRenderPass(fd->CommandBuffer, &rp, VK_SUBPASS_CONTENTS_INLINE);
-            ImGui_ImplVulkan_RenderDrawData(draw, fd->CommandBuffer);
-            vkCmdEndRenderPass(fd->CommandBuffer);
+            vkCmdBeginRenderPass(fd.commandBuffer, &rp, VK_SUBPASS_CONTENTS_INLINE);
+            ImGui_ImplVulkan_RenderDrawData(draw, fd.commandBuffer);
+            vkCmdEndRenderPass(fd.commandBuffer);
 
-            rp.renderPass = wd->RenderPass;
-            rp.framebuffer = fd->Framebuffer;
-            rp.pClearValues = &wd->ClearValue;
-            vkCmdBeginRenderPass(fd->CommandBuffer, &rp, VK_SUBPASS_CONTENTS_INLINE);
-            vkCmdBindPipeline(fd->CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, gOutputPipeline);
-            vkCmdBindDescriptorSets(fd->CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, gOutputPipelineLayout, 0, 1, &gOutputSet, 0, nullptr);
-            VkViewport viewport{0, 0, (float)wd->Width, (float)wd->Height, 0, 1};
-            VkRect2D scissor{{0, 0}, {(u32)wd->Width, (u32)wd->Height}};
+            float sdrWhiteNits = gSdrWhiteNits;
 
-            vkCmdSetViewport(fd->CommandBuffer, 0, 1, &viewport);
-            vkCmdSetScissor(fd->CommandBuffer, 0, 1, &scissor);
-            vkCmdDraw(fd->CommandBuffer, 3, 1, 0, 0);
-            vkCmdEndRenderPass(fd->CommandBuffer);
+            rp.renderPass = gPresent.renderPass;
+            rp.framebuffer = fd.framebuffer;
+            rp.pClearValues = &gPresent.clear;
+            vkCmdBeginRenderPass(fd.commandBuffer, &rp, VK_SUBPASS_CONTENTS_INLINE);
+            vkCmdBindPipeline(fd.commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, gOutputPipeline);
+            vkCmdBindDescriptorSets(fd.commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, gOutputPipelineLayout, 0, 1, &gOutputSet, 0, nullptr);
+            vkCmdPushConstants(fd.commandBuffer, gOutputPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(sdrWhiteNits), &sdrWhiteNits);
+            VkViewport viewport{0, 0, (float)gPresent.width, (float)gPresent.height, 0, 1};
+            VkRect2D scissor{{0, 0}, {(u32)gPresent.width, (u32)gPresent.height}};
+
+            vkCmdSetViewport(fd.commandBuffer, 0, 1, &viewport);
+            vkCmdSetScissor(fd.commandBuffer, 0, 1, &scissor);
+            vkCmdDraw(fd.commandBuffer, 3, 1, 0, 0);
+            vkCmdEndRenderPass(fd.commandBuffer);
         } else {
-            rp.renderPass = wd->RenderPass;
-            rp.framebuffer = fd->Framebuffer;
-            vkCmdBeginRenderPass(fd->CommandBuffer, &rp, VK_SUBPASS_CONTENTS_INLINE);
-            ImGui_ImplVulkan_RenderDrawData(draw, fd->CommandBuffer);
-            vkCmdEndRenderPass(fd->CommandBuffer);
+            rp.renderPass = gPresent.renderPass;
+            rp.framebuffer = fd.framebuffer;
+            vkCmdBeginRenderPass(fd.commandBuffer, &rp, VK_SUBPASS_CONTENTS_INLINE);
+            ImGui_ImplVulkan_RenderDrawData(draw, fd.commandBuffer);
+            vkCmdEndRenderPass(fd.commandBuffer);
         }
 
         VkPipelineStageFlags wait = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-        VkSubmitInfo si = {};
+        VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
 
-        si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
         si.waitSemaphoreCount = 1;
-        si.pWaitSemaphores = &acq;
+        si.pWaitSemaphores = &sync.acquired;
         si.pWaitDstStageMask = &wait;
         si.commandBufferCount = 1;
-        si.pCommandBuffers = &fd->CommandBuffer;
+        si.pCommandBuffers = &fd.commandBuffer;
         si.signalSemaphoreCount = 1;
-        si.pSignalSemaphores = &done;
-        vkEndCommandBuffer(fd->CommandBuffer);
-        vkQueueSubmit(gQueue, 1, &si, fd->Fence);
+        si.pSignalSemaphores = &sync.rendered;
+        vkEndCommandBuffer(fd.commandBuffer);
+        vkQueueSubmit(gQueue, 1, &si, fd.fence);
     }
 
     void framePresent() {
@@ -1481,16 +1887,14 @@ namespace {
             return;
         }
 
-        ImGui_ImplVulkanH_Window* wd = &gWin;
-        VkSemaphore done = wd->FrameSemaphores[wd->SemaphoreIndex].RenderCompleteSemaphore;
-        VkPresentInfoKHR pi = {};
+        Sync& sync = gPresent.syncs.mut(gPresent.syncIndex);
+        VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
 
-        pi.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
         pi.waitSemaphoreCount = 1;
-        pi.pWaitSemaphores = &done;
+        pi.pWaitSemaphores = &sync.rendered;
         pi.swapchainCount = 1;
-        pi.pSwapchains = &wd->Swapchain;
-        pi.pImageIndices = &wd->FrameIndex;
+        pi.pSwapchains = &gPresent.swapchain;
+        pi.pImageIndices = &gPresent.frameIndex;
 
         VkResult e = gChaos->swapchain(vkQueuePresentKHR(gQueue, &pi));
 
@@ -1498,7 +1902,47 @@ namespace {
             gRebuild = true;
         }
 
-        wd->SemaphoreIndex = (wd->SemaphoreIndex + 1) % wd->SemaphoreCount;
+        gPresent.syncIndex = (gPresent.syncIndex + 1) % (u32)gPresent.syncs.length();
+    }
+
+    // the screenshot's draw in the HDR scene, from ImGui's draw list: the
+    // command's clip as the backend applies its own, then the image quad
+    // by the image pipeline; ImDrawCallback_ResetRenderState follows it
+    void drawImage(const ImDrawList*, const ImDrawCmd* cmd) {
+        const ImageDraw& draw = *(const ImageDraw*)cmd->UserCallbackData;
+        auto* state = (ImGui_ImplVulkan_RenderState*)ImGui::GetPlatformIO().Renderer_RenderState;
+        ImDrawData* dd = ImGui::GetDrawData();
+        float clipX0 = cmd->ClipRect.x - dd->DisplayPos.x;
+        float clipY0 = cmd->ClipRect.y - dd->DisplayPos.y;
+        float clipX1 = cmd->ClipRect.z - dd->DisplayPos.x;
+        float clipY1 = cmd->ClipRect.w - dd->DisplayPos.y;
+
+        clipX0 = clipX0 < 0.f ? 0.f : clipX0;
+        clipY0 = clipY0 < 0.f ? 0.f : clipY0;
+
+        if (clipX1 <= clipX0 || clipY1 <= clipY0) {
+            return;
+        }
+
+        VkRect2D scissor{{(i32)clipX0, (i32)clipY0}, {(u32)(clipX1 - clipX0), (u32)(clipY1 - clipY0)}};
+
+        vkCmdSetScissor(state->CommandBuffer, 0, 1, &scissor);
+        vkCmdBindPipeline(state->CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, gImagePipeline);
+        vkCmdBindDescriptorSets(state->CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, gImagePipelineLayout, 0, 1, &draw.texture, 0, nullptr);
+
+        ImagePush push;
+
+        push.scale[0] = 2.f / dd->DisplaySize.x;
+        push.scale[1] = 2.f / dd->DisplaySize.y;
+        push.translate[0] = -1.f - dd->DisplayPos.x * push.scale[0];
+        push.translate[1] = -1.f - dd->DisplayPos.y * push.scale[1];
+        push.rect[0] = draw.x0;
+        push.rect[1] = draw.y0;
+        push.rect[2] = draw.x1;
+        push.rect[3] = draw.y1;
+        push.sdrWhiteNits = draw.sdrWhiteNits;
+        vkCmdPushConstants(state->CommandBuffer, gImagePipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
+        vkCmdDraw(state->CommandBuffer, 6, 1, 0, 0);
     }
 
     // ---- crop interaction ----
@@ -1669,13 +2113,14 @@ namespace {
         ImDrawList* dl = ImGui::GetWindowDrawList();
 
         if (img.color.hdr()) {
-            dl->AddCallback(ImGui_ImplVulkan_TextureEncodingCallback, (void*)(intptr_t)2);
-        }
+            // the screenshot draws itself, PQ decoded into the scene's
+            // linear light by its own pipeline; ImGui's state comes back after
+            ImageDraw draw{tex.imageSet, origin.x, origin.y, origin.x + content.x, origin.y + content.y, (float)img.color.sdrWhiteNits};
 
-        dl->AddImage((ImTextureID)tex.ds, origin, ImVec2(origin.x + content.x, origin.y + content.y));
-
-        if (img.color.hdr()) {
-            dl->AddCallback(ImGui_ImplVulkan_TextureEncodingCallback, nullptr);
+            dl->AddCallback(drawImage, &draw, sizeof(draw));
+            dl->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
+        } else {
+            dl->AddImage((ImTextureID)tex.ds, origin, ImVec2(origin.x + content.x, origin.y + content.y));
         }
 
         ImVec2 mouse = ImGui::GetIO().MousePos;
@@ -1863,19 +2308,13 @@ namespace {
             return false;
         }
 
-        if (gRebuild || gWin.Width != nw || gWin.Height != nh) {
-            if (gLinearHdr) {
-                vkDeviceWaitIdle(gDevice);
-            }
-
-            ImGui_ImplVulkan_SetMinImageCount(gMinImageCount);
-            ImGui_ImplVulkanH_CreateOrResizeWindow(gInstance, gPhys, gDevice, &gWin, gQueueFamily, gAlloc, nw, nh, gMinImageCount, 0);
+        if (gRebuild || gPresent.width != nw || gPresent.height != nh) {
+            createSwapchain((u32)nw, (u32)nh);
 
             if (gLinearHdr) {
                 createSceneTarget((u32)nw, (u32)nh);
             }
 
-            gWin.FrameIndex = 0;
             gRebuild = false;
         }
 
@@ -1890,10 +2329,10 @@ namespace {
         // the draw data is the window's size, checked positive above
         ImDrawData* dd = ImGui::GetDrawData();
 
-        gWin.ClearValue.color.float32[0] = 0.1f;
-        gWin.ClearValue.color.float32[1] = 0.1f;
-        gWin.ClearValue.color.float32[2] = 0.1f;
-        gWin.ClearValue.color.float32[3] = 1.0f;
+        gPresent.clear.color.float32[0] = 0.1f;
+        gPresent.clear.color.float32[1] = 0.1f;
+        gPresent.clear.color.float32[2] = 0.1f;
+        gPresent.clear.color.float32[3] = 1.0f;
 
         frameRender(dd);
         framePresent();
@@ -2072,23 +2511,23 @@ int mainScreenshot(StringView path) {
         ii.QueueFamily = gQueueFamily;
         ii.Queue = gQueue;
         ii.DescriptorPool = gDescPool;
-        ii.MinImageCount = gMinImageCount;
-        ii.ImageCount = gWin.ImageCount;
-        ii.PipelineInfoMain.RenderPass = gLinearHdr ? gScenePass : gWin.RenderPass;
+        ii.MinImageCount = kMinImageCount;
+        ii.ImageCount = (u32)gPresent.frames.length();
+        ii.PipelineInfoMain.RenderPass = gLinearHdr ? gScenePass : gPresent.renderPass;
         ii.PipelineInfoMain.Subpass = 0;
         ii.PipelineInfoMain.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
 
         if (loaded && img.color.hdr()) {
             ii.CustomShaderFragCreateInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-            ii.CustomShaderFragCreateInfo.codeSize = sizeof(screenshot_scene_spv);
-            ii.CustomShaderFragCreateInfo.pCode = screenshot_scene_spv;
+            ii.CustomShaderFragCreateInfo.codeSize = sizeof(screenshot_scene_frag_spv);
+            ii.CustomShaderFragCreateInfo.pCode = screenshot_scene_frag_spv;
         }
 
         ImGui_ImplVulkan_Init(&ii);
         pooledGuard(*shot, [] {
             ImGui_ImplVulkan_Shutdown();
         });
-        ImGui_ImplVulkan_SetSdrWhite(img.color.hdr() ? (float)img.color.sdrWhiteNits : 203.f);
+        gSdrWhiteNits = (float)img.color.sdrWhiteNits;
 
         if (loaded) {
             // registered before the import so a mid-import throw still
@@ -2096,6 +2535,9 @@ int mainScreenshot(StringView path) {
             pooledGuard(*shot, [t = &tex] {
                 if (t->ds) {
                     ImGui_ImplVulkan_RemoveTexture(t->ds);
+                }
+                if (t->imageSet) {
+                    vkFreeDescriptorSets(gDevice, gDescPool, 1, &t->imageSet);
                 }
                 if (t->sampler) {
                     vkDestroySampler(gDevice, t->sampler, gAlloc);

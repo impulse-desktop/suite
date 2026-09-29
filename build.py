@@ -54,16 +54,18 @@ shader_rules = []
 for shader, stage in [
     ("fullscreen", "vert"),
     ("screenshot_scene", "frag"),
+    ("screenshot_image", "vert"),
+    ("screenshot_image", "frag"),
     ("screenshot_output", "frag"),
 ]:
     shader_rules.append(command(
-        name=f"shader_{shader}",
+        name=f"shader_{shader}_{stage}",
         inputs=[f"$(S)/{shader}.{stage}"],
-        outputs=[f"$(B)/shaders/{shader}.spv.h"],
+        outputs=[f"$(B)/shaders/{shader}_{stage}.spv.h"],
         descr='SH',
         cmd=[
             "glslangValidator", "-V", f"$(S)/{shader}.{stage}",
-            "--variable-name", f"{shader}_spv", "-o", f"$(B)/shaders/{shader}.spv.h",
+            "--variable-name", f"{shader}_{stage}_spv", "-o", f"$(B)/shaders/{shader}_{stage}.spv.h",
         ],
     ))
 

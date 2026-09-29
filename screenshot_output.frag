@@ -1,7 +1,13 @@
 #version 450 core
 
+// The scene (linear BT.2020, SDR white at 1.0) to the PQ swapchain.
+
 layout(location = 0) out vec4 fColor;
 layout(set = 0, binding = 0) uniform sampler2D scene;
+
+layout(push_constant) uniform PushConstant {
+    float sdrWhiteNits;
+} pc;
 
 vec3 pqEncode(vec3 nits) {
     const float m1 = 2610.0 / 16384.0;
@@ -23,5 +29,5 @@ vec3 dither(vec3 encoded) {
 void main() {
     ivec2 size = textureSize(scene, 0);
     vec2 uv = gl_FragCoord.xy / vec2(size);
-    fColor = vec4(dither(pqEncode(texture(scene, uv).rgb)), 1.0);
+    fColor = vec4(dither(pqEncode(texture(scene, uv).rgb * pc.sdrWhiteNits)), 1.0);
 }
