@@ -55,6 +55,11 @@ def main():
         print(f"{scenario.stem}: {status} ({results[-1]['seconds']}s)", flush=True)
         if status != "PASS":
             print((output / "driver.log").read_text(), flush=True)
+            # what the tool and the devices said, for a failure read off CI
+            for log in sorted(output.glob("client*.log")) + [output / "devices.log"]:
+                if log.exists():
+                    text = log.read_text(errors="replace")
+                    print(f"--- {log.name} (last lines)\n" + "\n".join(text.splitlines()[-30:]), flush=True)
     (args.artifacts / "results.json").write_text(json.dumps(results, indent=2))
     failed = [r["name"] for r in results if r["status"] != "PASS"]
     print(f"{len(results) - len(failed)} passed, {len(failed)} failed" + (": " + " ".join(failed) if failed else ""))

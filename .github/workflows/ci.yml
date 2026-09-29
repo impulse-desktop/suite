@@ -89,7 +89,9 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: e2e-results
-          path: .build/e2e-results
+          # the build view: the runner publishes a node's outputs at the top
+          # only once it passed, and a failed run is what these are for
+          path: .build/tmp/*/e2e-results
           if-no-files-found: ignore
           retention-days: 7
           compression-level: 9
