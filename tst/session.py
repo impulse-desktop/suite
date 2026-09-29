@@ -164,14 +164,15 @@ class Session:
             self.wait(lambda: self.windows(), "mapped window")
         return self.client
 
-    def run(self, *args, cwd=None, timeout=60, unset=(), **environment):
-        """Run imscreenshot to its end without a window: the exit status and
-        its output."""
+    def run(self, *args, command=SCREENSHOT, cwd=None, timeout=60, unset=(), **environment):
+        """Run imscreenshot (or the one binary itself, by its path as
+        command) to its end without a window: the exit status and its
+        output."""
         self.clients += 1
         log = self.artifacts / f"client{self.clients}.log"
         with log.open("wb") as out:
             process = subprocess.run(
-                [SCREENSHOT, *args], env=self.environment(unset, environment), stdout=out, stderr=subprocess.STDOUT,
+                [str(command), *args], env=self.environment(unset, environment), stdout=out, stderr=subprocess.STDOUT,
                 cwd=cwd, timeout=timeout,
             )
         return process.returncode, log.read_text(errors="replace")

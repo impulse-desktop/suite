@@ -3,7 +3,6 @@
 #include "util.h"
 #include "color.h"
 #include "pooled.h"
-#include "check_true.h"
 
 #include <std/sys/fd.h>
 #include <std/ios/sys.h>
@@ -2224,7 +2223,10 @@ namespace {
 
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
 
-        checkTrue(ImGui::Begin("##shot", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoSavedSettings));
+        // Begin's and BeginChild's results go unread here and below: a
+        // window that cannot collapse, and a child of one, is shown every
+        // frame, and drawing into a hidden one would only be wasted
+        ImGui::Begin("##shot", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoSavedSettings);
         const float panelW = 200.f * gUiScale;
 
         // +/- zoom, handled before the panel so the slider reflects it
@@ -2241,13 +2243,13 @@ namespace {
             reset = true;
         }
 
-        checkTrue(ImGui::BeginChild("panel", ImVec2(panelW, 0), ImGuiChildFlags_Borders));
+        ImGui::BeginChild("panel", ImVec2(panelW, 0), ImGuiChildFlags_Borders);
         drawPanel(v, result, reset);
 
         ImGui::EndChild();
         ImGui::SameLine();
 
-        checkTrue(ImGui::BeginChild("canvas", ImVec2(0, 0), ImGuiChildFlags_Borders, ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_NoScrollWithMouse));
+        ImGui::BeginChild("canvas", ImVec2(0, 0), ImGuiChildFlags_Borders, ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
         drawCanvas(img, tex, v, reset);
 
         ImGui::EndChild();
@@ -2280,7 +2282,7 @@ namespace {
 
         ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(28, 28, 32, 255));
 
-        checkTrue(ImGui::Begin("##err", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings));
+        ImGui::Begin("##err", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
         float pad = 24.f * gUiScale;
 
         ImGui::SetCursorPos(ImVec2(pad, pad));
