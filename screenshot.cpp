@@ -437,12 +437,12 @@ namespace {
 
             out.append(chunk, sizeof(chunk) - available);
 
-            if (status == JXL_ENC_SUCCESS) {
-                break;
-            }
-            if (status != JXL_ENC_NEED_MORE_OUTPUT) {
+            if (!gChaos->encoderOutput(status == JXL_ENC_SUCCESS || status == JXL_ENC_NEED_MORE_OUTPUT)) {
                 JxlEncoderDestroy(enc);
                 fail("jxl encode failed"_sv);
+            }
+            if (status == JXL_ENC_SUCCESS) {
+                break;
             }
         }
 
@@ -654,6 +654,7 @@ namespace {
         u32 count = 0;
 
         vkc(vkEnumeratePhysicalDevices(gInstance, &count, nullptr));
+        count = gChaos->count("devices"_sv, count);
 
         if (!count) {
             fail("no vulkan device"_sv);
@@ -669,7 +670,7 @@ namespace {
 
             vkGetPhysicalDeviceProperties(device, &props);
 
-            if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
+            if (gChaos->deviceType(props.deviceType) == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
                 return device;
             }
         }
@@ -681,6 +682,7 @@ namespace {
         u32 count = 0;
 
         vkGetPhysicalDeviceQueueFamilyProperties(device, &count, nullptr);
+        count = gChaos->count("queue-families"_sv, count);
 
         Vector<VkQueueFamilyProperties> families;
 
@@ -822,6 +824,7 @@ namespace {
         u32 count = 0;
 
         vkc(vkGetPhysicalDeviceSurfaceFormatsKHR(gPhys, surface, &count, nullptr));
+        count = gChaos->count("surface-formats"_sv, count);
 
         if (!count) {
             fail("vulkan WSI offers no surface format"_sv);
@@ -922,6 +925,7 @@ namespace {
         VkSurfaceCapabilitiesKHR caps;
 
         vkc(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(gPhys, gPresent.surface, &caps));
+        gChaos->imageCounts(caps);
 
         // Wayland leaves the extent to the client: the window's size, held
         // to what the surface allows
@@ -958,7 +962,7 @@ namespace {
 
         // a driver that cannot present to this compositor's surface fails
         // here, and that is the tool's own report
-        if (gChaos->vulkan(vkCreateSwapchainKHR(gDevice, &ci, gAlloc, &swapchain)) < 0) {
+        if (gChaos->vulkanAt("swapchain"_sv, vkCreateSwapchainKHR(gDevice, &ci, gAlloc, &swapchain)) < 0) {
             fail("vulkan cannot make a swapchain on this surface"_sv);
         }
 
@@ -1067,7 +1071,7 @@ namespace {
 
         vkc(vkGetPhysicalDeviceSurfaceSupportKHR(gPhys, gQueueFamily, surface, &supported));
 
-        if (!supported) {
+        if (!gChaos->surfaceSupport(supported)) {
             fail("no vulkan WSI support"_sv);
         }
 
@@ -1995,13 +1999,9 @@ namespace {
 
     constexpr int kZoomMin = 10, kZoomMax = 400, kZoomStep = 10;
 
-    // clamp to 90% of the output; zero screen dimensions mean the output
-    // announcement has not arrived and the size stays as computed
+    // clamp to 90% of the output, whose size arrived with the platform's
+    // registry roundtrips, before any window
     void clampWindowSize(const plt::WindowInfo& info, int& w, int& h) {
-        if (info.screenPixelWidth == 0 || info.screenPixelHeight == 0) {
-            return;
-        }
-
         int maxW = (int)info.screenPixelWidth * 9 / 10;
         int maxH = (int)info.screenPixelHeight * 9 / 10;
 
@@ -2330,12 +2330,6 @@ namespace {
     bool FrameDriver::frame(const plt::WindowInfo& info) {
         int nw = (int)info.width;
         int nh = (int)info.height;
-
-        if (nw <= 0 || nh <= 0) {
-            window->requestFrame();
-
-            return false;
-        }
 
         if (gRebuild || gPresent.width != nw || gPresent.height != nh) {
             createSwapchain((u32)nw, (u32)nh);

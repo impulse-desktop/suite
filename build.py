@@ -168,6 +168,15 @@ jxl_dump = program(
     deps=[jxl],
 )
 
+# and name the Vulkan device a shared buffer is imported on through this
+device_uuid = program(
+    name="device_uuid",
+    output="$(B)/e2e/device_uuid",
+    srcs=["$(S)/tst/device_uuid.cpp"],
+    deps=[vulkan],
+)
+helpers = [devices, jxl_dump, device_uuid]
+
 # -Dshard=K/N splits the scenarios into N slices by a hash of the name, so
 # CI jobs can run them side by side; the slice a scenario falls in does not
 # move when others are added
@@ -188,8 +197,7 @@ for scenario in sorted(set(build.glob("$(S)/tst/*.py")) - set(harness)):
         "python3", "$(S)/dev/run_test.py",
         "--scenario", scenario,
         "--binary", "$(B)/im_test",
-        "--devices", "$(B)/e2e/devices",
-        "--jxl-dump", "$(B)/e2e/jxl_dump",
+        "--helpers", "$(B)/e2e",
         "--out", out,
     ]
     if flags.runtime:
@@ -201,7 +209,7 @@ for scenario in sorted(set(build.glob("$(S)/tst/*.py")) - set(harness)):
         name=f"test_{name}",
         inputs=[scenario, *harness],
         outputs=[out],
-        deps=[im_test, devices, jxl_dump],
+        deps=[im_test, *helpers],
         cmd=cmd,
         descr="TS",
         color="cyan",

@@ -43,7 +43,7 @@ case "$mode" in
 esac
 
 "$CXX" --version
-python3 ./build -B "$build_dir" -j "$jobs" im im_test links devices jxl_dump
+python3 ./build -B "$build_dir" -j "$jobs" im im_test links devices jxl_dump device_uuid
 # Test controls must never ship in the production binary.
 python3 - "$build_dir/im" "$build_dir/im_test" <<'PY_CHECK'
 from pathlib import Path

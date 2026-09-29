@@ -27,7 +27,19 @@ using namespace stl;
 //   swapchain-suboptimal=K  the same, reporting it suboptimal instead
 //   encoder-alloc=K   K encoder allocations pass, the one after fails as
 //                     out of memory
+//   encoder-output=K  K JPEG XL output steps pass, the one after fails
+//   count=NAME:N      the device answers N to the count named NAME
+//                     (devices, queue-families, surface-formats)
+//   discrete-gpu=1    the physical device says it is a discrete GPU
+//   no-wsi=1          the queue cannot present to the surface
+//   image-counts=MIN:MAX  the surface wants MIN images at least and
+//                     allows MAX at most
 namespace {
+    struct NamedCount {
+        StringView what;
+        u32 count;
+    };
+
     struct TestChaosMonkey: public ChaosMonkey {
         int memoryFaults = 0;
         int vulkanSkip = -1;
@@ -36,6 +48,13 @@ namespace {
         int swapchainSkip = -1;
         VkResult swapchainFault = VK_SUCCESS;
         int encoderAllocSkip = -1;
+        int encoderOutputSkip = -1;
+        Vector<NamedCount> counts;
+        bool discreteGpu = false;
+        bool noWsi = false;
+        bool imageCountsSet = false;
+        u32 minImages = 0;
+        u32 maxImages = 0;
 
         explicit TestChaosMonkey(StringView script);
 
@@ -48,6 +67,11 @@ namespace {
         bool deviceExtension(const char* name, bool offered) override;
         VkResult swapchain(VkResult result) override;
         bool encoderAlloc(bool pending) override;
+        bool encoderOutput(bool produced) override;
+        u32 count(StringView what, u32 count) override;
+        VkPhysicalDeviceType deviceType(VkPhysicalDeviceType type) override;
+        VkBool32 surfaceSupport(VkBool32 supported) override;
+        void imageCounts(VkSurfaceCapabilitiesKHR& caps) override;
     };
 
     // a counted fault: fires while the count lasts, each firing spends one
@@ -107,6 +131,26 @@ void TestChaosMonkey::armFault(StringView fault, StringView arg) {
         swapchainFault = fault == "swapchain"_sv ? VK_ERROR_OUT_OF_DATE_KHR : VK_SUBOPTIMAL_KHR;
     } else if (fault == "encoder-alloc"_sv) {
         encoderAllocSkip = (int)arg.stou();
+    } else if (fault == "encoder-output"_sv) {
+        encoderOutputSkip = (int)arg.stou();
+    } else if (fault == "count"_sv) {
+        StringView what, n;
+
+        if (arg.split(':', what, n)) {
+            counts.pushBack({what, (u32)n.stou()});
+        }
+    } else if (fault == "discrete-gpu"_sv) {
+        discreteGpu = true;
+    } else if (fault == "no-wsi"_sv) {
+        noWsi = true;
+    } else if (fault == "image-counts"_sv) {
+        StringView lo, hi;
+
+        if (arg.split(':', lo, hi)) {
+            imageCountsSet = true;
+            minImages = (u32)lo.stou();
+            maxImages = (u32)hi.stou();
+        }
     }
 }
 
@@ -160,6 +204,39 @@ bool TestChaosMonkey::encoderAlloc(bool pending) {
     return false;
 }
 
+bool TestChaosMonkey::encoderOutput(bool produced) {
+    if (!failsOnce(encoderOutputSkip)) {
+        return produced;
+    }
+
+    return false;
+}
+
+u32 TestChaosMonkey::count(StringView what, u32 count) {
+    for (const NamedCount& named : counts) {
+        if (named.what == what) {
+            return named.count;
+        }
+    }
+
+    return count;
+}
+
+VkPhysicalDeviceType TestChaosMonkey::deviceType(VkPhysicalDeviceType type) {
+    return discreteGpu ? VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU : type;
+}
+
+VkBool32 TestChaosMonkey::surfaceSupport(VkBool32 supported) {
+    return noWsi ? VK_FALSE : supported;
+}
+
+void TestChaosMonkey::imageCounts(VkSurfaceCapabilitiesKHR& caps) {
+    if (imageCountsSet) {
+        caps.minImageCount = minImages;
+        caps.maxImageCount = maxImages;
+    }
+}
+
 ChaosMonkey* ChaosMonkey::create(ObjPool& pool) {
     const char* script = getenv("IM_CHAOS");
 
@@ -175,6 +252,11 @@ namespace {
         bool deviceExtension(const char* name, bool offered) override;
         VkResult swapchain(VkResult result) override;
         bool encoderAlloc(bool pending) override;
+        bool encoderOutput(bool produced) override;
+        u32 count(StringView what, u32 count) override;
+        VkPhysicalDeviceType deviceType(VkPhysicalDeviceType type) override;
+        VkBool32 surfaceSupport(VkBool32 supported) override;
+        void imageCounts(VkSurfaceCapabilitiesKHR& caps) override;
     };
 }
 
@@ -199,6 +281,25 @@ VkResult IdleChaosMonkey::swapchain(VkResult result) {
 
 bool IdleChaosMonkey::encoderAlloc(bool pending) {
     return pending;
+}
+
+bool IdleChaosMonkey::encoderOutput(bool produced) {
+    return produced;
+}
+
+u32 IdleChaosMonkey::count(StringView, u32 count) {
+    return count;
+}
+
+VkPhysicalDeviceType IdleChaosMonkey::deviceType(VkPhysicalDeviceType type) {
+    return type;
+}
+
+VkBool32 IdleChaosMonkey::surfaceSupport(VkBool32 supported) {
+    return supported;
+}
+
+void IdleChaosMonkey::imageCounts(VkSurfaceCapabilitiesKHR&) {
 }
 
 ChaosMonkey* ChaosMonkey::create(ObjPool& pool) {

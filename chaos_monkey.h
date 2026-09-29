@@ -1,6 +1,7 @@
 #pragma once
 
 #include <std/str/view.h>
+#include <std/sys/types.h>
 
 #include <vulkan/vulkan.h>
 
@@ -30,6 +31,17 @@ struct ChaosMonkey {
     // and info structs, libjxl's encoder and frame settings), handed over
     // before the call: false stands for it failing, and nothing is made
     virtual bool encoderAlloc(bool pending) = 0;
+    // whether the JPEG XL encoder produced its output, as it answered
+    virtual bool encoderOutput(bool produced) = 0;
+    // a count the device answered, by the name a scenario gives it: the
+    // physical devices, a device's queue families, a surface's formats
+    virtual u32 count(stl::StringView what, u32 count) = 0;
+    // a physical device's type, as the device answered
+    virtual VkPhysicalDeviceType deviceType(VkPhysicalDeviceType type) = 0;
+    // whether the queue may present to the surface, as the device answered
+    virtual VkBool32 surfaceSupport(VkBool32 supported) = 0;
+    // the surface's image count limits, as queried
+    virtual void imageCounts(VkSurfaceCapabilitiesKHR& caps) = 0;
 
     static ChaosMonkey* create(stl::ObjPool& pool);
 };

@@ -3,6 +3,7 @@ driver's virtual input devices on it, and the tool under test as its
 client. Scenarios drive the tool through real input and check what it
 draws (grim) and what it leaves on disk."""
 
+import fcntl
 import json
 import math
 import os
@@ -46,8 +47,10 @@ class Session:
     def __init__(self, name, width=1280, height=800):
         self.name = name
         self.binary = Path(os.environ["IM_E2E_BINARY"]).resolve()
-        self.devices_binary = Path(os.environ["IM_E2E_DEVICES"]).resolve()
-        self.jxl_dump = Path(os.environ["IM_E2E_JXL_DUMP"]).resolve()
+        helpers = Path(os.environ["IM_E2E_HELPERS"]).resolve()
+        self.devices_binary = helpers / "devices"
+        self.jxl_dump = helpers / "jxl_dump"
+        self.device_uuid_binary = helpers / "device_uuid"
         self.globals = {}
         self.artifacts = Path(os.environ["IM_E2E_ARTIFACTS"]).resolve()
         self.artifacts.mkdir(parents=True, exist_ok=True)
@@ -136,35 +139,45 @@ class Session:
         if interface not in self.globals:
             raise Skip(f"the compositor offers no {interface}")
 
+    def skip(self, reason):
+        raise Skip(reason)
+
+    def device_uuid(self):
+        """The Vulkan device the tool gets, as a compositor would name it
+        on a shared buffer."""
+        return subprocess.run([str(self.device_uuid_binary)], env=self.env, stdout=subprocess.PIPE, check=True, timeout=30).stdout.decode().strip()
+
     def environment(self, unset, overrides):
         env = {key: value for key, value in self.env.items() if key not in unset}
         env.update(overrides)
         return env
 
-    def start(self, command, label, stdin=None, cwd=None, unset=(), **environment):
+    def start(self, command, label, stdin=None, cwd=None, unset=(), fd3=None, **environment):
+        """A process of the session; fd3 names a descriptor it gets as its
+        fd 3, as the compositor hands the tool a capture."""
         log = (self.artifacts / f"{label}.log").open("wb")
         self.logs.append(log)
         process = subprocess.Popen(
             command, env=self.environment(unset, environment), stdout=log, stderr=subprocess.STDOUT,
-            start_new_session=False, stdin=stdin, cwd=cwd,
+            start_new_session=False, stdin=stdin, cwd=cwd, **as_fd3(fd3),
         )
         self.processes.append(process)
         return process
 
     # ---- the tool under test ----
 
-    def launch(self, *args, cwd=None, mapped=True, unset=(), **environment):
+    def launch(self, *args, cwd=None, mapped=True, unset=(), fd3=None, **environment):
         """Start imscreenshot with args and the given environment (the
         compositor's IMWAY_SHOT_* words, IMGUI_SCALE, IM_CHAOS; unset names
         the variables it must not see); a mapped launch waits for its
         window."""
         self.clients += 1
-        self.client = self.start([SCREENSHOT, *args], f"client{self.clients}", cwd=cwd, unset=unset, **environment)
+        self.client = self.start([SCREENSHOT, *args], f"client{self.clients}", cwd=cwd, unset=unset, fd3=fd3, **environment)
         if mapped:
             self.wait(lambda: self.windows(), "mapped window")
         return self.client
 
-    def run(self, *args, command=SCREENSHOT, cwd=None, timeout=60, unset=(), **environment):
+    def run(self, *args, command=SCREENSHOT, cwd=None, timeout=60, unset=(), fd3=None, **environment):
         """Run imscreenshot (or the one binary itself, by its path as
         command) to its end without a window: the exit status and its
         output."""
@@ -173,7 +186,7 @@ class Session:
         with log.open("wb") as out:
             process = subprocess.run(
                 [str(command), *args], env=self.environment(unset, environment), stdout=out, stderr=subprocess.STDOUT,
-                cwd=cwd, timeout=timeout,
+                cwd=cwd, timeout=timeout, **as_fd3(fd3),
             )
         return process.returncode, log.read_text(errors="replace")
 
@@ -445,6 +458,32 @@ class Session:
             self.cleanup()
 
 
+def as_fd3(fd):
+    """Popen arguments that hand a descriptor to the child as its fd 3."""
+    if fd is None:
+        return {}
+    return {"pass_fds": (fd,), "preexec_fn": lambda: os.dup2(fd, 3)}
+
+
+UDMABUF_CREATE = 0x40187542
+UDMABUF_FLAGS_CLOEXEC = 1
+
+
+def udmabuf(pixels):
+    """A dma-buf holding these bytes, made through udmabuf from a sealed
+    memfd, as the compositor hands the scanout buffer over; None where the
+    kernel offers no udmabuf."""
+    if not os.path.exists("/dev/udmabuf"):
+        return None
+    size = (len(pixels) + 4095) // 4096 * 4096
+    memfd = os.memfd_create("shot", os.MFD_ALLOW_SEALING)
+    os.ftruncate(memfd, size)
+    os.pwrite(memfd, pixels, 0)
+    fcntl.fcntl(memfd, fcntl.F_ADD_SEALS, fcntl.F_SEAL_SHRINK)
+    with open("/dev/udmabuf", "r+b", buffering=0) as device:
+        return fcntl.ioctl(device.fileno(), UDMABUF_CREATE, struct.pack("=IIQQ", memfd, UDMABUF_FLAGS_CLOEXEC, 0, size))
+
+
 def differing(a, b):
     """Pixels that differ between two captures of one size."""
     (w, h, x), (_, _, y) = a, b
@@ -560,6 +599,62 @@ def hdr_png_grey(nits):
     """The byte a neutral pixel of this luminance lands on in the PNG the
     tool saves from a PQ frame: the PQ code decoded, mapped, sRGB at 203."""
     return srgb8(sdr_tone_map(nits) / SDR_WHITE_NITS)
+
+
+# CIE xy chromaticities in millionths: red, green, blue, white
+SRGB_PRIMARIES = (640000, 330000, 300000, 600000, 150000, 60000, 312700, 329000)
+BT2020_PRIMARIES = (708000, 292000, 170000, 797000, 131000, 46000, 312700, 329000)
+
+
+def _multiply(a, b):
+    return [sum(a[row * 3 + k] * b[k * 3 + col] for k in range(3)) for row in range(3) for col in range(3)]
+
+
+def _apply(m, c):
+    return [m[0] * c[0] + m[1] * c[1] + m[2] * c[2], m[3] * c[0] + m[4] * c[1] + m[5] * c[2], m[6] * c[0] + m[7] * c[1] + m[8] * c[2]]
+
+
+def _inverse(m):
+    d = m[0] * (m[4] * m[8] - m[5] * m[7]) - m[1] * (m[3] * m[8] - m[5] * m[6]) + m[2] * (m[3] * m[7] - m[4] * m[6])
+    return [x / d for x in (
+        m[4] * m[8] - m[5] * m[7], m[2] * m[7] - m[1] * m[8], m[1] * m[5] - m[2] * m[4],
+        m[5] * m[6] - m[3] * m[8], m[0] * m[8] - m[2] * m[6], m[2] * m[3] - m[0] * m[5],
+        m[3] * m[7] - m[4] * m[6], m[1] * m[6] - m[0] * m[7], m[0] * m[4] - m[1] * m[3])]
+
+
+def _rgb_to_xyz(c):
+    xr, yr, xg, yg, xb, yb, xw, yw = (v / 1000000 for v in c)
+    primaries = [xr / yr, xg / yg, xb / yb, 1, 1, 1, (1 - xr - yr) / yr, (1 - xg - yg) / yg, (1 - xb - yb) / yb]
+    scale = _apply(_inverse(primaries), [xw / yw, 1, (1 - xw - yw) / yw])
+    return [primaries[row * 3 + col] * scale[col] for row in range(3) for col in range(3)]
+
+
+def hdr_png_pixel(nits):
+    """The RGB bytes a linear BT.2020 colour, in nits, lands on in the PNG
+    the tool saves from a PQ frame: color.cpp's SDR mapping, the chroma
+    held inside the sRGB gamut, then sRGB at 203."""
+    scene = _rgb_to_xyz(BT2020_PRIMARIES)
+    target = _rgb_to_xyz(SRGB_PRIMARIES)
+    to_target = _multiply(_inverse(target), scene)
+    from_target = _multiply(_inverse(scene), target)
+    luma = target[3:6]
+    t = _apply(to_target, nits)
+    luminance = sum(l * c for l, c in zip(luma, t))
+    mapped = sdr_tone_map(luminance)
+    if luminance > 1e-9:
+        t = [c * mapped / luminance for c in t]
+    else:
+        t, mapped = [0, 0, 0], 0
+    chroma = 1.0
+    for c in t:
+        if c < 0:
+            chroma = min(chroma, mapped / (mapped - c))
+        elif c > SDR_WHITE_NITS:
+            chroma = min(chroma, (SDR_WHITE_NITS - mapped) / (c - mapped))
+    chroma = max(0.0, min(1.0, chroma))
+    t = [mapped + (c - mapped) * chroma for c in t]
+    out = _apply(to_target, _apply(from_target, t))
+    return tuple(srgb8(c / SDR_WHITE_NITS) for c in out)
 
 
 def png_size(path):
