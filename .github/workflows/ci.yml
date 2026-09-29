@@ -90,6 +90,16 @@ jobs:
             "$GCC_IMAGE" sh dev/ci_linux.sh test gcc \
             2>&1 | tee "$RUNNER_TEMP/tests-glibc.log"
 
+      - name: Upload what the failed scenarios captured
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tests-glibc-evidence
+          path: .build/ci-*/evidence
+          if-no-files-found: ignore
+          retention-days: 7
+          compression-level: 9
+
       - name: Summarize failure
         if: failure()
         run: |
@@ -124,6 +134,16 @@ jobs:
             --volume "$GITHUB_WORKSPACE:/workspace" --workdir /workspace \
             "$ALPINE_IMAGE" sh dev/ci_linux.sh test clang \
             2>&1 | tee "$RUNNER_TEMP/tests-musl.log"
+
+      - name: Upload what the failed scenarios captured
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tests-musl-evidence
+          path: .build/ci-*/evidence
+          if-no-files-found: ignore
+          retention-days: 7
+          compression-level: 9
 
       - name: Summarize failure
         if: failure()
@@ -160,6 +180,16 @@ jobs:
             "$UBUNTU_IMAGE" sh dev/ci_linux.sh asan clang \
             2>&1 | tee "$RUNNER_TEMP/tests-asan.log"
 
+      - name: Upload what the failed scenarios captured
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tests-asan-evidence
+          path: .build/ci-*/evidence
+          if-no-files-found: ignore
+          retention-days: 7
+          compression-level: 9
+
       - name: Summarize failure
         if: failure()
         run: |
@@ -194,6 +224,16 @@ jobs:
             --volume "$GITHUB_WORKSPACE:/workspace" --workdir /workspace \
             "$UBUNTU_IMAGE" sh dev/ci_linux.sh ubsan clang \
             2>&1 | tee "$RUNNER_TEMP/tests-ubsan.log"
+
+      - name: Upload what the failed scenarios captured
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tests-ubsan-evidence
+          path: .build/ci-*/evidence
+          if-no-files-found: ignore
+          retention-days: 7
+          compression-level: 9
 
       - name: Summarize failure
         if: failure()
@@ -232,6 +272,16 @@ jobs:
             --volume "$GITHUB_WORKSPACE:/workspace" --workdir /workspace \
             "$UBUNTU_IMAGE" sh dev/ci_linux.sh coverage clang \
             2>&1 | tee "$RUNNER_TEMP/coverage.log"
+
+      - name: Upload what the failed scenarios captured
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-evidence
+          path: .build/ci-*/evidence
+          if-no-files-found: ignore
+          retention-days: 7
+          compression-level: 9
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1

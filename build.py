@@ -23,6 +23,7 @@ flags.allow({
     "filter": {"descr": "glob restricting which scenarios build", "default": ""},
     "shard": {"descr": "K/N: run only the K-th of N stable slices of the scenarios (0-based)", "default": ""},
     "runtime": {"descr": "a short dir for the scenarios' runtime dirs (Wayland sockets)", "default": ""},
+    "evidence": {"descr": "a dir that keeps a failed scenario's captures and logs, under its name", "default": ""},
 })
 
 
@@ -125,7 +126,8 @@ install(im, links)
 # JSON verdict, always exiting 0 so a failure does not abort the graph. One
 # final `test` node depends on every scenario node, reads the verdicts and
 # fails `./build test`. -Dfilter=GLOB restricts which scenarios build,
-# -Druntime=DIR keeps their Wayland sockets under a short path.
+# -Druntime=DIR keeps their Wayland sockets under a short path, and
+# -Devidence=DIR keeps what a failed one captured, outside the graph.
 e2e_protocols = []
 e2e_protocol_headers = []
 for xml, name in [
@@ -181,6 +183,8 @@ for scenario in sorted(set(build.glob("$(S)/tst/*.py")) - set(harness)):
     ]
     if flags.runtime:
         cmd += ["--runtime", flags.runtime]
+    if flags.evidence:
+        cmd += ["--evidence", flags.evidence]
     test_verdicts.append(out)
     test_nodes.append(command(
         name=f"test_{name}",

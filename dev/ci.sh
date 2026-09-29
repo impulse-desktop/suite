@@ -57,9 +57,10 @@ if [[ "$mode" == build ]]; then
 fi
 # -k: a scenario node never fails, but a build error in one must not stop
 # the others; the final test node reads every verdict. The scenarios'
-# Wayland sockets need a short path.
+# Wayland sockets need a short path; what a failed one captured is kept
+# for the job's artifacts.
 status=0
-python3 ./build -B "$build_dir" -j "$jobs" -k -Druntime=/tmp/im-e2e test || status=1
+python3 ./build -B "$build_dir" -j "$jobs" -k -Druntime=/tmp/im-e2e -Devidence="$build_dir/evidence" test || status=1
 if [[ "$mode" == coverage ]]; then
     bash dev/ci_coverage.sh "$build_dir" "$build_dir/profiles"
 fi

@@ -5,7 +5,10 @@
 # devices helper are dependencies, so they are built by the time we run. The
 # scenario gets a scratch dir of its own for its compositor, logs and
 # captures, runs under a timeout, and its verdict {status, seconds, detail,
-# artifacts} goes to --out with the tails of the logs it left behind.
+# artifacts} goes to --out with the tails of the logs it left behind. With
+# --evidence DIR, what a failed scenario captured (its PNGs, with the window
+# trees they came with) and its whole logs are kept under DIR/<name>/: the
+# graph knows only the verdict, this is for the person reading a failure.
 #
 # We ALWAYS exit 0: a failure is recorded in the JSON, not in the process
 # exit code, so the build graph does not abort and every scenario still
@@ -103,6 +106,12 @@ def run(name, args):
             status, detail = TIMEOUT, f"no verdict after {args.timeout:g}s: {last_line(tail(log, 5))}"
     seconds = time.monotonic() - started
     evidence = collect(artifacts) if status != PASS else {}
+    if args.evidence:
+        kept = os.path.join(args.evidence, name)
+        shutil.rmtree(kept, ignore_errors=True)
+        if status != PASS:
+            os.makedirs(args.evidence, exist_ok=True)
+            shutil.copytree(artifacts, kept)
     shutil.rmtree(artifacts, ignore_errors=True)
     return dict(status=status, seconds=round(seconds, 2), detail=detail, artifacts=evidence)
 
@@ -113,6 +122,7 @@ def main():
     parser.add_argument("--binary", required=True, help="the tools binary under test (im_test)")
     parser.add_argument("--devices", required=True, help="the driver's input devices helper")
     parser.add_argument("--out", required=True)
+    parser.add_argument("--evidence", default="", help="where a failed scenario's captures and logs are kept, under its name")
     parser.add_argument("--runtime", default="", help="where the scenario's runtime dir goes (short: it holds Wayland sockets)")
     parser.add_argument("--timeout", type=float, default=120)
     args = parser.parse_args()

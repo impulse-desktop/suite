@@ -55,7 +55,9 @@ runs it and writes a JSON verdict with the tails of its logs, and the
 final `test` node (`dev/aggregate_tests.py`) reads every verdict, prints
 the failures and fails the build. So `-j N` runs scenarios side by side,
 a scenario reruns only when it, the harness or the tools changed, and
-`-Dshard=K/N` gives a CI job its stable slice. The tool's own Vulkan has
+`-Dshard=K/N` gives a CI job its stable slice; `-Devidence=DIR` keeps
+what a failed scenario captured (its PNGs and logs) under `DIR/<name>/`
+for a person to look at. The tool's own Vulkan has
 to present to that Sway: lavapipe does, over wl_shm (`VK_DRIVER_FILES`
 names its ICD in CI); a hardware driver wants the dma-bufs a GPU-rendered
 Sway offers. `-Druntime=DIR` keeps the scenarios' Wayland sockets under a
