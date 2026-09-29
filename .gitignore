@@ -8,3 +8,5 @@ out/
 __pycache__/
 .claude/settings.local.json
 .#*
+/links
+/devices

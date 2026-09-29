@@ -46,10 +46,10 @@ libdisplay-info. `dev/style.py` formats the tree.
 ./build test -Dfilter='save_*'    # some of them
 ```
 
-Each `tst/scenarios/*.py` runs `im_test` as a client of an isolated
+Each scenario in `tst/` runs `im_test` as a client of an isolated
 headless Sway (drawn by pixman), drives it through virtual input devices
-(`tst/support/devices.cpp`, the wlroots virtual pointer and keyboard) and
-checks what grim captures and what lands on disk; `tst/session.py` is the
+(`tst/devices.cpp`, the wlroots virtual pointer and keyboard) and checks
+what grim captures and what lands on disk; `tst/session.py` is the
 fixture. Every scenario is a node of the build graph: `dev/run_test.py`
 runs it and writes a JSON verdict with the tails of its logs, and the
 final `test` node (`dev/aggregate_tests.py`) reads every verdict, prints

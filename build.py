@@ -118,21 +118,21 @@ install(im, links)
 
 
 # ---- the scenarios: the tools under a real compositor ----------------------
-# Each tst/scenarios/*.py drives im_test as a client of its own headless
-# Sway through the driver's virtual devices (tst/support/devices.cpp) and
-# checks what it draws and what it leaves on disk. Each scenario is a
-# command node: dev/run_test.py runs it and writes a JSON verdict, always
-# exiting 0 so a failure does not abort the graph. One final `test` node
-# depends on every scenario node, reads the verdicts and fails `./build
-# test`. -Dfilter=GLOB restricts which scenarios build, -Druntime=DIR
-# keeps their Wayland sockets under a short path.
+# Each tst/*.py but the fixture (session.py) drives im_test as a client of
+# its own headless Sway through the driver's virtual devices
+# (tst/devices.cpp) and checks what it draws and what it leaves on disk.
+# Each scenario is a command node: dev/run_test.py runs it and writes a
+# JSON verdict, always exiting 0 so a failure does not abort the graph. One
+# final `test` node depends on every scenario node, reads the verdicts and
+# fails `./build test`. -Dfilter=GLOB restricts which scenarios build,
+# -Druntime=DIR keeps their Wayland sockets under a short path.
 e2e_protocols = []
 e2e_protocol_headers = []
 for xml, name in [
     ("wlr-virtual-pointer-unstable-v1", "virtual-pointer"),
     ("virtual-keyboard-unstable-v1", "virtual-keyboard"),
 ]:
-    source = f"$(S)/tst/support/{xml}.xml"
+    source = f"$(S)/tst/{xml}.xml"
     header = f"$(B)/e2e-protocol/{name}-client.h"
     code = f"$(B)/e2e-protocol/{name}-code.h"
     e2e_protocol_headers += [header, code]
@@ -151,7 +151,7 @@ for xml, name in [
 devices = program(
     name="devices",
     output="$(B)/e2e/devices",
-    srcs=[{"src": "$(S)/tst/support/devices.cpp", "inputs": e2e_protocol_headers}],
+    srcs=[{"src": "$(S)/tst/devices.cpp", "inputs": e2e_protocol_headers}],
     cflags=["-I$(B)/e2e-protocol"],
     deps=[*e2e_protocols, wayland_client, xkb],
 )
@@ -165,7 +165,7 @@ harness = ["$(S)/tst/session.py", "$(S)/dev/run_test.py"]
 
 test_nodes = []
 test_verdicts = []
-for scenario in sorted(build.glob("$(S)/tst/scenarios/*.py")):
+for scenario in sorted(set(build.glob("$(S)/tst/*.py")) - set(harness)):
     name = os.path.basename(scenario)[:-len(".py")]
     if flags.filter and not fnmatch.fnmatch(name, flags.filter):
         continue

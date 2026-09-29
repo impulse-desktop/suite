@@ -68,8 +68,8 @@ def run(name, args):
         "IM_E2E_BINARY": os.path.abspath(args.binary),
         "IM_E2E_DEVICES": os.path.abspath(args.devices),
         "IM_E2E_ARTIFACTS": artifacts,
-        # the fixture, tst/session.py, next to the scenarios' directory
-        "PYTHONPATH": os.path.dirname(os.path.dirname(os.path.abspath(args.scenario))),
+        # the fixture, tst/session.py, next to the scenario
+        "PYTHONPATH": os.path.dirname(os.path.abspath(args.scenario)),
     }
     if args.runtime:
         os.makedirs(args.runtime, exist_ok=True)
