@@ -2611,6 +2611,14 @@ int mainScreenshot(StringView path) {
         int action = 0;
         StringView configuredAction(getenv("IMWAY_SHOT_ACTION") ? getenv("IMWAY_SHOT_ACTION") : "editor");
 
+        // what the error panel shows goes to the log too: a save without a
+        // window would otherwise fail without a word
+        auto report = [&] {
+            if (!errText.empty()) {
+                sysE << "im screenshot: "_sv << sv(errText) << endL;
+            }
+        };
+
         // errText is still empty here whenever the load succeeded: only the
         // load's own failure has written it yet
         if (loaded && configuredAction == "save"_sv) {
@@ -2619,6 +2627,7 @@ int mainScreenshot(StringView path) {
             // clipboard path returns.
             action = 1;
         } else {
+            report();
             action = runUi(driver);
         }
 
@@ -2650,6 +2659,7 @@ int mainScreenshot(StringView path) {
 
             if (!errText.empty()) {
                 // a save-mode window was never shown; runUi maps it now
+                report();
                 runUi(driver);
             }
         }
