@@ -7,7 +7,9 @@ from session import KEY_ZERO, Session
 
 with Session("initial_size") as s:
     shot = s.capture_file("frame.shot", 1280, 800)
-    s.launch(str(shot))
+    # the protocol trace is this scenario's evidence: which geometry each
+    # commit carried, and what the compositor configured back
+    s.launch(str(shot), WAYLAND_DEBUG="1")
     node = s.focus()
     assert s.size() == (848, 400), f"the editor opened at {s.size()}, expected 848x400"
     s.ipc(f'[con_id={node["id"]}] resize set 950 450')

@@ -6,6 +6,10 @@
 
 #include <string.h>
 
+#ifdef IM_FOR_TESTS
+    #include <sys/prctl.h>
+#endif
+
 using namespace stl;
 
 namespace {
@@ -63,6 +67,12 @@ namespace {
 }
 
 int main(int argc, char** argv) {
+#ifdef IM_FOR_TESTS
+    // the scenario that started this tool may read its stacks when it fails
+    // with the tool alive; Yama lets only an ancestor attach otherwise
+    prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY, 0, 0, 0);
+#endif
+
     // a link named after a tool runs it: imscreenshot ARGS is im screenshot
     // ARGS; any other name (im, im_test) takes the tool from the first word
     StringView self = baseName(argv[0]);
