@@ -42,8 +42,8 @@ def interpolate(table, nits):
 
 with Session("linear_blend") as s:
     s.require("wp_color_manager_v1")
-    w, h = 1280, 800
-    band = h // len(NITS)
+    w, band = 1280, 72
+    h = band * len(NITS)
     pixels = b"".join(bytes([round(pq_encode(n) * 255)] * 3 + [255]) * (w * band) for n in NITS)
     shot = s.capture_file("bands.shot", w, h, pixels=pixels)
     s.launch(str(shot), IMWAY_SHOT_COLOR="1:203")
