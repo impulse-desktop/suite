@@ -28,7 +28,8 @@ with Session("panel_mouse") as s:
     s.key(KEY_LEFTCTRL, 1)
     s.click(100, 27)
     s.key(KEY_LEFTCTRL, 0)
-    s.changed(opened, "editing")
+    # the field takes the slider's place, a few hundred pixels' worth
+    s.changed(opened, "editing", threshold=200)
     s.pointer(120, 27)
     s.settled("hovering")
     s.close()

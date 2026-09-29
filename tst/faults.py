@@ -55,8 +55,9 @@ with Session("faults") as s:
         assert code == 1 and report in log, f"{fault}: not reported as {report!r} (rc={code}):\n{log}"
 
     # and answers the tool takes in its stride: a discrete GPU (the first
-    # one is taken), a surface wanting more images than it allows
-    for fault in ("discrete-gpu=1", "image-counts=4:3"):
+    # one is taken), a surface wanting more images than it allows (the
+    # count it gets still within what the driver really allows)
+    for fault in ("discrete-gpu=1", "image-counts=6:5"):
         s.launch(str(shot), IM_CHAOS=fault)
         s.focus()
         s.wait(drawn, f"{fault}: the editor drawn")

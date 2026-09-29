@@ -184,10 +184,18 @@ class Session:
         self.clients += 1
         log = self.artifacts / f"client{self.clients}.log"
         with log.open("wb") as out:
-            process = subprocess.run(
+            process = subprocess.Popen(
                 [str(command), *args], env=self.environment(unset, environment), stdout=out, stderr=subprocess.STDOUT,
-                cwd=cwd, timeout=timeout, **as_fd3(fd3),
+                cwd=cwd, **as_fd3(fd3),
             )
+            try:
+                process.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                # where a tool that never ended stands, before it is killed
+                self.stacks(f"client{self.clients}", process.pid)
+                process.kill()
+                process.wait()
+                raise
         return process.returncode, log.read_text(errors="replace")
 
     def finished(self, timeout=10):
@@ -420,15 +428,15 @@ class Session:
         if errors:
             raise RuntimeError("; ".join(errors))
 
-    def stacks(self, label):
-        """The tool's threads' stacks, kept as <label>.stack: a scenario that
+    def stacks(self, label, pid=None):
+        """A tool's threads' stacks, kept as <label>.stack: a scenario that
         timed out on a tool still alive says where it stands."""
         gdb = shutil.which("gdb")
         if gdb is None:
             return
         try:
             result = subprocess.run(
-                [gdb, "-p", str(self.client.pid), "-batch", "-nx", "-ex", "set pagination off", "-ex", "thread apply all bt",
+                [gdb, "-p", str(pid or self.client.pid), "-batch", "-nx", "-ex", "set pagination off", "-ex", "thread apply all bt",
                  "-ex", "detach", "-ex", "quit"],
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30,
             )
