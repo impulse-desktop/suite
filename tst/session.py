@@ -467,10 +467,19 @@ class Session:
 
 
 def as_fd3(fd):
-    """Popen arguments that hand a descriptor to the child as its fd 3."""
+    """Popen arguments that hand a descriptor to the child as its fd 3.
+    The hook's dup2 makes fd 3 inheritable in the child; nothing else is
+    (Python's own descriptors close on exec), so close_fds stays off: on,
+    Python would close that fresh fd 3 right after the hook, as it keeps
+    only what pass_fds lists."""
     if fd is None:
         return {}
-    return {"pass_fds": (fd,), "preexec_fn": lambda: os.dup2(fd, 3)}
+
+    def take():
+        os.dup2(fd, 3)
+        os.set_inheritable(3, True)
+
+    return {"close_fds": False, "preexec_fn": take}
 
 
 UDMABUF_CREATE = 0x40187542
