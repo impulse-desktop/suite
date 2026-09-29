@@ -1,0 +1,40 @@
+# impulse suite
+
+[![CI](https://github.com/impulse-desktop/suite/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/impulse-desktop/suite/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/impulse-desktop/suite/branch/main/graph/badge.svg)](https://app.codecov.io/gh/impulse-desktop/suite/tree/main)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![C++23](https://img.shields.io/badge/C%2B%2B-23-informational)](STYLE.md)
+
+The desktop tools of the impulse desktop, one binary: `im`. Each tool is a
+Wayland client drawn with the vendored ImGui on Vulkan, windowed through
+the vendored [plt](https://github.com/pg83/plt) platform layer, and lives
+in its own process.
+
+```
+im screenshot fd:3      # the screenshot editor the compositor spawns
+imscreenshot shot.imw   # the same tool, by its link
+```
+
+A link named `im<tool>` runs that tool under its own name; `im <tool>`
+does the same from the one binary. Tools so far:
+
+- `screenshot` — crops and saves the image the
+  [shell](https://github.com/impulse-desktop/shell) hands over on the
+  screenshot chord: a self-describing memfd, or on KMS the scanout dma-buf
+  itself, encoded to PNG or JPEG XL, SDR or HDR.
+
+Single-threaded by design. Every object lives in a pool; the C++ standard
+library is not used, the vocabulary comes from
+[libstd](https://github.com/pg83/std). The codebase follows
+[STYLE.md](STYLE.md).
+
+## Building
+
+```
+./build            # .build/im and the im<tool> links
+./build im_test    # the test build: fault seam and trace lines compiled in
+```
+
+The build wants clang, `pkg-config`, `wayland-scanner`, `glslangValidator`
+and the development files of wayland-client, vulkan, libpng, libjxl and
+libdisplay-info. `dev/style.py` formats the tree.

@@ -1,0 +1,23 @@
+codecov:
+  branch: main
+
+coverage:
+  precision: 2
+  round: down
+  range: "40...90"
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 0.5%
+        informational: false
+    patch: off
+
+comment:
+  layout: "reach, diff, files"
+  require_changes: false
+
+ignore:
+  - "tst/**/*"
+  - "dev/**/*"
+  - "ext/**/*"

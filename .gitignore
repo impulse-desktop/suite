@@ -1,0 +1,10 @@
+/.build*/
+/.b-*/
+/im
+/im_test
+/imscreenshot
+build-*/
+out/
+__pycache__/
+.claude/settings.local.json
+.#*

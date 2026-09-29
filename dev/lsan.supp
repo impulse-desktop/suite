@@ -1,0 +1,8 @@
+# LeakSanitizer suppressions for the test suite.
+#
+# The headless compositor renders through the host's lavapipe, whose shader
+# pipeline lives in libLLVM. Both leak small objects of their own on the
+# abrupt exit paths a scenario like gpu_fatal forces; nothing in imway holds
+# those allocations.
+leak:libvulkan_lvp.so
+leak:libLLVM

@@ -1,0 +1,4 @@
+# Only libstd context-switch assembly entry points; plt stays fully instrumented.
+[clang]
+!fun:*ContextImpl*trampoline*
+!fun:*ContextImpl*swapContext*
