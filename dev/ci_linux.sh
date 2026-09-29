@@ -46,5 +46,11 @@ if [ "$mode" != build ]; then
     export VK_ICD_FILENAMES="$VK_DRIVER_FILES"
     export LP_NUM_THREADS=2
     export VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation
+    # Alpine's sway (1.12) offers colour management, and with it the HDR10
+    # swapchain the HDR scenarios want, only under wlroots' Vulkan renderer;
+    # the compositor then draws through lavapipe as the tool does
+    if [ -f /etc/alpine-release ]; then
+        export IM_E2E_RENDERER=vulkan
+    fi
 fi
 exec bash dev/ci.sh "$mode"

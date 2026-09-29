@@ -160,6 +160,15 @@ devices = program(
     deps=[*e2e_protocols, wayland_client, xkb],
 )
 
+# the scenarios read a saved JPEG XL through this, as the image's own
+# code values
+jxl_dump = program(
+    name="jxl_dump",
+    output="$(B)/e2e/jxl_dump",
+    srcs=["$(S)/tst/jxl_dump.cpp"],
+    deps=[jxl],
+)
+
 # -Dshard=K/N splits the scenarios into N slices by a hash of the name, so
 # CI jobs can run them side by side; the slice a scenario falls in does not
 # move when others are added
@@ -181,6 +190,7 @@ for scenario in sorted(set(build.glob("$(S)/tst/*.py")) - set(harness)):
         "--scenario", scenario,
         "--binary", "$(B)/im_test",
         "--devices", "$(B)/e2e/devices",
+        "--jxl-dump", "$(B)/e2e/jxl_dump",
         "--out", out,
     ]
     if flags.runtime:
@@ -192,7 +202,7 @@ for scenario in sorted(set(build.glob("$(S)/tst/*.py")) - set(harness)):
         name=f"test_{name}",
         inputs=[scenario, *harness],
         outputs=[out],
-        deps=[im_test, devices],
+        deps=[im_test, devices, jxl_dump],
         cmd=cmd,
         descr="TS",
         color="cyan",

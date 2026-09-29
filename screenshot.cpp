@@ -621,6 +621,15 @@ namespace {
         }
     }
 
+    // a checked call a scenario can name (IM_CHAOS vulkan-at=SITE)
+    void vkcAt(StringView site, VkResult e) {
+        e = gChaos->vulkanAt(site, e);
+
+        if (e < 0) {
+            fail(sv(StringBuilder() << "vulkan error "_sv << (i64)e << " at "_sv << site));
+        }
+    }
+
     bool hasDeviceExtension(VkPhysicalDevice device, const char* name) {
         u32 count = 0;
 
@@ -688,6 +697,15 @@ namespace {
         }
 
         fail("no vulkan graphics queue"_sv);
+    }
+
+    // the test build's account of a step, for the scenarios to wait on
+    void traceText(StringView what) {
+#ifdef IM_FOR_TESTS
+        sysO << "im screenshot: "_sv << what << endL;
+#else
+        (void)what;
+#endif
     }
 
     void setupVulkan(ObjPool& shot, const char** exts, u32 nexts, const Image& img) {
@@ -1077,6 +1095,7 @@ namespace {
             fail("vulkan WSI has no BT.2020/PQ surface"_sv);
         }
 
+        traceText(hdr ? "surface HDR10 PQ"_sv : "surface sRGB"_sv);
         createPresentPass();
         createSwapchain((u32)w, (u32)h);
     }
@@ -1296,7 +1315,7 @@ namespace {
         rpci.pSubpasses = &subpass;
         rpci.dependencyCount = 2;
         rpci.pDependencies = dependencies;
-        vkc(vkCreateRenderPass(gDevice, &rpci, gAlloc, &gScenePass));
+        vkcAt("scene-pass"_sv, vkCreateRenderPass(gDevice, &rpci, gAlloc, &gScenePass));
 
         VkSamplerCreateInfo sci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
 

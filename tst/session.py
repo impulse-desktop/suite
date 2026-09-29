@@ -4,6 +4,7 @@ client. Scenarios drive the tool through real input and check what it
 draws (grim) and what it leaves on disk."""
 
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -11,9 +12,13 @@ import shutil
 import signal
 import struct
 import subprocess
+import sys
 import tempfile
 import time
 import zlib
+
+# the exit status of a skipped scenario, as dev/run_test.py reads it
+SKIPPED = 77
 
 # the tool under test is spawned by its link's name, as the compositor
 # spawns it: every scenario says which tool, this one has one
@@ -32,11 +37,18 @@ BTN_RIGHT = 273
 BTN_MIDDLE = 274
 
 
+class Skip(Exception):
+    """The compositor lacks what the scenario needs; the scenario ends as
+    skipped, saying what."""
+
+
 class Session:
     def __init__(self, name, width=1280, height=800):
         self.name = name
         self.binary = Path(os.environ["IM_E2E_BINARY"]).resolve()
         self.devices_binary = Path(os.environ["IM_E2E_DEVICES"]).resolve()
+        self.jxl_dump = Path(os.environ["IM_E2E_JXL_DUMP"]).resolve()
+        self.globals = {}
         self.artifacts = Path(os.environ["IM_E2E_ARTIFACTS"]).resolve()
         self.artifacts.mkdir(parents=True, exist_ok=True)
         self.width = width
@@ -93,6 +105,10 @@ class Session:
             self.env["SWAYSOCK"] = str(self.socket)
             self.devices = self.start([str(self.devices_binary)], "devices", stdin=subprocess.PIPE)
             self.wait(lambda: "READY" in (self.artifacts / "devices.log").read_text(), "virtual devices", client=False)
+            for line in (self.artifacts / "devices.log").read_text().splitlines():
+                word = line.split()
+                if len(word) == 3 and word[0] == "GLOBAL":
+                    self.globals[word[1]] = int(word[2])
             self.wait(lambda: any(item["type"] == "keyboard" for item in json.loads(
                 self.command("swaymsg", "-r", "-t", "get_inputs"))), "virtual keyboard", client=False)
             # the tool by its link's name, as the compositor spawns it
@@ -104,6 +120,11 @@ class Session:
         except BaseException:
             self.cleanup()
             raise
+
+    def require(self, interface):
+        """The compositor offers this global, or the scenario is skipped."""
+        if interface not in self.globals:
+            raise Skip(f"the compositor offers no {interface}")
 
     def environment(self, unset, overrides):
         env = {key: value for key, value in self.env.items() if key not in unset}
@@ -393,6 +414,10 @@ class Session:
         (self.artifacts / f"{label}.stack").write_text(text)
 
     def __exit__(self, kind, value, traceback):
+        if kind is Skip:
+            self.cleanup()
+            print(f"skip: {value}", flush=True)
+            sys.exit(SKIPPED)
         try:
             if kind is not None and self.client and self.client.poll() is None:
                 self.stacks(f"client{self.clients}")
@@ -433,6 +458,97 @@ def png(width, height, pixels):
     rows = b"".join(b"\0" + pixels[y * width * 3:(y + 1) * width * 3] for y in range(height))
     data = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack("!2I5B", width, height, 8, 2, 0, 0, 0))
     return data + chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b"")
+
+
+def jxl_pixels(session, path):
+    """A saved JPEG XL as width, height and its 16-bit RGB samples in the
+    image's own encoding (PQ code values for an HDR frame)."""
+    out = session.artifacts / (Path(path).stem + ".rgb16")
+    subprocess.run([str(session.jxl_dump), str(path), str(out)], check=True, timeout=30)
+    data = out.read_bytes()
+    header, _, pixels = data.partition(b"\n")
+    width, height = map(int, header.split())
+    return width, height, struct.unpack(f"<{width * height * 3}H", pixels)
+
+
+def png_pixels(path):
+    """A saved PNG's width, height and RGBA bytes: 8-bit, non-interlaced,
+    as the tool writes it."""
+    data = Path(path).read_bytes()
+    assert data[:8] == b"\x89PNG\r\n\x1a\n", f"{path} is not a PNG"
+    width, height, depth, kind = struct.unpack(">IIBB", data[16:26])
+    assert (depth, kind) == (8, 6), f"{path}: not 8-bit RGBA"
+    idat = b""
+    at = 8
+    while at < len(data):
+        size, name = struct.unpack(">I4s", data[at:at + 8])
+        if name == b"IDAT":
+            idat += data[at + 8:at + 8 + size]
+        at += 12 + size
+    raw = zlib.decompress(idat)
+    stride = width * 4
+    rows = []
+    previous = bytearray(stride)
+    for y in range(height):
+        kind = raw[y * (stride + 1)]
+        line = bytearray(raw[y * (stride + 1) + 1:(y + 1) * (stride + 1)])
+        for i in range(stride):
+            a = line[i - 4] if i >= 4 else 0
+            b = previous[i]
+            c = previous[i - 4] if i >= 4 else 0
+            if kind == 1:
+                line[i] = (line[i] + a) & 255
+            elif kind == 2:
+                line[i] = (line[i] + b) & 255
+            elif kind == 3:
+                line[i] = (line[i] + (a + b) // 2) & 255
+            elif kind == 4:
+                p = a + b - c
+                pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+                line[i] = (line[i] + (a if pa <= pb and pa <= pc else b if pb <= pc else c)) & 255
+        rows.append(bytes(line))
+        previous = line
+    return width, height, b"".join(rows)
+
+
+# ---- the tool's HDR arithmetic, for what it saves to be checked against
+PQ_M1, PQ_M2, PQ_C1, PQ_C2, PQ_C3 = 2610 / 16384, 2523 / 32, 3424 / 4096, 2413 / 128, 2392 / 128
+SDR_WHITE_NITS = 203.0
+
+
+def pq_encode(nits):
+    """The PQ code value, 0..1, of a luminance in nits."""
+    p = max(nits / 10000, 0) ** PQ_M1
+    return ((PQ_C1 + PQ_C2 * p) / (1 + PQ_C3 * p)) ** PQ_M2
+
+
+def pq_decode(code):
+    p = max(code, 0) ** (1 / PQ_M2)
+    return (max(p - PQ_C1, 0) / (PQ_C2 - PQ_C3 * p)) ** (1 / PQ_M1) * 10000
+
+
+def sdr_tone_map(nits):
+    """The tool's display mapping of a neutral luminance onto the SDR range
+    (color.cpp toneMap for the SDR output: a knee at 90% of 203 nits)."""
+    peak = SDR_WHITE_NITS
+    knee = peak * 0.9
+    if nits <= knee:
+        return nits
+    headroom = peak - knee
+    return peak - headroom * headroom / (headroom + nits - knee)
+
+
+def srgb8(linear):
+    """An sRGB byte of a linear value in 0..1, as the tool encodes a PNG."""
+    linear = min(max(linear, 0.0), 1.0)
+    encoded = linear * 12.92 if linear <= 0.0031308 else 1.055 * linear ** (1 / 2.4) - 0.055
+    return round(encoded * 255)
+
+
+def hdr_png_grey(nits):
+    """The byte a neutral pixel of this luminance lands on in the PNG the
+    tool saves from a PQ frame: the PQ code decoded, mapped, sRGB at 203."""
+    return srgb8(sdr_tone_map(nits) / SDR_WHITE_NITS)
 
 
 def png_size(path):

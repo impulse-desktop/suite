@@ -26,7 +26,10 @@ import sys
 import tempfile
 import time
 
-PASS, FAIL, TIMEOUT = "PASS", "FAIL", "TIMEOUT"
+PASS, FAIL, TIMEOUT, SKIP = "PASS", "FAIL", "TIMEOUT", "SKIP"
+# a scenario that found the compositor short of what it needs exits with
+# this, its last line saying what
+SKIPPED = 77
 
 
 def tail(path, lines):
@@ -70,6 +73,7 @@ def run(name, args):
         **os.environ,
         "IM_E2E_BINARY": os.path.abspath(args.binary),
         "IM_E2E_DEVICES": os.path.abspath(args.devices),
+        "IM_E2E_JXL_DUMP": os.path.abspath(args.jxl_dump),
         "IM_E2E_ARTIFACTS": artifacts,
         # the fixture, tst/session.py, next to the scenario
         "PYTHONPATH": os.path.dirname(os.path.abspath(args.scenario)),
@@ -98,18 +102,18 @@ def run(name, args):
         process = subprocess.Popen(command, env=env, stdout=out, stderr=subprocess.STDOUT, start_new_session=True)
         try:
             code = process.wait(timeout=args.timeout)
-            status = PASS if code == 0 else FAIL
-            detail = "" if code == 0 else f"scenario rc={code}: {last_line(tail(log, 5))}"
+            status = PASS if code == 0 else SKIP if code == SKIPPED else FAIL
+            detail = "" if code == 0 else last_line(tail(log, 5)) if code == SKIPPED else f"scenario rc={code}: {last_line(tail(log, 5))}"
         except subprocess.TimeoutExpired:
             os.killpg(process.pid, signal.SIGKILL)
             process.wait()
             status, detail = TIMEOUT, f"no verdict after {args.timeout:g}s: {last_line(tail(log, 5))}"
     seconds = time.monotonic() - started
-    evidence = collect(artifacts) if status != PASS else {}
+    evidence = collect(artifacts) if status not in (PASS, SKIP) else {}
     if args.evidence:
         kept = os.path.join(args.evidence, name)
         shutil.rmtree(kept, ignore_errors=True)
-        if status != PASS:
+        if status not in (PASS, SKIP):
             os.makedirs(args.evidence, exist_ok=True)
             shutil.copytree(artifacts, kept)
     shutil.rmtree(artifacts, ignore_errors=True)
@@ -121,6 +125,7 @@ def main():
     parser.add_argument("--scenario", required=True)
     parser.add_argument("--binary", required=True, help="the tools binary under test (im_test)")
     parser.add_argument("--devices", required=True, help="the driver's input devices helper")
+    parser.add_argument("--jxl-dump", required=True, help="the JPEG XL reader the scenarios check saved files with")
     parser.add_argument("--out", required=True)
     parser.add_argument("--evidence", default="", help="where a failed scenario's captures and logs are kept, under its name")
     parser.add_argument("--runtime", default="", help="where the scenario's runtime dir goes (short: it holds Wayland sockets)")

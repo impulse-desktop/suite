@@ -17,6 +17,10 @@ struct ChaosMonkey {
     virtual void memoryTypes(VkPhysicalDeviceMemoryProperties& props) = 0;
     // the result of a Vulkan call its caller checks
     virtual VkResult vulkan(VkResult result) = 0;
+    // the same for a call a scenario names by its site (the scene target's
+    // render pass, say): what comes after it in the setup order is the
+    // driver's business, not a count a scenario can know
+    virtual VkResult vulkanAt(stl::StringView site, VkResult result) = 0;
     // whether the Vulkan device offers the named extension, as the device
     // answered: a device without it takes the fallback of its own
     virtual bool deviceExtension(const char* name, bool offered) = 0;

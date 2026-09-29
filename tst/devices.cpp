@@ -7,6 +7,8 @@
 //   scroll STEPS        wheel clicks, positive down
 //   key CODE STATE      an evdev key, 1 pressed / 0 released
 //   mods DEP LAT LOCK   the keyboard's xkb modifier masks
+// Before READY it lists every global the compositor offers, one
+// "GLOBAL interface version" line each: what a scenario may require of it.
 // The compositor takes a virtual keyboard's keys without running them
 // through its xkb state (wlroots: update_state is false for them), so the
 // keyboard keeps a state of its own over its keymap and sends the modifier
@@ -35,8 +37,9 @@ namespace {
         zwp_virtual_keyboard_manager_v1* keyboards = nullptr;
     };
 
-    void global(void* data, wl_registry* registry, uint32_t name, const char* interface, uint32_t) {
+    void global(void* data, wl_registry* registry, uint32_t name, const char* interface, uint32_t version) {
         auto& devices = *static_cast<Devices*>(data);
+        printf("GLOBAL %s %u\n", interface, version);
         if (strcmp(interface, wl_seat_interface.name) == 0) {
             devices.seat = static_cast<wl_seat*>(wl_registry_bind(registry, name, &wl_seat_interface, 1));
         } else if (strcmp(interface, zwlr_virtual_pointer_manager_v1_interface.name) == 0) {

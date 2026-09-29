@@ -128,10 +128,20 @@ jobs:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Give the compositor its dma-bufs
+        # Alpine's sway runs on wlroots' Vulkan renderer there (the HDR
+        # scenarios want its colour management), which allocates the
+        # headless output's buffers through udmabuf; the runner's kernel
+        # has it built in
+        run: |
+          [ -e /dev/udmabuf ] || sudo modprobe udmabuf || true
+          test -e /dev/udmabuf
+          sudo chmod 666 /dev/udmabuf
+
       - name: Build the tools and run the scenarios
         run: |
           set -o pipefail
-          docker run --rm \
+          docker run --rm --device /dev/udmabuf \
             --volume "$GITHUB_WORKSPACE:/workspace" --workdir /workspace \
             "$ALPINE_IMAGE" sh dev/ci_linux.sh test clang \
             2>&1 | tee "$RUNNER_TEMP/tests-musl.log"

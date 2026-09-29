@@ -18,6 +18,8 @@ using namespace stl;
 // a scenario states exactly which call goes wrong:
 //   memory-types=N    the next N memory-type queries find none
 //   vulkan=K          K checked Vulkan calls pass, the one after fails
+//   vulkan-at=SITE    the checked Vulkan call named SITE fails (the word
+//                     may repeat for several)
 //   no-ext=NAME       the Vulkan device does not offer extension NAME (the
 //                     word may repeat for several)
 //   swapchain=K       K swapchain acquires and presents pass, the one after
@@ -29,6 +31,7 @@ namespace {
     struct TestChaosMonkey: public ChaosMonkey {
         int memoryFaults = 0;
         int vulkanSkip = -1;
+        Vector<StringView> failingSites;
         Vector<StringView> hiddenExtensions;
         int swapchainSkip = -1;
         VkResult swapchainFault = VK_SUCCESS;
@@ -41,6 +44,7 @@ namespace {
 
         void memoryTypes(VkPhysicalDeviceMemoryProperties& props) override;
         VkResult vulkan(VkResult result) override;
+        VkResult vulkanAt(StringView site, VkResult result) override;
         bool deviceExtension(const char* name, bool offered) override;
         VkResult swapchain(VkResult result) override;
         bool encoderAlloc(bool pending) override;
@@ -94,6 +98,8 @@ void TestChaosMonkey::armFault(StringView fault, StringView arg) {
         memoryFaults = (int)arg.stou();
     } else if (fault == "vulkan"_sv) {
         vulkanSkip = (int)arg.stou();
+    } else if (fault == "vulkan-at"_sv) {
+        failingSites.pushBack(arg);
     } else if (fault == "no-ext"_sv) {
         hiddenExtensions.pushBack(arg);
     } else if (fault == "swapchain"_sv || fault == "swapchain-suboptimal"_sv) {
@@ -116,6 +122,16 @@ VkResult TestChaosMonkey::vulkan(VkResult result) {
     }
 
     return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+}
+
+VkResult TestChaosMonkey::vulkanAt(StringView site, VkResult result) {
+    for (StringView failing : failingSites) {
+        if (failing == site) {
+            return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+        }
+    }
+
+    return result;
 }
 
 bool TestChaosMonkey::deviceExtension(const char* name, bool offered) {
@@ -155,6 +171,7 @@ namespace {
     struct IdleChaosMonkey: public ChaosMonkey {
         void memoryTypes(VkPhysicalDeviceMemoryProperties& props) override;
         VkResult vulkan(VkResult result) override;
+        VkResult vulkanAt(StringView site, VkResult result) override;
         bool deviceExtension(const char* name, bool offered) override;
         VkResult swapchain(VkResult result) override;
         bool encoderAlloc(bool pending) override;
@@ -165,6 +182,10 @@ void IdleChaosMonkey::memoryTypes(VkPhysicalDeviceMemoryProperties&) {
 }
 
 VkResult IdleChaosMonkey::vulkan(VkResult result) {
+    return result;
+}
+
+VkResult IdleChaosMonkey::vulkanAt(StringView, VkResult result) {
     return result;
 }
 

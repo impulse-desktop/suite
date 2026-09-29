@@ -26,11 +26,17 @@ def main():
     lines = []
     details = []
     failed = 0
+    skipped = 0
     for record in records:
         ok = record["status"] == "PASS"
-        failed += not ok
-        lines.append(f"  {'OK' if ok else record['status']:<8}{record['name']} ({record['seconds']:.1f}s)")
-        if not ok:
+        skip = record["status"] == "SKIP"
+        failed += not ok and not skip
+        skipped += skip
+        # a skip says what the compositor lacked, or a scenario that quietly
+        # stops running is invisible
+        note = f"  [{record['detail']}]" if skip else ""
+        lines.append(f"  {'OK' if ok else record['status']:<8}{record['name']} ({record['seconds']:.1f}s){note}")
+        if not ok and not skip:
             details.append(f"--- {record['name']}: {record['detail']}")
             details.append(f"    reproduce: ./build test -Dfilter='{record['name']}'")
             for name, text in record["artifacts"].items():
@@ -39,7 +45,7 @@ def main():
     body = "\n".join(lines)
     if details:
         body += "\n\n" + "\n".join(details)
-    body += f"\n\n{len(records) - failed} ok, {failed} fail\n"
+    body += f"\n\n{len(records) - failed - skipped} ok, {skipped} skip, {failed} fail\n"
     print(body, end="")
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     with open(args.out, "w") as f:
