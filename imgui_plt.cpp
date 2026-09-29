@@ -1,5 +1,8 @@
 #include "imgui_plt.h"
 
+#include "util.h"
+
+#include <std/ios/sys.h>
 #include <std/str/view.h>
 #include <std/sys/types.h>
 #include <std/mem/obj_pool.h>
@@ -235,6 +238,18 @@ namespace {
         }
     }
 
+    // the test build says what the platform handed ImGui, so a scenario
+    // that fails on a frame can tell where the pointer was
+    void traceInput(StringView what, i32 x, i32 y) {
+#ifdef IM_FOR_TESTS
+        sysO << "im input: "_sv << what << " "_sv << x << " "_sv << y << endL;
+#else
+        (void)what;
+        (void)x;
+        (void)y;
+#endif
+    }
+
     plt::InputSink* ImGuiPltImpl::sink() {
         return this;
     }
@@ -292,6 +307,7 @@ namespace {
     }
 
     void ImGuiPltImpl::pointerMotion(const plt::PointerMotionInput& input) {
+        traceInput("pointer"_sv, input.pixelX, input.pixelY);
         ImGui::GetIO().AddMousePosEvent((float)input.pixelX, (float)input.pixelY);
     }
 
@@ -317,6 +333,8 @@ namespace {
     }
 
     void ImGuiPltImpl::pointerPresence(bool present) {
+        traceInput(present ? "pointer present"_sv : "pointer absent"_sv, 0, 0);
+
         if (!present) {
             ImGui::GetIO().AddMousePosEvent(-FLT_MAX, -FLT_MAX);
         }

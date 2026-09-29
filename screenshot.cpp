@@ -2022,6 +2022,16 @@ namespace {
 #endif
     }
 
+    void traceSize(StringView what, int w, int h) {
+#ifdef IM_FOR_TESTS
+        sysO << "im screenshot: "_sv << what << " "_sv << w << "x"_sv << h << endL;
+#else
+        (void)what;
+        (void)w;
+        (void)h;
+#endif
+    }
+
     // nudge the zoom by delta% (clamped); any change drops the selection
     void applyZoom(Viewer& v, int delta) {
         int z = (int)clampf((float)(v.zoom + delta), (float)kZoomMin, (float)kZoomMax);
@@ -2310,6 +2320,7 @@ namespace {
 
         if (gRebuild || gPresent.width != nw || gPresent.height != nh) {
             createSwapchain((u32)nw, (u32)nh);
+            traceSize("presenting"_sv, gPresent.width, gPresent.height);
 
             if (gLinearHdr) {
                 createSceneTarget((u32)nw, (u32)nh);

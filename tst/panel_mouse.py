@@ -10,6 +10,11 @@ with Session("panel_mouse") as s:
     shot = s.capture_file("pattern.shot", w, h, pixels=pixels)
     s.launch(str(shot))
     s.focus()
+    # the baseline is taken with the pointer parked on the canvas, where
+    # the scenario leaves it after Reset: where a compositor puts the
+    # pointer at start is its own business, and one had it over Save,
+    # hovered, in the frame the reset was then held to
+    s.pointer(400, 300)
     opened = s.settled("opened")
     # the panel's first rows: the zoom slider under its label, 200 px
     # across, then Save and Reset side by side
