@@ -313,10 +313,27 @@ class Session:
     def changed(self, baseline, label, app_id=None, region=None, threshold=500):
         """The window differs from the baseline capture by more than
         threshold pixels (the tool is a frame or more behind a key)."""
-        return self.wait(lambda: differing(baseline, self.capture(label, app_id, region)) > threshold, f"a change to {label}")
+        return self.compared(baseline, label, app_id, region, lambda count: count > threshold, f"a change to {label}")
 
     def same(self, baseline, label, app_id=None, region=None, tolerance=60):
-        return self.wait(lambda: differing(baseline, self.capture(label, app_id, region)) < tolerance, f"{label} back to the baseline")
+        return self.compared(baseline, label, app_id, region, lambda count: count < tolerance, f"{label} back to the baseline")
+
+    def compared(self, baseline, label, app_id, region, accept, description):
+        """Captures until one compares with the baseline as accept says; a
+        timeout names how far the last one was off, and where."""
+        last = None
+
+        def capture():
+            nonlocal last
+            last = self.capture(label, app_id, region)
+            return accept(differing(baseline, last))
+
+        try:
+            return self.wait(capture, description)
+        except AssertionError:
+            if last is None:
+                raise
+            raise AssertionError(f"timed out waiting for {description}: {differing(baseline, last)} pixels differ, within {differing_box(baseline, last)}") from None
 
     # ---- captures for the tool ----
 
@@ -377,6 +394,17 @@ def differing(a, b):
     """Pixels that differ between two captures of one size."""
     (w, h, x), (_, _, y) = a, b
     return sum(1 for i in range(0, w * h * 3, 3) if x[i:i + 3] != y[i:i + 3])
+
+
+def differing_box(a, b):
+    """The bounding box, as x0,y0-x1,y1 (inclusive), of the pixels that
+    differ between two captures of one size; 'nowhere' when none do."""
+    (w, h, x), (_, _, y) = a, b
+    rows = [i // w for i in range(w * h) if x[i * 3:i * 3 + 3] != y[i * 3:i * 3 + 3]]
+    columns = [i % w for i in range(w * h) if x[i * 3:i * 3 + 3] != y[i * 3:i * 3 + 3]]
+    if not rows:
+        return "nowhere"
+    return f"{min(columns)},{min(rows)}-{max(columns)},{max(rows)}"
 
 
 def png(width, height, pixels):

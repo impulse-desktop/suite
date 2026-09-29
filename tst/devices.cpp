@@ -7,6 +7,11 @@
 //   scroll STEPS        wheel clicks, positive down
 //   key CODE STATE      an evdev key, 1 pressed / 0 released
 //   mods DEP LAT LOCK   the keyboard's xkb modifier masks
+// The compositor takes a virtual keyboard's keys without running them
+// through its xkb state (wlroots: update_state is false for them), so the
+// keyboard keeps a state of its own over its keymap and sends the modifier
+// masks a key changes, as a real keyboard's would arrive: a tap on NumLock
+// locks it, a held Shift is depressed.
 #include "virtual-keyboard-client.h"
 #include "virtual-pointer-client.h"
 
@@ -45,20 +50,20 @@ namespace {
     }
 
     // the keyboard's keymap, a US layout compiled by xkbcommon, in a sealed
-    // memfd the compositor maps
-    bool uploadKeymap(zwp_virtual_keyboard_v1* keyboard) {
+    // memfd the compositor maps; the state over it is the keyboard's own
+    xkb_state* uploadKeymap(zwp_virtual_keyboard_v1* keyboard) {
         xkb_context* context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
         xkb_rule_names names{};
         names.layout = "us";
         xkb_keymap* keymap = context ? xkb_keymap_new_from_names(context, &names, XKB_KEYMAP_COMPILE_NO_FLAGS) : nullptr;
         char* text = keymap ? xkb_keymap_get_as_string(keymap, XKB_KEYMAP_FORMAT_TEXT_V1) : nullptr;
-        bool ok = false;
+        xkb_state* state = nullptr;
         if (text) {
             const size_t size = strlen(text) + 1;
             const int fd = memfd_create("keymap", MFD_CLOEXEC);
             if (fd >= 0 && ftruncate(fd, (off_t)size) == 0 && pwrite(fd, text, size, 0) == (ssize_t)size) {
                 zwp_virtual_keyboard_v1_keymap(keyboard, WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1, fd, (uint32_t)size);
-                ok = true;
+                state = xkb_state_new(keymap);
             }
             if (fd >= 0) {
                 close(fd);
@@ -71,7 +76,25 @@ namespace {
         if (context) {
             xkb_context_unref(context);
         }
-        return ok;
+        return state;
+    }
+
+    struct Modifiers {
+        uint32_t depressed = 0;
+        uint32_t latched = 0;
+        uint32_t locked = 0;
+        uint32_t group = 0;
+
+        bool operator==(const Modifiers& other) const = default;
+    };
+
+    Modifiers modifiers(xkb_state* state) {
+        return {
+            xkb_state_serialize_mods(state, XKB_STATE_MODS_DEPRESSED),
+            xkb_state_serialize_mods(state, XKB_STATE_MODS_LATCHED),
+            xkb_state_serialize_mods(state, XKB_STATE_MODS_LOCKED),
+            xkb_state_serialize_layout(state, XKB_STATE_LAYOUT_EFFECTIVE),
+        };
     }
 }
 
@@ -90,10 +113,12 @@ int main() {
     }
     auto* const pointer = zwlr_virtual_pointer_manager_v1_create_virtual_pointer(devices.pointers, devices.seat);
     auto* const keyboard = zwp_virtual_keyboard_manager_v1_create_virtual_keyboard(devices.keyboards, devices.seat);
-    if (!uploadKeymap(keyboard) || wl_display_roundtrip(display) < 0) {
+    xkb_state* const state = uploadKeymap(keyboard);
+    if (state == nullptr || wl_display_roundtrip(display) < 0) {
         fprintf(stderr, "devices: no keymap for the virtual keyboard\n");
         return 1;
     }
+    Modifiers sent = modifiers(state);
     puts("READY");
     fflush(stdout);
     char line[128];
@@ -102,20 +127,28 @@ int main() {
         timespec now;
         clock_gettime(CLOCK_MONOTONIC, &now);
         const uint32_t time = now.tv_sec * 1000 + now.tv_nsec / 1000000;
-        unsigned int x, y, width, height, code, state, depressed, latched, locked;
+        unsigned int x, y, width, height, code, pressed, depressed, latched, locked;
         int steps;
         if (sscanf(line, "move %u %u %u %u", &x, &y, &width, &height) == 4) {
             zwlr_virtual_pointer_v1_motion_absolute(pointer, time, x, y, width, height);
             zwlr_virtual_pointer_v1_frame(pointer);
-        } else if (sscanf(line, "button %u %u", &code, &state) == 2) {
-            zwlr_virtual_pointer_v1_button(pointer, time, code, state);
+        } else if (sscanf(line, "button %u %u", &code, &pressed) == 2) {
+            zwlr_virtual_pointer_v1_button(pointer, time, code, pressed);
             zwlr_virtual_pointer_v1_frame(pointer);
         } else if (sscanf(line, "scroll %d", &steps) == 1) {
             zwlr_virtual_pointer_v1_axis_source(pointer, WL_POINTER_AXIS_SOURCE_WHEEL);
             zwlr_virtual_pointer_v1_axis_discrete(pointer, time, WL_POINTER_AXIS_VERTICAL_SCROLL, wl_fixed_from_int(steps * 10), steps);
             zwlr_virtual_pointer_v1_frame(pointer);
-        } else if (sscanf(line, "key %u %u", &code, &state) == 2) {
-            zwp_virtual_keyboard_v1_key(keyboard, time, code, state);
+        } else if (sscanf(line, "key %u %u", &code, &pressed) == 2) {
+            // evdev codes are xkb keycodes less 8; the masks a key changes go
+            // ahead of it, as a real keyboard's compositor sends them
+            xkb_state_update_key(state, code + 8, pressed ? XKB_KEY_DOWN : XKB_KEY_UP);
+            const Modifiers now = modifiers(state);
+            if (!(now == sent)) {
+                zwp_virtual_keyboard_v1_modifiers(keyboard, now.depressed, now.latched, now.locked, now.group);
+                sent = now;
+            }
+            zwp_virtual_keyboard_v1_key(keyboard, time, code, pressed);
         } else if (sscanf(line, "mods %u %u %u", &depressed, &latched, &locked) == 3) {
             zwp_virtual_keyboard_v1_modifiers(keyboard, depressed, latched, locked, 0);
         } else {
@@ -128,6 +161,7 @@ int main() {
         printf("DONE %u\n", ++serial);
         fflush(stdout);
     }
+    xkb_state_unref(state);
     zwp_virtual_keyboard_v1_destroy(keyboard);
     zwlr_virtual_pointer_v1_destroy(pointer);
     zwp_virtual_keyboard_manager_v1_destroy(devices.keyboards);
