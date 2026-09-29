@@ -30,15 +30,15 @@ fi
 if [ "$mode" != build ]; then
     # the scenarios' compositor, drawn by pixman, with grim for its pixels;
     # the tool's own Vulkan is lavapipe, under the validation layer the
-    # scenarios' fixture reads for errors
+    # scenarios' fixture reads for errors; gdb reads a hung tool's stacks
     if [ -f /etc/alpine-release ]; then
-        apk add --no-cache sway swaybg grim font-dejavu \
+        apk add --no-cache sway swaybg grim font-dejavu gdb \
             mesa-vulkan-swrast vulkan-validation-layers runuser libcap-utils
         # The packaged DRM capabilities cannot be granted inside Docker; the
         # headless compositor needs none of them.
         if [ -n "$(getcap /usr/bin/sway)" ]; then setcap -r /usr/bin/sway; fi
     else
-        apt-get install --yes --no-install-recommends sway swaybg grim \
+        apt-get install --yes --no-install-recommends sway swaybg grim gdb \
             fonts-dejavu-core mesa-vulkan-drivers vulkan-validationlayers util-linux
     fi
     export VK_DRIVER_FILES=$(find /usr/share/vulkan/icd.d -name 'lvp_icd*.json' -print -quit)

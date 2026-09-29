@@ -375,13 +375,32 @@ class Session:
         if errors:
             raise RuntimeError("; ".join(errors))
 
+    def stacks(self, label):
+        """The tool's threads' stacks, kept as <label>.stack: a scenario that
+        timed out on a tool still alive says where it stands."""
+        gdb = shutil.which("gdb")
+        if gdb is None:
+            return
+        try:
+            result = subprocess.run(
+                [gdb, "-p", str(self.client.pid), "-batch", "-nx", "-ex", "set pagination off", "-ex", "thread apply all bt",
+                 "-ex", "detach", "-ex", "quit"],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30,
+            )
+            text = result.stdout.decode(errors="replace")
+        except (OSError, subprocess.TimeoutExpired) as error:
+            text = f"gdb failed: {error}\n"
+        (self.artifacts / f"{label}.stack").write_text(text)
+
     def __exit__(self, kind, value, traceback):
         try:
-            if kind is not None and self.client and self.client.poll() is None and self.windows():
-                try:
-                    self.capture("failure")
-                except Exception:
-                    pass
+            if kind is not None and self.client and self.client.poll() is None:
+                self.stacks(f"client{self.clients}")
+                if self.windows():
+                    try:
+                        self.capture("failure")
+                    except Exception:
+                        pass
             if kind is None:
                 for log in self.artifacts.glob("client*.log"):
                     text = log.read_text(errors="replace")

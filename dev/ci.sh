@@ -63,5 +63,8 @@ status=0
 python3 ./build -B "$build_dir" -j "$jobs" -k -Druntime=/tmp/im-e2e -Devidence="$build_dir/evidence" test || status=1
 if [[ "$mode" == coverage ]]; then
     bash dev/ci_coverage.sh "$build_dir" "$build_dir/profiles"
+    # the report is read by the host's runner user once the container is
+    # gone; llvm-cov keeps its html directories to their owner
+    chmod -R a+rX .coverage
 fi
 exit "$status"
