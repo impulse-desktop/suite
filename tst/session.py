@@ -97,7 +97,13 @@ class Session:
                 'for_window [app_id="^im-"] move position 40 50\n'
                 'input * xkb_layout us\n'
             )
-            self.compositor = self.start(["sway", "-d", "-c", str(config)], "sway")
+            # the Vulkan validation layer is the tool's, not the compositor's;
+            # IM_E2E_COMPOSITOR_GDB runs the compositor under gdb, for the
+            # stack of a crash to land in its log
+            sway = ["sway", "-d", "-c", str(config)]
+            if os.environ.get("IM_E2E_COMPOSITOR_GDB") and shutil.which("gdb"):
+                sway = ["gdb", "-batch", "-nx", "-ex", "set pagination off", "-ex", "run", "-ex", "thread apply all bt", "--args", *sway]
+            self.compositor = self.start(sway, "sway", unset=("VK_INSTANCE_LAYERS",))
             self.wait(lambda: next(runtime.glob("wayland-*[0-9]"), None), "Wayland socket", client=False)
             wayland = next(runtime.glob("wayland-*[0-9]"))
             self.socket = self.wait(lambda: next(runtime.glob("sway-ipc.*.sock"), None), "Sway IPC", client=False)
