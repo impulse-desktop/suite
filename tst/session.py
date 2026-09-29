@@ -481,7 +481,8 @@ def udmabuf(pixels):
     os.pwrite(memfd, pixels, 0)
     fcntl.fcntl(memfd, fcntl.F_ADD_SEALS, fcntl.F_SEAL_SHRINK)
     with open("/dev/udmabuf", "r+b", buffering=0) as device:
-        return fcntl.ioctl(device.fileno(), UDMABUF_CREATE, struct.pack("=IIQQ", memfd, UDMABUF_FLAGS_CLOEXEC, 0, size))
+        # a mutable buffer, so the call's own result, the new descriptor, comes back
+        return fcntl.ioctl(device.fileno(), UDMABUF_CREATE, bytearray(struct.pack("=IIQQ", memfd, UDMABUF_FLAGS_CLOEXEC, 0, size)))
 
 
 def differing(a, b):

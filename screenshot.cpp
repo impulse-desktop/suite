@@ -682,12 +682,13 @@ namespace {
         u32 count = 0;
 
         vkGetPhysicalDeviceQueueFamilyProperties(device, &count, nullptr);
-        count = gChaos->count("queue-families"_sv, count);
 
         Vector<VkQueueFamilyProperties> families;
 
         families.zero(count);
         vkGetPhysicalDeviceQueueFamilyProperties(device, &count, families.mutData());
+        // the driver's own query stays whole; the answer is what the seam bends
+        count = gChaos->count("queue-families"_sv, count);
 
         for (u32 i = 0; i < count; i++) {
             if (families[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
@@ -961,8 +962,15 @@ namespace {
         VkSwapchainKHR swapchain = VK_NULL_HANDLE;
 
         // a driver that cannot present to this compositor's surface fails
-        // here, and that is the tool's own report
-        if (gChaos->vulkanAt("swapchain"_sv, vkCreateSwapchainKHR(gDevice, &ci, gAlloc, &swapchain)) < 0) {
+        // here, and that is the tool's own report; a refusal the monkey
+        // made up leaves the driver's swapchain behind, and it goes
+        VkResult made = vkCreateSwapchainKHR(gDevice, &ci, gAlloc, &swapchain);
+
+        if (gChaos->vulkanAt("swapchain"_sv, made) < 0) {
+            if (made == VK_SUCCESS) {
+                vkDestroySwapchainKHR(gDevice, swapchain, gAlloc);
+            }
+
             fail("vulkan cannot make a swapchain on this surface"_sv);
         }
 
