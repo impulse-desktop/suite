@@ -1750,6 +1750,14 @@ void ImGui_ImplVulkanH_CreateWindowSwapChain(VkPhysicalDevice physical_device, V
         }
         err = vkCreateSwapchainKHR(device, &info, allocator, &wd->Swapchain);
         check_vk_result(err);
+        if (err != VK_SUCCESS)
+        {
+            // fork: a surface the driver cannot present to (a compositor
+            // without the buffers its WSI wants) leaves the window without
+            // a swapchain for the caller to see, not a null handle to walk
+            wd->Swapchain = VK_NULL_HANDLE;
+            return;
+        }
         err = vkGetSwapchainImagesKHR(device, wd->Swapchain, &wd->ImageCount, nullptr);
         check_vk_result(err);
         VkImage backbuffers[16] = {};

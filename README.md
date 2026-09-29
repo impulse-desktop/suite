@@ -38,3 +38,21 @@ library is not used, the vocabulary comes from
 The build wants clang, `pkg-config`, `wayland-scanner`, `glslangValidator`
 and the development files of wayland-client, vulkan, libpng, libjxl and
 libdisplay-info. `dev/style.py` formats the tree.
+
+## Testing
+
+```
+./build test                      # every scenario, under its own headless Sway
+./build test -Dfilter='save_*'    # some of them
+```
+
+Each `tst/scenarios/*.py` runs `im_test` as a client of an isolated
+headless Sway (drawn by pixman), drives it through virtual input devices
+(`tst/support/devices.cpp`, the wlroots virtual pointer and keyboard) and
+checks what grim captures and what lands on disk; `tst/session.py` is the
+fixture, `tst/run.py` the runner. The tool's own Vulkan has to present to
+that Sway: lavapipe does, over wl_shm (`VK_DRIVER_FILES` names its ICD in
+CI); a hardware driver wants the dma-bufs a GPU-rendered Sway offers.
+`-Druntime=DIR` keeps the scenarios' Wayland sockets under a short path;
+the artifacts (logs, captures as PNG, results.json) land in
+`.build/e2e-results/`.

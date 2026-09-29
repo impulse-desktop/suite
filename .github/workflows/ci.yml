@@ -46,6 +46,54 @@ jobs:
           retention-days: 7
           compression-level: 9
 
+  tests:
+    name: Tests
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up build environment
+        uses: ./.github/actions/setup
+
+      - name: Install the scenarios' compositor and tools
+        # the tools run as clients of a headless Sway drawn by pixman; the
+        # tool's own Vulkan is lavapipe, whose swapchain goes over wl_shm
+        run: |
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            sway swaybg grim fonts-dejavu-core mesa-vulkan-drivers
+          icd=$(find /usr/share/vulkan/icd.d -name 'lvp_icd*.json' -print -quit)
+          test -n "$icd"
+          echo "VK_DRIVER_FILES=$icd" >> "$GITHUB_ENV"
+          echo "VK_ICD_FILENAMES=$icd" >> "$GITHUB_ENV"
+          echo "LP_NUM_THREADS=2" >> "$GITHUB_ENV"
+
+      - name: Run the scenarios
+        run: |
+          set -o pipefail
+          python3 ./build -j "$(nproc)" -Druntime=/tmp/im-e2e test \
+            2>&1 | tee "$RUNNER_TEMP/tests.log"
+
+      - name: Summarize failure
+        if: failure()
+        run: |
+          python3 dev/ci_report.py \
+            --log "$RUNNER_TEMP/tests.log" \
+            --title "Tests" \
+            --reproduce "./build test"
+
+      - name: Upload the scenarios' artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-results
+          path: .build/e2e-results
+          if-no-files-found: ignore
+          retention-days: 7
+          compression-level: 9
+
   style:
     name: Style
     runs-on: ubuntu-24.04

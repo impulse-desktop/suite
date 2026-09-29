@@ -733,6 +733,12 @@ namespace {
         pooledGuard(shot, [] {
             ImGui_ImplVulkanH_DestroyWindow(gInstance, gDevice, &gWin, gAlloc);
         });
+
+        // the helper checks nothing before the backend is up: a driver that
+        // cannot present to this compositor's surface leaves no swapchain
+        if (wd->Swapchain == VK_NULL_HANDLE) {
+            fail("vulkan cannot make a swapchain on this surface"_sv);
+        }
     }
 
     u32 findMemoryType(u32 typeBits, VkMemoryPropertyFlags props) {

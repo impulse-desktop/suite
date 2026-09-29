@@ -50,24 +50,32 @@ namespace {
     }
 }
 
+namespace {
+    const Tool* find(StringView name) {
+        for (const Tool& tool : tools) {
+            if (name == StringView(tool.name)) {
+                return &tool;
+            }
+        }
+
+        return nullptr;
+    }
+}
+
 int main(int argc, char** argv) {
-    // the link's name carries the tool: imscreenshot ARGS is im screenshot ARGS
+    // a link named after a tool runs it: imscreenshot ARGS is im screenshot
+    // ARGS; any other name (im, im_test) takes the tool from the first word
     StringView self = baseName(argv[0]);
-    StringView name;
-    int skip = 0;
 
     if (self.length() > 2 && self.startsWith("im"_sv)) {
-        name = StringView(self.begin() + 2, self.end());
-    } else if (argc >= 2) {
-        name = StringView(argv[1]);
-        skip = 1;
-    } else {
-        return usage();
+        if (const Tool* tool = find(StringView(self.begin() + 2, self.end()))) {
+            return tool->run(argc, argv);
+        }
     }
 
-    for (const Tool& tool : tools) {
-        if (name == StringView(tool.name)) {
-            return tool.run(argc - skip, argv + skip);
+    if (argc >= 2) {
+        if (const Tool* tool = find(StringView(argv[1]))) {
+            return tool->run(argc - 1, argv + 1);
         }
     }
 
