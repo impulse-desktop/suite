@@ -9,7 +9,10 @@ same factor, a blend in code space; the two are far apart."""
 
 from session import Session, pq_decode, pq_encode
 
-NITS = [16, 32, 64, 128, 203, 256, 512, 1000]
+# black and the low bands are there for the predictions to fall between
+# bands measured; the veil is judged on the bands from 32 nits up
+NITS = [0, 4, 8, 16, 32, 64, 128, 203, 256, 512, 1000]
+JUDGED = [32, 64, 128, 203, 256, 512]
 ALPHA = 140 / 255
 # the canvas begins past the 200px panel and 8px of spacing; the frame is
 # shown at 50%
@@ -26,7 +29,9 @@ def response(capture, y):
 
 
 def interpolate(table, nits):
-    """The compositor's rendering of a luminance between the bands measured."""
+    """The compositor's rendering of a luminance between the bands measured,
+    the outermost bands standing for anything beyond them."""
+    nits = min(max(nits, min(table)), max(table))
     below = max(n for n in table if n <= nits)
     above = min(n for n in table if n >= nits)
     if above == below:
@@ -56,7 +61,7 @@ with Session("linear_blend") as s:
     s.changed(base, "veiled")
     veiled = s.settled("veiled")
     closer = 0
-    for n in NITS[1:-1]:
+    for n in JUDGED:
         actual = response(veiled, rows[n])
         linear = interpolate(table, n * (1 - ALPHA))
         in_code = interpolate(table, pq_decode(pq_encode(n) * (1 - ALPHA)))
@@ -64,6 +69,6 @@ with Session("linear_blend") as s:
         code_error = sum(abs(a - e) for a, e in zip(actual, in_code))
         print(f"{n} nits veiled: {tuple(round(v) for v in actual)} linear {tuple(round(v) for v in linear)} ({linear_error:.0f}) code-space {tuple(round(v) for v in in_code)} ({code_error:.0f})")
         closer += linear_error < code_error
-    assert closer >= len(NITS) - 3, f"only {closer} of {len(NITS) - 2} bands are veiled in linear light"
+    assert closer >= len(JUDGED) - 1, f"only {closer} of {len(JUDGED)} bands are veiled in linear light"
     s.close()
     print("OK: the HDR editor's crop veil is blended in linear light")
