@@ -71,9 +71,11 @@ jobs:
           echo "LP_NUM_THREADS=2" >> "$GITHUB_ENV"
 
       - name: Run the scenarios
+        # -k: a scenario node never fails, but a build error in one must not
+        # stop the others; the final test node reads every verdict
         run: |
           set -o pipefail
-          python3 ./build -j "$(nproc)" -Druntime=/tmp/im-e2e test \
+          python3 ./build -j "$(nproc)" -k -Druntime=/tmp/im-e2e test \
             2>&1 | tee "$RUNNER_TEMP/tests.log"
 
       - name: Summarize failure
@@ -84,14 +86,12 @@ jobs:
             --title "Tests" \
             --reproduce "./build test"
 
-      - name: Upload the scenarios' artifacts
-        if: always()
+      - name: Upload failure log
+        if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: e2e-results
-          # the build view: the runner publishes a node's outputs at the top
-          # only once it passed, and a failed run is what these are for
-          path: .build/tmp/*/e2e-results
+          name: tests-log
+          path: ${{ runner.temp }}/tests.log
           if-no-files-found: ignore
           retention-days: 7
           compression-level: 9

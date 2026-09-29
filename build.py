@@ -1,5 +1,7 @@
 import build
 import build.flags as flags
+import fnmatch
+import hashlib
 import os
 
 
@@ -18,7 +20,8 @@ build.includes += [
 ]
 
 flags.allow({
-    "filter": {"descr": "glob restricting which scenarios run", "default": "*"},
+    "filter": {"descr": "glob restricting which scenarios build", "default": ""},
+    "shard": {"descr": "K/N: run only the K-th of N stable slices of the scenarios (0-based)", "default": ""},
     "runtime": {"descr": "a short dir for the scenarios' runtime dirs (Wayland sockets)", "default": ""},
 })
 
@@ -117,8 +120,11 @@ install(im, links)
 # ---- the scenarios: the tools under a real compositor ----------------------
 # Each tst/scenarios/*.py drives im_test as a client of its own headless
 # Sway through the driver's virtual devices (tst/support/devices.cpp) and
-# checks what it draws and what it leaves on disk; tst/run.py runs them all
-# and writes results.json. -Dfilter=GLOB picks scenarios, -Druntime=DIR
+# checks what it draws and what it leaves on disk. Each scenario is a
+# command node: dev/run_test.py runs it and writes a JSON verdict, always
+# exiting 0 so a failure does not abort the graph. One final `test` node
+# depends on every scenario node, reads the verdicts and fails `./build
+# test`. -Dfilter=GLOB restricts which scenarios build, -Druntime=DIR
 # keeps their Wayland sockets under a short path.
 e2e_protocols = []
 e2e_protocol_headers = []
@@ -150,23 +156,53 @@ devices = program(
     deps=[*e2e_protocols, wayland_client, xkb],
 )
 
-e2e_cmd = [
-    "python3", "$(S)/tst/run.py",
-    "--binary", "$(B)/im_test",
-    "--devices", "$(B)/e2e/devices",
-    "--artifacts", "$(B)/e2e-results",
-    "--filter", flags.filter or "*",
-]
-if flags.runtime:
-    e2e_cmd += ["--runtime", flags.runtime]
+# -Dshard=K/N splits the scenarios into N slices by a hash of the name, so
+# CI jobs can run them side by side; the slice a scenario falls in does not
+# move when others are added
+shard_index, shard_count = (int(part) for part in flags.shard.split("/")) if flags.shard else (0, 1)
+# the fixture and the runner: any change to the harness re-runs every scenario
+harness = ["$(S)/tst/session.py", "$(S)/dev/run_test.py"]
 
-e2e = command(
-    name="e2e",
-    inputs=sorted(build.glob("$(S)/tst/*.py") + build.glob("$(S)/tst/scenarios/*.py")),
-    outputs=["$(B)/e2e-results/results.json"],
-    deps=[im_test, devices],
-    cmd=[e2e_cmd],
-    descr="TS",
-    color="cyan",
-)
-group("test", e2e)
+test_nodes = []
+test_verdicts = []
+for scenario in sorted(build.glob("$(S)/tst/scenarios/*.py")):
+    name = os.path.basename(scenario)[:-len(".py")]
+    if flags.filter and not fnmatch.fnmatch(name, flags.filter):
+        continue
+    if int(hashlib.sha1(name.encode()).hexdigest(), 16) % shard_count != shard_index:
+        continue
+    out = f"$(B)/test-results/{name}.json"
+    cmd = [
+        "python3", "$(S)/dev/run_test.py",
+        "--scenario", scenario,
+        "--binary", "$(B)/im_test",
+        "--devices", "$(B)/e2e/devices",
+        "--out", out,
+    ]
+    if flags.runtime:
+        cmd += ["--runtime", flags.runtime]
+    test_verdicts.append(out)
+    test_nodes.append(command(
+        name=f"test_{name}",
+        inputs=[scenario, *harness],
+        outputs=[out],
+        deps=[im_test, devices],
+        cmd=cmd,
+        descr="TS",
+        color="cyan",
+    ))
+
+if test_nodes:
+    test = command(
+        name="test",
+        inputs=["$(S)/dev/aggregate_tests.py"],
+        outputs=["$(B)/test-results/verdict.txt"],
+        deps=test_nodes,
+        cmd=[
+            "python3", "$(S)/dev/aggregate_tests.py",
+            "--out", "$(B)/test-results/verdict.txt",
+            *test_verdicts,
+        ],
+        descr="OK",
+        color="light-green",
+    )
