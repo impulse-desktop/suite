@@ -13,7 +13,12 @@ with Session("initial_size") as s:
     node = s.focus()
     assert s.size() == (848, 400), f"the editor opened at {s.size()}, expected 848x400"
     s.ipc(f'[con_id={node["id"]}] resize set 950 450')
-    s.wait(lambda: s.size()[0] > 900 and s.size()[1] > 430, "the grown window")
+    # the tool has taken the compositor's size once its committed geometry
+    # says so, not once the container does: a reset that lands between the
+    # configure and the tool's commit of it makes one commit ack the 950x450
+    # configure while carrying an 848x400 geometry, and sway (1.10) then
+    # keeps the container at 950x450 with the tool's 848x400 inside for good
+    s.wait(lambda: s.size() == (950, 450) and s.geometry() == (950, 450), "the grown window, taken by the tool")
     s.tap(KEY_ZERO)
     s.wait(lambda: s.size() == (848, 400), "the initial size after the reset")
     s.close()

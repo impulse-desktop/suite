@@ -214,6 +214,13 @@ class Session:
         r = self.window(app_id)["rect"]
         return r["width"], r["height"]
 
+    def geometry(self, app_id=None):
+        """The size the tool last committed as its window geometry, as the
+        compositor knows it: the container's size is what the compositor
+        wants, this is what the tool has taken."""
+        g = self.window(app_id)["geometry"]
+        return g["width"], g["height"]
+
     # ---- input ----
 
     def input(self, command, client=True):
