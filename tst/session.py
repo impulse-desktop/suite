@@ -216,22 +216,25 @@ class Session:
 
     # ---- input ----
 
-    def input(self, command):
+    def input(self, command, client=True):
+        """One command to the devices, delivered to the compositor; a key
+        that ends the tool is sent with client=False, as its release lands
+        after the exit."""
         self.input_serial += 1
         self.devices.stdin.write((command + "\n").encode())
         self.devices.stdin.flush()
-        self.wait(lambda: f"DONE {self.input_serial}\n" in (self.artifacts / "devices.log").read_text(), "input delivery")
+        self.wait(lambda: f"DONE {self.input_serial}\n" in (self.artifacts / "devices.log").read_text(), "input delivery", client=client)
 
-    def key(self, code, state):
-        self.input(f"key {code} {int(state)}")
+    def key(self, code, state, client=True):
+        self.input(f"key {code} {int(state)}", client=client)
 
-    def tap(self, code, hold=0.0):
+    def tap(self, code, hold=0.0, client=True):
         """Press and release an evdev key; a hold long enough lets the
         client's own repeat start."""
-        self.key(code, 1)
+        self.key(code, 1, client=client)
         if hold:
             time.sleep(hold)
-        self.key(code, 0)
+        self.key(code, 0, client=client)
         time.sleep(0.05)
 
     def pointer(self, x, y, app_id=None):
@@ -252,6 +255,28 @@ class Session:
 
     def scroll(self, steps):
         self.input(f"scroll {steps}")
+
+    def drag(self, x0, y0, x1, y1, code=BTN_LEFT, steps=4, pause=0.1, app_id=None):
+        """A button held from x0,y0 to x1,y1 of the window, in steps, a
+        moment each so the tool sees them as separate motions."""
+        self.pointer(x0, y0, app_id)
+        time.sleep(pause)
+        self.pointer(x0 + 1, y0, app_id)
+        time.sleep(pause)
+        self.pointer(x0, y0, app_id)
+        time.sleep(pause)
+        self.button(code)
+        time.sleep(pause)
+        for i in range(1, steps + 1):
+            self.pointer(x0 + (x1 - x0) * i // steps, y0 + (y1 - y0) * i // steps, app_id)
+            time.sleep(pause)
+        self.button(code, False)
+        time.sleep(0.3)
+
+    def said(self, what, times=1):
+        """The tool's own account of what it did (the test build's trace
+        lines), the times-th time."""
+        return self.wait(lambda: self.client_log().count(f"im screenshot: {what}") >= times, f"the tool saying {what!r} {times}x")
 
     # ---- pixels ----
 
@@ -305,7 +330,7 @@ class Session:
 
     def close(self, code=KEY_ESC):
         """Escape (or another key) leaves the tool; it must exit 0."""
-        self.tap(code)
+        self.tap(code, client=False)
         self.gone()
         assert self.finished() == 0, "the tool did not exit cleanly"
 
