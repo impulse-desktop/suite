@@ -72,9 +72,11 @@ imgui = library(
 
 
 im_sources = build.glob("$(S)/*.cpp")
+# the vendored libraries' own dependencies come along by name: an imported
+# graph hands over its archive, not what the archive wants linked
 im_deps = [
     *shader_rules, imgui, plt, libstd,
-    wayland_client, vulkan, png, jxl, display_info, system,
+    wayland_client, xkb, vulkan, png, jxl, display_info, system,
 ]
 
 # one binary, every tool: `im screenshot ...`, and a link named after the
