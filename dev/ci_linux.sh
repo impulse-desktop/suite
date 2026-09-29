@@ -10,7 +10,7 @@ if [ -f /etc/alpine-release ]; then
     # cov tools, for the coverage mode
     apk add --no-cache bash binutils clang21 compiler-rt llvm21 g++ linux-headers lld python3 pkgconf glslang \
         wayland-dev wayland-protocols libxkbcommon-dev cairo-dev fontconfig-dev \
-        vulkan-headers vulkan-loader-dev libpng-dev libjxl-dev libdisplay-info-dev
+        vulkan-headers vulkan-loader-dev libpng-dev libjxl-dev
     export CC=clang-21 CXX=clang++-21
     export LDFLAGS="${LDFLAGS:-} -fuse-ld=lld"
     export PATH="/usr/lib/llvm21/bin:$PATH"
@@ -21,7 +21,7 @@ else
     # graph names them when it is imported, whether they build or not
     apt-get install --yes --no-install-recommends python3 pkg-config glslang-tools \
         libwayland-dev libwayland-bin wayland-protocols libxkbcommon-dev libcairo2-dev libfontconfig-dev \
-        libvulkan-dev libpng-dev libjxl-dev libdisplay-info-dev
+        libvulkan-dev libpng-dev libjxl-dev
     if [ "$toolchain" = gcc ]; then
         export CC=gcc CXX=g++
     else

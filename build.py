@@ -32,7 +32,6 @@ xkb = pkg_config("xkbcommon")
 vulkan = pkg_config("vulkan")
 png = pkg_config("libpng")
 jxl = pkg_config("libjxl")
-display_info = pkg_config("libdisplay-info")
 
 libstd = import_build(std_build, "libstd.a", extra_cflags=["-Wno-error"])
 plt = import_build(
@@ -82,7 +81,7 @@ im_sources = build.glob("$(S)/*.cpp")
 # graph hands over its archive, not what the archive wants linked
 im_deps = [
     *shader_rules, imgui, plt, libstd,
-    wayland_client, xkb, vulkan, png, jxl, display_info, system,
+    wayland_client, xkb, vulkan, png, jxl, system,
 ]
 
 # one binary, every tool: `im screenshot ...`, and a link named after the

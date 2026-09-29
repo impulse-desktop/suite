@@ -36,8 +36,8 @@ library is not used, the vocabulary comes from
 ```
 
 The build wants clang, `pkg-config`, `wayland-scanner`, `glslangValidator`
-and the development files of wayland-client, vulkan, libpng, libjxl and
-libdisplay-info. `dev/style.py` formats the tree.
+and the development files of wayland-client, vulkan, libpng and libjxl.
+`dev/style.py` formats the tree.
 
 ## Testing
 

@@ -198,8 +198,6 @@ namespace {
                     img.color.displayMinNits = parseFloat(minString);
                     img.color.displayPeakNits = parseFloat(peakString);
                     img.color.displayMaxFallNits = parseFloat(fallString);
-                    img.color.encoding.targetMinNits = img.color.displayMinNits;
-                    img.color.encoding.targetMaxNits = img.color.displayPeakNits;
                 }
             }
         }
@@ -306,14 +304,14 @@ namespace {
         png_set_sRGB(png, info, PNG_sRGB_INTENT_PERCEPTUAL);
         png_write_info(png, info);
 
-        if (!img.color.hdr()) {
+        if (!img.color.hdr) {
             for (int y = y0; y < y1; y++) {
                 png_write_row(png, (png_bytep)(img.px + ((size_t)y * img.w + x0) * 4));
             }
         } else {
             Buffer row;
             row.zero((size_t)(x1 - x0) * 4);
-            OutputMapping mapping = outputMapping(OutputColorState::sdr());
+            OutputMapping mapping = sdrMapping();
 
             for (int y = y0; y < y1; y++) {
                 u8* dst = (u8*)row.mutData();
@@ -380,7 +378,7 @@ namespace {
         info.num_color_channels = 3;
         info.uses_original_profile = JXL_TRUE;
 
-        if (img.color.hdr()) {
+        if (img.color.hdr) {
             info.intensity_target = (float)img.color.displayPeakNits;
             info.min_nits = (float)img.color.displayMinNits;
             info.relative_to_max_display = JXL_FALSE;
@@ -389,7 +387,7 @@ namespace {
 
         JxlColorEncoding color{};
 
-        if (img.color.hdr()) {
+        if (img.color.hdr) {
             color.color_space = JXL_COLOR_SPACE_RGB;
             color.white_point = JXL_WHITE_POINT_D65;
             color.primaries = JXL_PRIMARIES_2100;
@@ -721,7 +719,7 @@ namespace {
             instanceExts.pushBack(exts[i]);
         }
 
-        if (img.color.hdr()) {
+        if (img.color.hdr) {
             instanceExts.pushBack(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME);
         }
 
@@ -2141,7 +2139,7 @@ namespace {
 
         ImDrawList* dl = ImGui::GetWindowDrawList();
 
-        if (img.color.hdr()) {
+        if (img.color.hdr) {
             // the screenshot draws itself, PQ decoded into the scene's
             // linear light by its own pipeline; ImGui's state comes back after
             ImageDraw draw{tex.imageSet, origin.x, origin.y, origin.x + content.x, origin.y + content.y, (float)img.color.sdrWhiteNits};
@@ -2519,9 +2517,9 @@ int mainScreenshot(StringView path) {
         int fbw = (int)bootInfo.width;
         int fbh = (int)bootInfo.height;
 
-        setupVulkanWindow(*shot, surface, fbw, fbh, loaded && img.color.hdr());
+        setupVulkanWindow(*shot, surface, fbw, fbh, loaded && img.color.hdr);
 
-        if (loaded && img.color.hdr()) {
+        if (loaded && img.color.hdr) {
             setupLinearHdr(*shot, (u32)fbw, (u32)fbh);
         }
 
@@ -2547,7 +2545,7 @@ int mainScreenshot(StringView path) {
         ii.PipelineInfoMain.Subpass = 0;
         ii.PipelineInfoMain.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
 
-        if (loaded && img.color.hdr()) {
+        if (loaded && img.color.hdr) {
             ii.CustomShaderFragCreateInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
             ii.CustomShaderFragCreateInfo.codeSize = sizeof(screenshot_scene_frag_spv);
             ii.CustomShaderFragCreateInfo.pCode = screenshot_scene_frag_spv;
