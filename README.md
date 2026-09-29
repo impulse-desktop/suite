@@ -60,3 +60,9 @@ to present to that Sway: lavapipe does, over wl_shm (`VK_DRIVER_FILES`
 names its ICD in CI); a hardware driver wants the dma-bufs a GPU-rendered
 Sway offers. `-Druntime=DIR` keeps the scenarios' Wayland sockets under a
 short path; the verdicts land in `.build/test-results/`.
+
+CI runs the scenarios in stock containers, under GCC with glibc, Clang
+with Alpine's musl, ASan, UBSan and with coverage; `dev/ci.sh MODE`
+(build, test, asan, ubsan, coverage) reproduces a job with the host's
+`CC`/`CXX` in `.build/ci-MODE`, `dev/ci_linux.sh` is the container
+recipe.

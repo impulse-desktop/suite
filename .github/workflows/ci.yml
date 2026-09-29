@@ -10,6 +10,15 @@ on:
 permissions:
   contents: read
 
+# Every job runs in a stock distribution container: dev/ci_linux.sh installs
+# the toolchain, the libraries and, for the scenarios, the compositor they
+# run under (a headless Sway, the tool's Vulkan on lavapipe), then hands
+# over to dev/ci.sh MODE. The build gates the rest.
+env:
+  UBUNTU_IMAGE: ubuntu:26.04
+  GCC_IMAGE: gcc:16.1.0-trixie
+  ALPINE_IMAGE: alpine:3.24.1
+
 jobs:
   build:
     name: Build
@@ -19,13 +28,12 @@ jobs:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Set up build environment
-        uses: ./.github/actions/setup
-
-      - name: Build the suite
+      - name: Build the tools
         run: |
           set -o pipefail
-          python3 ./build -j "$(nproc)" im im_test links \
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/workspace" --workdir /workspace \
+            "$UBUNTU_IMAGE" sh dev/ci_linux.sh build clang \
             2>&1 | tee "$RUNNER_TEMP/build.log"
 
       - name: Summarize failure
@@ -34,7 +42,7 @@ jobs:
           python3 dev/ci_report.py \
             --log "$RUNNER_TEMP/build.log" \
             --title "Build" \
-            --reproduce "./build im im_test links"
+            --reproduce "dev/ci.sh build"
 
       - name: Upload failure log
         if: failure()
@@ -46,58 +54,9 @@ jobs:
           retention-days: 7
           compression-level: 9
 
-  tests:
-    name: Tests
-    needs: build
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    steps:
-      - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Set up build environment
-        uses: ./.github/actions/setup
-
-      - name: Install the scenarios' compositor and tools
-        # the tools run as clients of a headless Sway drawn by pixman; the
-        # tool's own Vulkan is lavapipe, whose swapchain goes over wl_shm
-        run: |
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            sway swaybg grim fonts-dejavu-core mesa-vulkan-drivers
-          icd=$(find /usr/share/vulkan/icd.d -name 'lvp_icd*.json' -print -quit)
-          test -n "$icd"
-          echo "VK_DRIVER_FILES=$icd" >> "$GITHUB_ENV"
-          echo "VK_ICD_FILENAMES=$icd" >> "$GITHUB_ENV"
-          echo "LP_NUM_THREADS=2" >> "$GITHUB_ENV"
-
-      - name: Run the scenarios
-        # -k: a scenario node never fails, but a build error in one must not
-        # stop the others; the final test node reads every verdict
-        run: |
-          set -o pipefail
-          python3 ./build -j "$(nproc)" -k -Druntime=/tmp/im-e2e test \
-            2>&1 | tee "$RUNNER_TEMP/tests.log"
-
-      - name: Summarize failure
-        if: failure()
-        run: |
-          python3 dev/ci_report.py \
-            --log "$RUNNER_TEMP/tests.log" \
-            --title "Tests" \
-            --reproduce "./build test"
-
-      - name: Upload failure log
-        if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: tests-log
-          path: ${{ runner.temp }}/tests.log
-          if-no-files-found: ignore
-          retention-days: 7
-          compression-level: 9
-
   style:
     name: Style
+    needs: build
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -113,3 +72,204 @@ jobs:
         run: |
           CLANG_FORMAT=clang-format-21 python3 dev/style.py
           git diff --exit-code
+
+  tests-glibc:
+    name: Tests GCC / glibc
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build the tools and run the scenarios
+        run: |
+          set -o pipefail
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/workspace" --workdir /workspace \
+            "$GCC_IMAGE" sh dev/ci_linux.sh test gcc \
+            2>&1 | tee "$RUNNER_TEMP/tests-glibc.log"
+
+      - name: Summarize failure
+        if: failure()
+        run: |
+          python3 dev/ci_report.py \
+            --log "$RUNNER_TEMP/tests-glibc.log" \
+            --title "Tests GCC / glibc" \
+            --reproduce "CC=gcc CXX=g++ dev/ci.sh test"
+
+      - name: Upload failure log
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tests-glibc-log
+          path: ${{ runner.temp }}/tests-glibc.log
+          if-no-files-found: ignore
+          retention-days: 7
+          compression-level: 9
+
+  tests-musl:
+    name: Tests Clang / Alpine musl
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build the tools and run the scenarios
+        run: |
+          set -o pipefail
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/workspace" --workdir /workspace \
+            "$ALPINE_IMAGE" sh dev/ci_linux.sh test clang \
+            2>&1 | tee "$RUNNER_TEMP/tests-musl.log"
+
+      - name: Summarize failure
+        if: failure()
+        run: |
+          python3 dev/ci_report.py \
+            --log "$RUNNER_TEMP/tests-musl.log" \
+            --title "Tests Clang / Alpine musl" \
+            --reproduce "dev/ci.sh test"
+
+      - name: Upload failure log
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tests-musl-log
+          path: ${{ runner.temp }}/tests-musl.log
+          if-no-files-found: ignore
+          retention-days: 7
+          compression-level: 9
+
+  tests-asan:
+    name: Tests Clang / ASan
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build the tools and run the scenarios
+        run: |
+          set -o pipefail
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/workspace" --workdir /workspace \
+            "$UBUNTU_IMAGE" sh dev/ci_linux.sh asan clang \
+            2>&1 | tee "$RUNNER_TEMP/tests-asan.log"
+
+      - name: Summarize failure
+        if: failure()
+        run: |
+          python3 dev/ci_report.py \
+            --log "$RUNNER_TEMP/tests-asan.log" \
+            --title "Tests Clang / ASan" \
+            --reproduce "dev/ci.sh asan"
+
+      - name: Upload failure log
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tests-asan-log
+          path: ${{ runner.temp }}/tests-asan.log
+          if-no-files-found: ignore
+          retention-days: 7
+          compression-level: 9
+
+  tests-ubsan:
+    name: Tests Clang / UBSan
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build the tools and run the scenarios
+        run: |
+          set -o pipefail
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/workspace" --workdir /workspace \
+            "$UBUNTU_IMAGE" sh dev/ci_linux.sh ubsan clang \
+            2>&1 | tee "$RUNNER_TEMP/tests-ubsan.log"
+
+      - name: Summarize failure
+        if: failure()
+        run: |
+          python3 dev/ci_report.py \
+            --log "$RUNNER_TEMP/tests-ubsan.log" \
+            --title "Tests Clang / UBSan" \
+            --reproduce "dev/ci.sh ubsan"
+
+      - name: Upload failure log
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tests-ubsan-log
+          path: ${{ runner.temp }}/tests-ubsan.log
+          if-no-files-found: ignore
+          retention-days: 7
+          compression-level: 9
+
+  coverage:
+    name: Coverage
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build the tools and run the scenarios
+        run: |
+          set -o pipefail
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/workspace" --workdir /workspace \
+            "$UBUNTU_IMAGE" sh dev/ci_linux.sh coverage clang \
+            2>&1 | tee "$RUNNER_TEMP/coverage.log"
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          use_oidc: true
+          files: .coverage/coverage.info
+          disable_search: true
+          fail_ci_if_error: true
+          name: linux-clang
+          verbose: true
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-report
+          path: |
+            .coverage/coverage.info
+            .coverage/summary.txt
+            .coverage/html
+          if-no-files-found: ignore
+          retention-days: 14
+          compression-level: 9
+
+      - name: Summarize failure
+        if: failure()
+        run: |
+          python3 dev/ci_report.py \
+            --log "$RUNNER_TEMP/coverage.log" \
+            --title "Coverage" \
+            --reproduce "dev/ci.sh coverage"
+
+      - name: Upload failure log
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-log
+          path: ${{ runner.temp }}/coverage.log
+          if-no-files-found: ignore
+          retention-days: 7
+          compression-level: 9

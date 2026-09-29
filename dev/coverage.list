@@ -1,0 +1,6 @@
+# Coverage is the tools' own: nothing under ext/ (libstd, plt, the imgui
+# fork) is instrumented, so the report has only the suite's sources and
+# libstd's context-switch assembly, which no instrumentation survives, is
+# left alone with the rest.
+[clang]
+!src:*/ext/*

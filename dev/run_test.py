@@ -17,6 +17,7 @@ import json
 import os
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -52,7 +53,15 @@ def collect(artifacts):
     return evidence
 
 
-def run(args):
+def open_to_all(path):
+    """A directory the scenario writes into when it runs as another user."""
+    os.chmod(path, stat.S_IRWXU | stat.S_IRWXG | stat.S_IRWXO | stat.S_ISVTX)
+
+
+def run(name, args):
+    # the compositor refuses to run as root: a container builds as root and
+    # runs the scenario as nobody, with the directories it writes open to it
+    as_nobody = os.geteuid() == 0
     artifacts = tempfile.mkdtemp(prefix="im-")
     env = {
         **os.environ,
@@ -65,13 +74,25 @@ def run(args):
     if args.runtime:
         os.makedirs(args.runtime, exist_ok=True)
         env["IM_E2E_TMP"] = os.path.abspath(args.runtime)
+    # a coverage run names every process's profile after this scenario:
+    # pids are reused over a run, and two processes sharing a name means
+    # one of them is lost
+    profile = env.get("LLVM_PROFILE_FILE")
+    if profile:
+        env["LLVM_PROFILE_FILE"] = os.path.join(os.path.dirname(profile), f"{name}-%p.profraw")
+    if as_nobody:
+        open_to_all(artifacts)
+        if args.runtime:
+            open_to_all(args.runtime)
     started = time.monotonic()
     log = os.path.join(artifacts, "driver.log")
+    command = [sys.executable, args.scenario]
+    if as_nobody:
+        command = ["runuser", "-u", "nobody", "--", *command]
     with open(log, "w") as out:
         # its own session: a timeout kills the compositor and the devices
         # the scenario started along with it
-        process = subprocess.Popen([sys.executable, args.scenario], env=env, stdout=out, stderr=subprocess.STDOUT,
-                                   start_new_session=True)
+        process = subprocess.Popen(command, env=env, stdout=out, stderr=subprocess.STDOUT, start_new_session=True)
         try:
             code = process.wait(timeout=args.timeout)
             status = PASS if code == 0 else FAIL
@@ -97,7 +118,7 @@ def main():
     args = parser.parse_args()
     name = os.path.basename(args.scenario)[:-len(".py")]
     try:
-        record = run(args)
+        record = run(name, args)
     except Exception as e:  # never let a runner bug abort the graph
         record = dict(status=FAIL, seconds=0.0, detail=f"runner error: {e}", artifacts={})
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
