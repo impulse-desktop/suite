@@ -267,11 +267,135 @@ jobs:
           retention-days: 7
           compression-level: 9
 
-  coverage:
-    name: Coverage
+  coverage-ubuntu:
+    name: Coverage Ubuntu
     needs: build
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build the tools and run the scenarios with coverage
+        run: |
+          set -o pipefail
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/workspace" --workdir /workspace \
+            "$UBUNTU_IMAGE" sh dev/ci_linux.sh coverage clang \
+            2>&1 | tee "$RUNNER_TEMP/coverage-ubuntu.log"
+
+      - name: Upload what the failed scenarios captured
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-ubuntu-evidence
+          path: .build/ci-*/evidence
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 7
+          compression-level: 9
+
+      - name: Upload the shard's tracefile
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-ubuntu
+          path: |
+            .coverage/coverage.info
+            .coverage/summary.txt
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Summarize failure
+        if: failure()
+        run: |
+          python3 dev/ci_report.py \
+            --log "$RUNNER_TEMP/coverage-ubuntu.log" \
+            --title "Coverage Ubuntu" \
+            --reproduce "dev/ci.sh coverage"
+
+      - name: Upload failure log
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-ubuntu-log
+          path: ${{ runner.temp }}/coverage-ubuntu.log
+          if-no-files-found: ignore
+          retention-days: 7
+          compression-level: 9
+
+  coverage-alpine:
+    name: Coverage Alpine
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Give the compositor its dma-bufs
+        # as in the Alpine tests job: wlroots' Vulkan renderer allocates
+        # through udmabuf
+        run: |
+          [ -e /dev/udmabuf ] || sudo modprobe udmabuf || true
+          test -e /dev/udmabuf
+          sudo chmod 666 /dev/udmabuf
+
+      - name: Build the tools and run the scenarios with coverage
+        run: |
+          set -o pipefail
+          docker run --rm --device /dev/udmabuf \
+            --volume "$GITHUB_WORKSPACE:/workspace" --workdir /workspace \
+            "$ALPINE_IMAGE" sh dev/ci_linux.sh coverage clang \
+            2>&1 | tee "$RUNNER_TEMP/coverage-alpine.log"
+
+      - name: Upload what the failed scenarios captured
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-alpine-evidence
+          path: .build/ci-*/evidence
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 7
+          compression-level: 9
+
+      - name: Upload the shard's tracefile
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-alpine
+          path: |
+            .coverage/coverage.info
+            .coverage/summary.txt
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Summarize failure
+        if: failure()
+        run: |
+          python3 dev/ci_report.py \
+            --log "$RUNNER_TEMP/coverage-alpine.log" \
+            --title "Coverage Alpine" \
+            --reproduce "dev/ci.sh coverage"
+
+      - name: Upload failure log
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-alpine-log
+          path: ${{ runner.temp }}/coverage-alpine.log
+          if-no-files-found: ignore
+          retention-days: 7
+          compression-level: 9
+
+  coverage:
+    name: Coverage
+    # the two shards see different scenarios: Ubuntu's sway skips the HDR
+    # ones, Alpine's runs them; the merge is what Codecov gets
+    needs: [coverage-ubuntu, coverage-alpine]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: read
       id-token: write
@@ -279,63 +403,45 @@ jobs:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Build the tools and run the scenarios
+      - name: Download the shards' tracefiles
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: coverage-*
+          path: ${{ runner.temp }}/coverage-shards
+
+      - name: Merge the shards' tracefiles
         run: |
           set -o pipefail
-          docker run --rm \
-            --volume "$GITHUB_WORKSPACE:/workspace" --workdir /workspace \
-            "$UBUNTU_IMAGE" sh dev/ci_linux.sh coverage clang \
-            2>&1 | tee "$RUNNER_TEMP/coverage.log"
-
-      - name: Upload what the failed scenarios captured
-        if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: coverage-evidence
-          path: .build/ci-*/evidence
-          include-hidden-files: true
-          if-no-files-found: ignore
-          retention-days: 7
-          compression-level: 9
+          report="$RUNNER_TEMP/coverage-report"
+          mkdir -p "$report"
+          python3 dev/merge_lcov.py \
+            --output "$report/coverage.info" \
+            --summary "$report/summary.txt" \
+            "$RUNNER_TEMP"/coverage-shards/coverage-*/coverage.info
+          {
+            echo "## Merged coverage"
+            echo
+            echo '```text'
+            cat "$report/summary.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           use_oidc: true
-          files: .coverage/coverage.info
+          files: ${{ runner.temp }}/coverage-report/coverage.info
           disable_search: true
           fail_ci_if_error: true
-          name: linux-clang
+          name: ubuntu-alpine
           verbose: true
 
-      - name: Upload coverage report
+      - name: Upload the merged report
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: coverage-report
-          path: |
-            .coverage/coverage.info
-            .coverage/summary.txt
-            .coverage/html
-          include-hidden-files: true
-          if-no-files-found: ignore
+          path: ${{ runner.temp }}/coverage-report
+          if-no-files-found: error
           retention-days: 14
-          compression-level: 9
-
-      - name: Summarize failure
-        if: failure()
-        run: |
-          python3 dev/ci_report.py \
-            --log "$RUNNER_TEMP/coverage.log" \
-            --title "Coverage" \
-            --reproduce "dev/ci.sh coverage"
-
-      - name: Upload failure log
-        if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: coverage-log
-          path: ${{ runner.temp }}/coverage.log
-          if-no-files-found: ignore
-          retention-days: 7
           compression-level: 9

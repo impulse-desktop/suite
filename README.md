@@ -70,7 +70,8 @@ management from 1.12 and only under wlroots' Vulkan renderer:
 `IM_E2E_RENDERER=vulkan` picks it, and the Alpine job runs so.
 
 CI runs the scenarios in stock containers, under GCC with glibc, Clang
-with Alpine's musl, ASan, UBSan and with coverage; `dev/ci.sh MODE`
+with Alpine's musl, ASan, UBSan and with coverage on both Ubuntu and
+Alpine, merged (only Alpine's sway runs the HDR scenarios); `dev/ci.sh MODE`
 (build, test, asan, ubsan, coverage) reproduces a job with the host's
 `CC`/`CXX` in `.build/ci-MODE`, `dev/ci_linux.sh` is the container
 recipe.

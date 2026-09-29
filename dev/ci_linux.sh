@@ -6,11 +6,14 @@ set -eu
 mode=${1:-test}
 toolchain=${2:-clang}
 if [ -f /etc/alpine-release ]; then
-    apk add --no-cache bash binutils clang21 g++ linux-headers lld python3 pkgconf glslang \
+    # compiler-rt carries clang's profile runtime, llvm21 its profdata and
+    # cov tools, for the coverage mode
+    apk add --no-cache bash binutils clang21 compiler-rt llvm21 g++ linux-headers lld python3 pkgconf glslang \
         wayland-dev wayland-protocols libxkbcommon-dev cairo-dev fontconfig-dev \
         vulkan-headers vulkan-loader-dev libpng-dev libjxl-dev libdisplay-info-dev
     export CC=clang-21 CXX=clang++-21
     export LDFLAGS="${LDFLAGS:-} -fuse-ld=lld"
+    export PATH="/usr/lib/llvm21/bin:$PATH"
 else
     export DEBIAN_FRONTEND=noninteractive
     apt-get update
