@@ -54,7 +54,6 @@ if [ "$mode" != build ]; then
     if [ -f /etc/alpine-release ]; then
         export IM_E2E_RENDERER=vulkan
         export WLR_RENDERER_FORCE_SOFTWARE=1
-        export IM_E2E_COMPOSITOR_GDB=1
     fi
 fi
 exec bash dev/ci.sh "$mode"

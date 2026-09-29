@@ -80,6 +80,10 @@ class Session:
                 # behind the tool); a GPU renderer offers the dma-bufs a
                 # hardware Vulkan driver's swapchain wants (a developer's box)
                 WLR_RENDERER=os.environ.get("IM_E2E_RENDERER", "pixman"),
+                # the cursor drawn into the frame, never into a buffer of
+                # its own: lavapipe's rasteriser faults on the ten by
+                # sixteen the Vulkan renderer would give it
+                WLR_NO_HARDWARE_CURSORS="1",
                 DBUS_SESSION_BUS_ADDRESS="unix:path=/dev/null",
             )
             config = self.artifacts / "sway.config"
