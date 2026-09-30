@@ -1,4 +1,4 @@
-# Contributing to the impulse suite
+# Contributing to the imsuite
 
 The architecture of this project is designed by a human. Every change is
 reviewed by a human, and performance work is also profiled and evaluated by a
