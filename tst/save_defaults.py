@@ -9,8 +9,8 @@ from session import Session, png_size
 with Session("save_defaults") as s:
     shot = s.capture_file("good.shot", 64, 48)
     pics = s.artifacts / "pics"
-    code, log = s.run(str(shot), cwd=str(s.artifacts), unset=("IMWAY_SHOT_DIR",),
-                      XDG_PICTURES_DIR="pics", IMWAY_SHOT_NAME="", IMWAY_SHOT_FORMAT="png", IMWAY_SHOT_ACTION="save")
+    code, log = s.run(str(shot), cwd=str(s.artifacts), unset=("IM_SHOT_DIR",),
+                      XDG_PICTURES_DIR="pics", IM_SHOT_NAME="", IM_SHOT_FORMAT="png", IM_SHOT_ACTION="save")
     assert code == 0, f"the save failed ({code}):\n{log}"
     saved = sorted((pics / "screenshots").glob("imway-*.png")) if (pics / "screenshots").is_dir() else []
     assert saved, f"the save did not land in the default place:\n{log}"

@@ -12,7 +12,7 @@ with Session("keypad") as s:
     pixels = bytes(b for y in range(h) for x in range(w) for b in ((x * 255) // w, (y * 255) // h, ((x ^ y) & 64) * 3, 255))
     shot = s.capture_file("pattern.shot", w, h, pixels=pixels)
     shots = s.artifacts / "shots"
-    s.launch(str(shot), IMWAY_SHOT_DIR=str(shots), IMWAY_SHOT_NAME="keypad", IMWAY_SHOT_FORMAT="png")
+    s.launch(str(shot), IM_SHOT_DIR=str(shots), IM_SHOT_NAME="keypad", IM_SHOT_FORMAT="png")
     s.focus()
     vw, vh = s.size()
     base = s.settled("base")

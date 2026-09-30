@@ -18,7 +18,7 @@ with Session("usage") as s:
     code, log = s.run()
     assert code == 2 and "usage: im screenshot <path|fd:N>" in log, f"imscreenshot without a path: rc={code}:\n{log}"
 
-    code, log = s.run("screenshot", str(shot), command=s.binary, IMWAY_SHOT_ACTION="save", IMWAY_SHOT_FORMAT="png",
-                      IMWAY_SHOT_DIR=str(shots), IMWAY_SHOT_NAME="byword")
+    code, log = s.run("screenshot", str(shot), command=s.binary, IM_SHOT_ACTION="save", IM_SHOT_FORMAT="png",
+                      IM_SHOT_DIR=str(shots), IM_SHOT_NAME="byword")
     assert code == 0 and png_size(shots / "byword.png") == (64, 48), f"im screenshot PATH did not save (rc={code}):\n{log}"
     print("OK: the binary prints its usage where it has no tool or no path, and runs a tool by its first word")

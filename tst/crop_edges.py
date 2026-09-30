@@ -12,7 +12,7 @@ with Session("crop_edges") as s:
     canvas_x = 208
 
     def capture(name, dx0, dy0, dx1, dy1):
-        s.launch(str(shot), IMWAY_SHOT_DIR=str(shots), IMWAY_SHOT_NAME=name, IMWAY_SHOT_FORMAT="png")
+        s.launch(str(shot), IM_SHOT_DIR=str(shots), IM_SHOT_NAME=name, IM_SHOT_FORMAT="png")
         s.focus()
         s.settled("opened-" + name)
         s.drag(canvas_x + dx0, dy0, canvas_x + dx1, dy1)

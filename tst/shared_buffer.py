@@ -1,6 +1,6 @@
 """The capture as a KMS session hands it over: the scanout buffer itself,
 a dma-buf on fd 3, its layout and its exporting device in
-IMWAY_SHOT_DMABUF. A udmabuf stands in for the scanout here: the tool
+IM_SHOT_DMABUF. A udmabuf stands in for the scanout here: the tool
 imports it on the device the UUID names, shows it, and reads the
 selection back from it for a PNG and a JPEG XL; with HDR colour metadata
 the PNG comes from the readback's 16-bit samples."""
@@ -19,8 +19,8 @@ with Session("shared_buffer") as s:
     probes = [(0, 0), (17, 5), (63, 47), (40, 20)]
 
     def save(name, fmt, **colour):
-        code, log = s.run("fd:3", fd3=fd, IMWAY_SHOT_DMABUF=spec, IMWAY_SHOT_ACTION="save", IMWAY_SHOT_FORMAT=fmt,
-                          IMWAY_SHOT_DIR=str(shots), IMWAY_SHOT_NAME=name, **colour)
+        code, log = s.run("fd:3", fd3=fd, IM_SHOT_DMABUF=spec, IM_SHOT_ACTION="save", IM_SHOT_FORMAT=fmt,
+                          IM_SHOT_DIR=str(shots), IM_SHOT_NAME=name, **colour)
         assert code == 0, f"{name}: the save from the shared buffer failed (rc={code}):\n{log}"
         return shots / f"{name}.{fmt}"
 
@@ -37,7 +37,7 @@ with Session("shared_buffer") as s:
         assert samples[at:at + 3] == tuple(c * 257 for c in rgb[y * w + x]), f"pixel {x},{y} read back as {samples[at:at + 3]}"
 
     # the editor shows the imported buffer
-    s.launch("fd:3", fd3=fd, IMWAY_SHOT_DMABUF=spec)
+    s.launch("fd:3", fd3=fd, IM_SHOT_DMABUF=spec)
     s.focus()
 
     def drawn():
@@ -50,7 +50,7 @@ with Session("shared_buffer") as s:
 
     if "wp_color_manager_v1" in s.globals:
         # HDR: the PNG comes from the readback's 16-bit samples, PQ decoded
-        pw, ph, px = png_pixels(save("shared-hdr", "png", IMWAY_SHOT_COLOR="1:203"))
+        pw, ph, px = png_pixels(save("shared-hdr", "png", IM_SHOT_COLOR="1:203"))
         for x, y in probes:
             at = (y * w + x) * 4
             expected = hdr_png_pixel(tuple(pq_decode(c / 255) for c in rgb[y * w + x]))

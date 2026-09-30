@@ -39,29 +39,29 @@ with Session("input_errors") as s:
     error_panel("a missing file", missing)
     error_panel("a file of zero width", no_width)
     error_panel("a file of zero height", no_height)
-    error_panel("too few fields", good, IMWAY_SHOT_DMABUF="64:48:44")
-    error_panel("a field past 64 bits", good, IMWAY_SHOT_DMABUF=f"64:48:44:0:256:0:99999999999999999999999:{uuid}")
-    error_panel("a GPU id that is not hex", good, IMWAY_SHOT_DMABUF="64:48:44:0:256:0:12288:zz112233445566778899aabbccddeeff")
-    error_panel("an empty field", good, IMWAY_SHOT_DMABUF=f"64::44:0:256:0:12288:{uuid}")
-    error_panel("a negative field", good, IMWAY_SHOT_DMABUF=f"64:-48:44:0:256:0:12288:{uuid}")
-    error_panel("two fields run together", good, IMWAY_SHOT_DMABUF=f"64x48:44:0:256:0:12288:{uuid}")
-    error_panel("a GPU id too short", good, IMWAY_SHOT_DMABUF="64:48:44:0:256:0:12288:00112233445566778899aabbccddee")
-    error_panel("a GPU id in capitals", good, IMWAY_SHOT_DMABUF="64:48:44:0:256:0:12288:00112233445566778899AABBCCDDEEFF")
-    error_panel("a GPU id with punctuation", good, IMWAY_SHOT_DMABUF="64:48:44:0:256:0:12288:00112233-45566778899aabbccddeeff")
-    error_panel("a zero stride", good, IMWAY_SHOT_DMABUF=f"64:48:44:0:0:0:12288:{uuid}")
-    error_panel("a zero width", good, IMWAY_SHOT_DMABUF=f"0:48:44:0:256:0:12288:{uuid}")
-    error_panel("a zero height", good, IMWAY_SHOT_DMABUF=f"64:0:44:0:256:0:12288:{uuid}")
-    error_panel("a zero size", good, IMWAY_SHOT_DMABUF=f"64:48:44:0:256:0:0:{uuid}")
-    error_panel("a buffer that cannot be opened", missing, IMWAY_SHOT_DMABUF=f"64:48:44:0:256:0:12288:{uuid}")
-    image("colour without a volume", good, IMWAY_SHOT_COLOR="0:203")
-    image("colour without a transfer", good, IMWAY_SHOT_COLOR="garbage")
+    error_panel("too few fields", good, IM_SHOT_DMABUF="64:48:44")
+    error_panel("a field past 64 bits", good, IM_SHOT_DMABUF=f"64:48:44:0:256:0:99999999999999999999999:{uuid}")
+    error_panel("a GPU id that is not hex", good, IM_SHOT_DMABUF="64:48:44:0:256:0:12288:zz112233445566778899aabbccddeeff")
+    error_panel("an empty field", good, IM_SHOT_DMABUF=f"64::44:0:256:0:12288:{uuid}")
+    error_panel("a negative field", good, IM_SHOT_DMABUF=f"64:-48:44:0:256:0:12288:{uuid}")
+    error_panel("two fields run together", good, IM_SHOT_DMABUF=f"64x48:44:0:256:0:12288:{uuid}")
+    error_panel("a GPU id too short", good, IM_SHOT_DMABUF="64:48:44:0:256:0:12288:00112233445566778899aabbccddee")
+    error_panel("a GPU id in capitals", good, IM_SHOT_DMABUF="64:48:44:0:256:0:12288:00112233445566778899AABBCCDDEEFF")
+    error_panel("a GPU id with punctuation", good, IM_SHOT_DMABUF="64:48:44:0:256:0:12288:00112233-45566778899aabbccddeeff")
+    error_panel("a zero stride", good, IM_SHOT_DMABUF=f"64:48:44:0:0:0:12288:{uuid}")
+    error_panel("a zero width", good, IM_SHOT_DMABUF=f"0:48:44:0:256:0:12288:{uuid}")
+    error_panel("a zero height", good, IM_SHOT_DMABUF=f"64:0:44:0:256:0:12288:{uuid}")
+    error_panel("a zero size", good, IM_SHOT_DMABUF=f"64:48:44:0:256:0:0:{uuid}")
+    error_panel("a buffer that cannot be opened", missing, IM_SHOT_DMABUF=f"64:48:44:0:256:0:12288:{uuid}")
+    image("colour without a volume", good, IM_SHOT_COLOR="0:203")
+    image("colour without a transfer", good, IM_SHOT_COLOR="garbage")
     # a ui scale below zero is no scale: the editor opens at scale 1, the
     # 64x48 capture at 50% beside the 200px panel and 8px of spacing, as
     # tall as the panel's minimum
-    assert opened("a negative ui scale", good, IMGUI_SCALE="-2") == (240, 220), f"a negative ui scale: {s.size()}"
+    assert opened("a negative ui scale", good, IM_SCALE="-2") == (240, 220), f"a negative ui scale: {s.size()}"
     s.close()
 
-    code, log = s.run(str(good), IMWAY_SHOT_DMABUF=f"64:48:44:0:256:0:12288:{uuid}")
+    code, log = s.run(str(good), IM_SHOT_DMABUF=f"64:48:44:0:256:0:12288:{uuid}")
     assert code == 1, f"an unknown GPU did not fail the tool (rc={code}):\n{log}"
     assert "shared screenshot gpu is unavailable" in log, f"the unknown GPU was not reported:\n{log}"
     print("OK: unusable inputs open the error panel or are reported")

@@ -13,7 +13,7 @@ with Session("crop_drag") as s:
     shots = s.artifacts / "shots"
 
     def open_editor(name):
-        s.launch(str(shot), IMWAY_SHOT_DIR=str(shots), IMWAY_SHOT_NAME=name, IMWAY_SHOT_FORMAT="png")
+        s.launch(str(shot), IM_SHOT_DIR=str(shots), IM_SHOT_NAME=name, IM_SHOT_FORMAT="png")
         s.focus()
         s.settled("opened-" + name)
 

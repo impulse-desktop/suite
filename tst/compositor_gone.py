@@ -9,7 +9,7 @@ from session import Session
 with Session("compositor_gone") as s:
     shot = s.capture_file("good.shot", 64, 48)
     shots = s.artifacts / "shots"
-    s.launch(str(shot), IMWAY_SHOT_DIR=str(shots), IMWAY_SHOT_NAME="orphan", IMWAY_SHOT_FORMAT="png")
+    s.launch(str(shot), IM_SHOT_DIR=str(shots), IM_SHOT_NAME="orphan", IM_SHOT_FORMAT="png")
     s.focus()
     time.sleep(0.5)
     s.compositor.terminate()

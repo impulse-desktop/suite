@@ -19,12 +19,12 @@ with Session("save_env") as s:
     shots = s.artifacts / "shots"
 
     def save(what, expected, **env):
-        code, log = s.run(str(shot), unset=("XDG_PICTURES_DIR",), IMWAY_SHOT_ACTION="save", **env)
+        code, log = s.run(str(shot), unset=("XDG_PICTURES_DIR",), IM_SHOT_ACTION="save", **env)
         assert code == 0 and expected.is_file() and expected.stat().st_size, f"{what}: nothing saved at {expected} (rc={code}):\n{log}"
 
-    save("quality 0", shots / "low.jxl", IMWAY_SHOT_DIR=str(shots), IMWAY_SHOT_NAME="low", IMWAY_SHOT_FORMAT="jxl", IMWAY_SHOT_LOSSLESS="0", IMWAY_SHOT_QUALITY="0")
-    save("quality 150", shots / "high.jxl", IMWAY_SHOT_DIR=str(shots), IMWAY_SHOT_NAME="high", IMWAY_SHOT_FORMAT="jxl", IMWAY_SHOT_LOSSLESS="0", IMWAY_SHOT_QUALITY="150")
-    save("no quality", shots / "default.jxl", IMWAY_SHOT_DIR=str(shots), IMWAY_SHOT_NAME="default", IMWAY_SHOT_FORMAT="jxl", IMWAY_SHOT_LOSSLESS="0")
+    save("quality 0", shots / "low.jxl", IM_SHOT_DIR=str(shots), IM_SHOT_NAME="low", IM_SHOT_FORMAT="jxl", IM_SHOT_LOSSLESS="0", IM_SHOT_QUALITY="0")
+    save("quality 150", shots / "high.jxl", IM_SHOT_DIR=str(shots), IM_SHOT_NAME="high", IM_SHOT_FORMAT="jxl", IM_SHOT_LOSSLESS="0", IM_SHOT_QUALITY="150")
+    save("no quality", shots / "default.jxl", IM_SHOT_DIR=str(shots), IM_SHOT_NAME="default", IM_SHOT_FORMAT="jxl", IM_SHOT_LOSSLESS="0")
     low, high, default = ((shots / f"{name}.jxl").stat().st_size for name in ("low", "high", "default"))
     print(f"jxl sizes: quality 0 -> {low}, unset -> {default}, quality 150 -> {high}")
     assert all(is_jxl(shots / f"{name}.jxl") for name in ("low", "high", "default")), "not JPEG XL streams"
@@ -33,14 +33,14 @@ with Session("save_env") as s:
 
     home = s.artifacts / "home"
     home.mkdir()
-    save("no directory at all", home / "Pictures" / "screenshots" / "homed.png", HOME=str(home), IMWAY_SHOT_DIR="", IMWAY_SHOT_NAME="homed", IMWAY_SHOT_FORMAT="png")
+    save("no directory at all", home / "Pictures" / "screenshots" / "homed.png", HOME=str(home), IM_SHOT_DIR="", IM_SHOT_NAME="homed", IM_SHOT_FORMAT="png")
 
     # nothing set at all, not even HOME, and an empty XDG_PICTURES_DIR: the
     # stamped default name under ./Pictures/screenshots
     bare = s.artifacts / "bare"
     bare.mkdir()
-    code, log = s.run(str(shot), cwd=str(bare), unset=("IMWAY_SHOT_DIR", "IMWAY_SHOT_NAME", "HOME"),
-                      XDG_PICTURES_DIR="", IMWAY_SHOT_ACTION="save", IMWAY_SHOT_FORMAT="png")
+    code, log = s.run(str(shot), cwd=str(bare), unset=("IM_SHOT_DIR", "IM_SHOT_NAME", "HOME"),
+                      XDG_PICTURES_DIR="", IM_SHOT_ACTION="save", IM_SHOT_FORMAT="png")
     stamped = sorted((bare / "Pictures" / "screenshots").glob("imway-*.png")) if (bare / "Pictures" / "screenshots").is_dir() else []
     assert code == 0 and stamped, f"nothing set: no stamped file under ./Pictures/screenshots (rc={code}):\n{log}"
     assert re.fullmatch(r"imway-\d{8}-\d{6}\.png", stamped[0].name), f"nothing set: not the default name ({stamped[0].name})"

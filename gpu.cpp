@@ -699,7 +699,7 @@ void vkcAt(StringView site, VkResult e) {
 }
 
 void readUiScale() {
-    if (const char* s = getenv("IMGUI_SCALE")) {
+    if (const char* s = getenv("IM_SCALE")) {
         double v = parseFloat(StringView(s));
 
         if (v > 0.0) {

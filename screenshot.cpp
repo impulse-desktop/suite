@@ -131,7 +131,7 @@ namespace {
         bool inherited = path == "fd:3"_sv;
         Buffer p(inherited ? "/proc/self/fd/3"_sv : path);
 
-        if (const char* color = getenv("IMWAY_SHOT_COLOR")) {
+        if (const char* color = getenv("IM_SHOT_COLOR")) {
             StringView value(color), hs, rest;
 
             if (value.split(':', hs, rest)) {
@@ -158,7 +158,7 @@ namespace {
             }
         }
 
-        if (const char* spec = getenv("IMWAY_SHOT_DMABUF")) {
+        if (const char* spec = getenv("IM_SHOT_DMABUF")) {
             if (!parseShared(StringView(spec), img)) {
                 fail("bad shared screenshot metadata"_sv);
             }
@@ -352,7 +352,7 @@ namespace {
         JxlEncoderFrameSettings* frame = gChaos->encoderAlloc(true) ? JxlEncoderFrameSettingsCreate(enc, nullptr) : nullptr;
         JxlPixelFormat format{3, JXL_TYPE_UINT16, JXL_NATIVE_ENDIAN, 0};
         size_t bytes = (size_t)w * h * 3 * sizeof(u16);
-        bool lossless = !getenv("IMWAY_SHOT_LOSSLESS") || StringView(getenv("IMWAY_SHOT_LOSSLESS")) != "0"_sv;
+        bool lossless = !getenv("IM_SHOT_LOSSLESS") || StringView(getenv("IM_SHOT_LOSSLESS")) != "0"_sv;
         bool frameConfigured = false;
 
         if (frame) {
@@ -361,7 +361,7 @@ namespace {
             } else {
                 double quality = 90.;
 
-                if (const char* value = getenv("IMWAY_SHOT_QUALITY")) {
+                if (const char* value = getenv("IM_SHOT_QUALITY")) {
                     quality = strtod(value, nullptr);
                 }
 
@@ -434,7 +434,7 @@ namespace {
     Buffer destPath() {
         Buffer dir;
         StringBuilder builder((Buffer&&)dir);
-        const char* configured = getenv("IMWAY_SHOT_DIR");
+        const char* configured = getenv("IM_SHOT_DIR");
         const char* base = getenv("XDG_PICTURES_DIR");
 
         if (configured && *configured) {
@@ -460,7 +460,7 @@ namespace {
         localtime_r(&t, &tm);
 
         char stamp[256];
-        const char* name = getenv("IMWAY_SHOT_NAME");
+        const char* name = getenv("IM_SHOT_NAME");
 
         if (!name || !*name) {
             name = "imway-%Y%m%d-%H%M%S";
@@ -470,7 +470,7 @@ namespace {
             fail("screenshot filename is too long"_sv);
         }
 
-        StringView extension = getenv("IMWAY_SHOT_FORMAT") && StringView(getenv("IMWAY_SHOT_FORMAT")) == "png"_sv ? ".png"_sv : ".jxl"_sv;
+        StringView extension = getenv("IM_SHOT_FORMAT") && StringView(getenv("IM_SHOT_FORMAT")) == "png"_sv ? ".png"_sv : ".jxl"_sv;
 
         return Buffer(sv(StringBuilder() << sv(dir) << "/"_sv << StringView(stamp) << extension));
     }
@@ -1168,7 +1168,7 @@ int mainScreenshot(StringView path) {
 
         // interactive phase: the cropper, or the error panel if the load failed
         int action = 0;
-        StringView configuredAction(getenv("IMWAY_SHOT_ACTION") ? getenv("IMWAY_SHOT_ACTION") : "editor");
+        StringView configuredAction(getenv("IM_SHOT_ACTION") ? getenv("IM_SHOT_ACTION") : "editor");
 
         // what the error panel shows goes to the log too: a save without a
         // window would otherwise fail without a word
@@ -1198,7 +1198,7 @@ int mainScreenshot(StringView path) {
                 cropRegion(img, view.crop, x0, y0, x1, y1);
 
                 Buffer encoded;
-                bool png = getenv("IMWAY_SHOT_FORMAT") && StringView(getenv("IMWAY_SHOT_FORMAT")) == "png"_sv;
+                bool png = getenv("IM_SHOT_FORMAT") && StringView(getenv("IM_SHOT_FORMAT")) == "png"_sv;
 
                 if (png) {
                     encodeSelection(img, tex, x0, y0, x1, y1, encoded);

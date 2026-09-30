@@ -1,5 +1,5 @@
 """`imscreenshot PATH` on files: a raw capture file loads through the file
-path and Enter saves it as JPEG XL into IMWAY_SHOT_DIR; a file that is too
+path and Enter saves it as JPEG XL into IM_SHOT_DIR; a file that is too
 small, one with a bad header and a truncated one each open the error
 panel, which Escape dismisses, and so does Enter."""
 
@@ -20,7 +20,7 @@ with Session("file") as s:
     trunc.write_bytes(struct.pack("<III", 0x31574D49, w, h) + pixels[: len(pixels) // 2])
     shots = s.artifacts / "shots"
 
-    s.launch(str(good), IMWAY_SHOT_DIR=str(shots), IMWAY_SHOT_NAME="fromfile")
+    s.launch(str(good), IM_SHOT_DIR=str(shots), IM_SHOT_NAME="fromfile")
     s.focus()
     time.sleep(0.5)
     s.close(KEY_ENTER)
@@ -29,7 +29,7 @@ with Session("file") as s:
     assert is_jxl(saved), f"{saved} is not a JPEG XL stream"
 
     for path, key in ((small, KEY_ESC), (bad, KEY_ESC), (trunc, KEY_ENTER)):
-        s.launch(str(path), IMWAY_SHOT_DIR=str(shots), IMWAY_SHOT_NAME="broken")
+        s.launch(str(path), IM_SHOT_DIR=str(shots), IM_SHOT_NAME="broken")
         s.focus()
         assert s.size() == (480, 180), f"{path.name}: not the error panel ({s.size()})"
         time.sleep(0.3)

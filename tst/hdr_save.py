@@ -1,4 +1,4 @@
-"""Saving from an HDR session, without a window (IMWAY_SHOT_ACTION=save).
+"""Saving from an HDR session, without a window (IM_SHOT_ACTION=save).
 The capture is a PQ frame: bands of neutral grey at known luminances,
 black, and colours beyond the sRGB gamut or the SDR peak. A PNG is an SDR
 image: the tool decodes the PQ codes to nits, maps them onto the SDR
@@ -25,8 +25,8 @@ with Session("hdr_save") as s:
     shots = s.artifacts / "shots"
 
     def save(fmt):
-        code, log = s.run(str(shot), IMWAY_SHOT_COLOR="1:203:0.005:1000:400", IMWAY_SHOT_ACTION="save", IMWAY_SHOT_FORMAT=fmt,
-                          IMWAY_SHOT_DIR=str(shots), IMWAY_SHOT_NAME="hdr")
+        code, log = s.run(str(shot), IM_SHOT_COLOR="1:203:0.005:1000:400", IM_SHOT_ACTION="save", IM_SHOT_FORMAT=fmt,
+                          IM_SHOT_DIR=str(shots), IM_SHOT_NAME="hdr")
         assert code == 0 and "im screenshot: surface HDR10 PQ" in log, f"the HDR {fmt} save failed (rc={code}):\n{log}"
         return shots / f"hdr.{fmt}"
 

@@ -6,7 +6,7 @@ from session import Session
 
 with Session("initial_size_scaled", 3840, 2160) as s:
     shot = s.capture_file("frame.shot", 3840, 2160)
-    s.launch(str(shot), IMGUI_SCALE="2.5")
+    s.launch(str(shot), IM_SCALE="2.5")
     s.focus()
     s.wait(lambda: s.size() == (2440, 1080), "the scaled size")
     s.close()

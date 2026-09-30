@@ -14,24 +14,24 @@ with Session("save_errors") as s:
     shot = s.capture_file("good.shot", 64, 48)
 
     def attempt(what, **env):
-        s.launch(str(shot), IMWAY_SHOT_ACTION="save", IMWAY_SHOT_FORMAT="png", **env)
+        s.launch(str(shot), IM_SHOT_ACTION="save", IM_SHOT_FORMAT="png", **env)
         s.focus()
         time.sleep(0.5)
         s.close()
 
     shots = s.artifacts / "shots"
-    attempt("an overlong name", IMWAY_SHOT_DIR=str(shots), IMWAY_SHOT_NAME="x" * 300)
+    attempt("an overlong name", IM_SHOT_DIR=str(shots), IM_SHOT_NAME="x" * 300)
     assert not shots.is_dir() or not any(shots.iterdir()), "an overlong name still wrote a file"
 
     blocker = s.artifacts / "blocker"
     blocker.write_bytes(b"")
-    attempt("a directory behind a file", IMWAY_SHOT_DIR=str(blocker / "shots"), IMWAY_SHOT_NAME="blocked")
+    attempt("a directory behind a file", IM_SHOT_DIR=str(blocker / "shots"), IM_SHOT_NAME="blocked")
     assert blocker.is_file() and blocker.stat().st_size == 0, "the blocking file was touched"
 
     # a disk that fills up under the write: the file opens, the write fails
     full = s.artifacts / "full"
     full.mkdir()
     os.symlink("/dev/full", full / "disk.png")
-    attempt("a full disk", IMWAY_SHOT_DIR=str(full), IMWAY_SHOT_NAME="disk")
+    attempt("a full disk", IM_SHOT_DIR=str(full), IM_SHOT_NAME="disk")
     assert "saved" not in s.client_log(), "a write into a full disk was reported saved"
     print("OK: a save that cannot write its file opens the tool on the error")

@@ -14,7 +14,7 @@ with Session("editor_keys") as s:
     shot = s.capture_file("pattern.shot", w, h, pixels=pixels)
     shots = s.artifacts / "shots"
 
-    s.launch(str(shot), IMWAY_SHOT_DIR=str(shots), IMWAY_SHOT_NAME="crop", IMWAY_SHOT_FORMAT="png")
+    s.launch(str(shot), IM_SHOT_DIR=str(shots), IM_SHOT_NAME="crop", IM_SHOT_FORMAT="png")
     s.focus()
     vw, vh = s.size()
     before = s.settled("before")
@@ -53,7 +53,7 @@ with Session("editor_keys") as s:
     assert crop.is_file() and crop.stat().st_size, "Enter did not save the crop"
     assert png_size(crop) == (w, h), f"the crop is {png_size(crop)}, not the whole {w}x{h} capture"
 
-    s.launch(str(shot), IMWAY_SHOT_DIR=str(shots), IMWAY_SHOT_NAME="discard", IMWAY_SHOT_FORMAT="png")
+    s.launch(str(shot), IM_SHOT_DIR=str(shots), IM_SHOT_NAME="discard", IM_SHOT_FORMAT="png")
     s.focus()
     time.sleep(0.5)
     s.close()

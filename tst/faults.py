@@ -64,13 +64,13 @@ with Session("faults") as s:
         s.close()
 
     for fmt, fault in (("png", "encoder-alloc=0"), ("png", "encoder-alloc=1"), ("jxl", "encoder-alloc=0"), ("jxl", "encoder-alloc=1"), ("jxl", "encoder-output=0")):
-        s.launch(str(shot), IM_CHAOS=fault, IMWAY_SHOT_ACTION="save", IMWAY_SHOT_FORMAT=fmt,
-                 IMWAY_SHOT_DIR=str(shots), IMWAY_SHOT_NAME=f"{fmt}-{fault}")
+        s.launch(str(shot), IM_CHAOS=fault, IM_SHOT_ACTION="save", IM_SHOT_FORMAT=fmt,
+                 IM_SHOT_DIR=str(shots), IM_SHOT_NAME=f"{fmt}-{fault}")
         s.focus()
         time.sleep(0.3)
         s.close()
         assert not shots.is_dir() or not any(shots.iterdir()), f"{fmt} {fault}: a failed encoder saved a file"
 
-    code, log = s.run(str(shot), IMWAY_SHOT_ACTION="save", IMWAY_SHOT_FORMAT="png", IMWAY_SHOT_DIR=str(shots), IMWAY_SHOT_NAME="spare")
+    code, log = s.run(str(shot), IM_SHOT_ACTION="save", IM_SHOT_FORMAT="png", IM_SHOT_DIR=str(shots), IM_SHOT_NAME="spare")
     assert code == 0 and (shots / "spare.png").stat().st_size, f"a save with memory to spare failed (rc={code}):\n{log}"
     print("OK: the editor's faults end it with a report or are survived")

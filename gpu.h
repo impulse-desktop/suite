@@ -30,7 +30,7 @@ struct ImGuiStyle;
 
 // the tool's name, as its trace lines and panels say it: `im <tool>`
 extern stl::StringView gTool;
-// ui scale handed down from the compositor via IMGUI_SCALE (its clients
+// ui scale handed down from the compositor via IM_SCALE (its clients
 // otherwise render at scale 1, so the panel/text would be tiny on hidpi)
 extern float gUiScale;
 // the fault seam, configured from the tool's environment in the test build
@@ -97,7 +97,7 @@ void vkcAt(stl::StringView site, VkResult e);
 void traceText(stl::StringView what);
 void traceSize(stl::StringView what, int w, int h);
 
-// gUiScale from IMGUI_SCALE, where the compositor set one
+// gUiScale from IM_SCALE, where the compositor set one
 void readUiScale();
 
 // what the tool wants of the device: an HDR swapchain (the colour space

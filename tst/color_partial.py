@@ -12,7 +12,7 @@ with Session("color_partial") as s:
     def look(colour, label):
         """The mean colour of the frame's pixels in the editor's window:
         those well away from the panel's greys."""
-        s.launch(str(shot), IMWAY_SHOT_COLOR=colour)
+        s.launch(str(shot), IM_SHOT_COLOR=colour)
         s.focus()
         s.said("surface HDR10 PQ")
 

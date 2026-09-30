@@ -194,7 +194,7 @@ class Session:
 
     def launch(self, *args, cwd=None, mapped=True, unset=(), fd3=None, **environment):
         """Start the session's tool with args and the given environment
-        (the compositor's IMWAY_SHOT_* words, IMGUI_SCALE, IM_CHAOS; unset
+        (the compositor's IM_SHOT_* words, IM_SCALE, IM_CHAOS; unset
         names the variables it must not see); a mapped launch waits for
         its window."""
         self.clients += 1

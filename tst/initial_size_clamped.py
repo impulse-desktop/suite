@@ -6,7 +6,7 @@ from session import Session
 
 with Session("initial_size_clamped") as s:
     shot = s.capture_file("frame.shot", 1280, 800)
-    s.launch(str(shot), IMGUI_SCALE="3")
+    s.launch(str(shot), IM_SCALE="3")
     s.focus()
     s.wait(lambda: s.size()[0] == 1280 * 9 // 10 and s.size()[1] <= 800 * 9 // 10, "the clamped size")
     s.close()
