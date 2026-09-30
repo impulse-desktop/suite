@@ -829,6 +829,12 @@ namespace {
         size_t first = count;
         size_t last = 0;
         float top = g;
+        // two layers: the rows' fills under the thumbnails
+        ImVec2 hover0;
+        ImVec2 hover1;
+        bool anyHovered = false;
+
+        dl->ChannelsSplit(2);
 
         for (size_t i = 0; i < count; i++) {
             Entry& entry = *entries[i];
@@ -872,13 +878,24 @@ namespace {
 
                 ImGui::PopID();
 
-                // the row around the thumbnail in ImGui's own selectable
-                // colours: half the gutter of it shows
-                if (i == current || hovered) {
-                    float half = g / 2.f;
+                // the row is the thumbnail with its whole gutter, so two rows'
+                // fills meet in the gap; the selection's fill goes under,
+                // the hovered row's over it, both under the thumbnails
+                ImVec2 r0(p0.x - g, p0.y - g);
+                ImVec2 r1(p1.x + g, p1.y + g);
 
-                    dl->AddRectFilled(ImVec2(p0.x - half, p0.y - half), ImVec2(p1.x + half, p1.y + half), ImGui::GetColorU32(hovered ? ImGuiCol_HeaderHovered : ImGuiCol_Header));
+                if (i == current) {
+                    dl->ChannelsSetCurrent(0);
+                    dl->AddRectFilled(r0, r1, ImGui::GetColorU32(ImGuiCol_Header));
                 }
+
+                if (hovered) {
+                    hover0 = r0;
+                    hover1 = r1;
+                    anyHovered = true;
+                }
+
+                dl->ChannelsSetCurrent(1);
 
                 if (entry.thumb == Load::Ready) {
                     dl->AddImage((ImTextureID)entry.thumbTex.ds, p0, p1);
@@ -893,6 +910,13 @@ namespace {
 
             top = bottom + g;
         }
+
+        if (anyHovered) {
+            dl->ChannelsSetCurrent(0);
+            dl->AddRectFilled(hover0, hover1, ImGui::GetColorU32(ImGuiCol_HeaderHovered));
+        }
+
+        dl->ChannelsMerge();
 
         LockGuard lock(shared.mutex);
 
