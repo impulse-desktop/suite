@@ -26,13 +26,15 @@ does the same from the one binary. Tools so far:
   itself, encoded to PNG or JPEG XL, SDR or HDR.
 - `view` — shows images: a directory's, by name, or the named files. The
   list on the left is a column of thumbnails, each as wide as the list;
-  the image sits in the middle; the panel on the right folds the file's
-  properties (name, folder, size, modification time) under headers.
+  the image sits in the middle; the panel on the right folds the image's
+  properties (dimensions, type, the zoom with a menu of presets, rotation,
+  position) and the file's (name, folder, size, modification time) under
+  headers.
   Arrows, j/k, Space and Backspace walk the list, Home/End (g/G) jump to
   its ends, a thumbnail click selects; the wheel zooms about the pointer,
   a drag pans, `-`/`=` step the zoom, `1` is 1:1, `0`/`w` fit; `r`/`R`
   turn the image, `f` fullscreen, Tab hides the list, `i` the properties,
-  `b` the status line, `q`/Escape leave. Decoding runs on a thread pool,
+  `q`/Escape leave. Decoding runs on a thread pool,
   through the sandboxed decoder below; the shown image's neighbours and
   the thumbnails just beyond the view are decoded ahead.
 

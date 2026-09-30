@@ -1,10 +1,10 @@
 """The view on an image: the wheel over the canvas zooms in, - and = step
 the zoom, 1 is 1:1 and 0 fits again; r turns the image a quarter clockwise
 (the 64x48 image stands 48x64), R back; f makes the window fullscreen and
-back; Tab hides the gallery, and the canvas takes its room; b hides the
-status line; a drag pans; a window narrower than the gallery is fine."""
+back; Tab hides the list, and the canvas takes its room; a drag pans; a
+window narrower than the list is fine."""
 
-from session import KEY_1, KEY_B, KEY_EQUAL, KEY_F, KEY_LEFTSHIFT, KEY_MINUS, KEY_R, KEY_TAB, KEY_ZERO, Session, colour_box, write_png
+from session import KEY_1, KEY_EQUAL, KEY_F, KEY_LEFTSHIFT, KEY_MINUS, KEY_R, KEY_TAB, KEY_ZERO, Session, colour_box, write_png
 
 with Session("view_keys", tool="view") as s:
     pics = s.artifacts / "pics"
@@ -14,7 +14,7 @@ with Session("view_keys", tool="view") as s:
     s.focus()
     s.said("showing a.png 64x48")
     r = s.window()["rect"]
-    canvas = (210, 0, r["width"] - 420, r["height"] - 30)
+    canvas = (210, 0, r["width"] - 420, r["height"])
 
     def reddish(red, green, blue):
         return red >= 100 and green <= 80 and blue <= 80
@@ -64,10 +64,6 @@ with Session("view_keys", tool="view") as s:
     s.wait(lambda: (b := colour_box(s.capture("nopanel", region=canvas), reddish)) and before[0] - b[0] >= 95, "the image moved left")
     s.tap(KEY_TAB)
     s.said("panel on")
-    s.tap(KEY_B)
-    s.said("status off")
-    s.tap(KEY_B)
-    s.said("status on")
     # a drag over the canvas pans (a fitted image stays centred)
     cx, cy = canvas[0] + canvas[2] // 2, canvas[3] // 2
     s.drag(cx, cy, cx + 40, cy + 30)

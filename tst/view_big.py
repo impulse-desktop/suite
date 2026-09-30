@@ -16,8 +16,9 @@ with Session("view_big", tool="view") as s:
     s.said("showing big00.png 1600x1200")
     s.said("thumbnail big00.png")
     r = s.window()["rect"]
-    canvas = (250, 0, r["width"] - 250, r["height"] - 30)
-    # fitted: the canvas is about 750x670, the image lands near 750x560
-    s.wait(lambda: near(s.capture("fitted", region=canvas), (0, 0, 255)) >= 300000, "the big image fitted to the canvas")
+    canvas = (210, 0, r["width"] - 420, r["height"])
+    # fitted: the canvas between the panels is 600x700, the image lands
+    # at 600x450 (the region starts 10 px in: 590 columns of it)
+    s.wait(lambda: near(s.capture("fitted", region=canvas), (0, 0, 255)) >= 250000, "the big image fitted to the canvas")
     s.close()
     print("OK: big images are shrunk to thumbnails and fitted to the canvas")

@@ -1,7 +1,7 @@
 """What the viewer does with what it cannot show: no arguments is a usage
 error, a path that is not there, a directory without images or one that
 cannot be read opens the error panel, a file no coder takes or a truncated
-one is reported on the status line and stays in the list, its neighbours
+one is reported in the properties panel and stays in the list, its neighbours
 showing all the same; a Vulkan that fails ends the tool with the error."""
 
 import os

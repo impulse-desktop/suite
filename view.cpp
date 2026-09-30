@@ -45,9 +45,8 @@ namespace {
     // each side panel takes this share of the window's width
     constexpr float sideShare = .2f;
     // the gutter around thumbnails and the panels' padding, in logical px
-    // before the ui scale; the status line's own, tighter
+    // before the ui scale
     constexpr float gap = 8.f;
-    constexpr float statusPad = 4.f;
     // a thumbnail fills the list's width; until it is decoded its row is
     // this tall for its width, a photo's proportion
     constexpr float placeholderAspect = .75f;
@@ -386,7 +385,6 @@ namespace {
         bool fullscreen = false;
         bool panel = true;
         bool info = true;
-        bool statusBar = true;
         bool scrollToCurrent = true;
         u64 frames = 0;
         size_t readyThumbs = 0;
@@ -419,7 +417,6 @@ namespace {
         void drawGallery();
         void drawCanvas();
         void drawInfo();
-        void drawStatus();
     };
 
     Job* ViewApp::takeJob() {
@@ -768,11 +765,6 @@ namespace {
             info = !info;
             traceText(info ? "info on"_sv : "info off"_sv);
         }
-
-        if (ImGui::IsKeyPressed(ImGuiKey_B)) {
-            statusBar = !statusBar;
-            traceText(statusBar ? "status on"_sv : "status off"_sv);
-        }
     }
 
     // the shown file's facts, read once per selection
@@ -910,37 +902,147 @@ namespace {
         shared.wantLast = last;
     }
 
-    // the properties panel: sections that fold to their title, the file's
-    // own facts first; the image's come later
+    // the properties panel: sections that fold to their title. The image's
+    // first (what is shown, at what zoom: a menu picks one), then the
+    // file's own facts
     void ViewApp::drawInfo() {
         const Entry& entry = *entries[current];
         float g = gap * gUiScale;
+        float keyW = ImGui::CalcTextSize("Dimensions").x + g;
+        bool ready = shown == Load::Ready && shownIndex == current;
 
+        // muted greys in place of ImGui's blues: the headers, the zoom menu
+        // and its list
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(g, 5.f * gUiScale));
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 3.f * gUiScale);
+        ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, 3.f * gUiScale);
         ImGui::PushStyleColor(ImGuiCol_Header, IM_COL32(255, 255, 255, 12));
         ImGui::PushStyleColor(ImGuiCol_HeaderHovered, IM_COL32(255, 255, 255, 22));
         ImGui::PushStyleColor(ImGuiCol_HeaderActive, IM_COL32(255, 255, 255, 32));
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(255, 255, 255, 12));
+        ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, IM_COL32(255, 255, 255, 22));
+        ImGui::PushStyleColor(ImGuiCol_FrameBgActive, IM_COL32(255, 255, 255, 32));
+        ImGui::PushStyleColor(ImGuiCol_PopupBg, IM_COL32(40, 41, 47, 255));
+        ImGui::PushStyleColor(ImGuiCol_Border, IM_COL32(255, 255, 255, 20));
 
-        bool open = ImGui::CollapsingHeader("File", ImGuiTreeNodeFlags_DefaultOpen);
+        // a key in the dim column, the value beside it
+        auto key = [&](const char* name) {
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::TextDisabled("%s", name);
+            ImGui::TableSetColumnIndex(1);
+        };
+        auto row = [&](const char* name, StringView value) {
+            key(name);
+            ImGui::PushTextWrapPos(0.f);
+            ImGui::TextUnformatted((const char*)value.begin(), (const char*)value.end());
+            ImGui::PopTextWrapPos();
+        };
+        auto table = [&](const char* id) {
+            if (!ImGui::BeginTable(id, 2, ImGuiTableFlags_SizingStretchProp)) {
+                return false;
+            }
 
-        ImGui::PopStyleColor(3);
-        ImGui::PopStyleVar(2);
-
-        if (open && ImGui::BeginTable("file", 2, ImGuiTableFlags_SizingStretchProp)) {
-            ImGui::TableSetupColumn("key", ImGuiTableColumnFlags_WidthFixed, ImGui::CalcTextSize("Modified").x + g);
+            ImGui::TableSetupColumn("key", ImGuiTableColumnFlags_WidthFixed, keyW);
             ImGui::TableSetupColumn("value", ImGuiTableColumnFlags_WidthStretch);
 
-            auto row = [&](const char* key, StringView value) {
-                ImGui::TableNextRow();
-                ImGui::TableSetColumnIndex(0);
-                ImGui::TextDisabled("%s", key);
-                ImGui::TableSetColumnIndex(1);
-                ImGui::PushTextWrapPos(0.f);
-                ImGui::TextUnformatted((const char*)value.begin(), (const char*)value.end());
-                ImGui::PopTextWrapPos();
-            };
+            return true;
+        };
 
+        if (ImGui::CollapsingHeader("Image", ImGuiTreeNodeFlags_DefaultOpen) && table("image")) {
+            if (shown == Load::Failed && shownIndex == current) {
+                row("Error", sv(shownError));
+            } else if (!ready) {
+                row("State", "decoding\xe2\x80\xa6"_sv);
+            }
+
+            if (ready) {
+                auto& text = sb();
+                // megapixels to a tenth
+                i64 tenths = ((i64)texW * (i64)texH + 50000) / 100000;
+
+                text << (i64)texW << " \xc3\x97 "_sv << (i64)texH << "   "_sv << tenths / 10 << "."_sv << tenths % 10 << " MP"_sv;
+                row("Dimensions", sv(text));
+            }
+
+            {
+                // the name's extension, upper-cased; the decoder's word on
+                // the format comes later
+                StringView name = entry.name();
+                const u8* dot = name.end();
+
+                for (const u8* p = name.begin(); p != name.end(); ++p) {
+                    if (*p == '.') {
+                        dot = p;
+                    }
+                }
+
+                char ext[16];
+                size_t n = 0;
+
+                for (const u8* p = dot == name.end() ? dot : dot + 1; p != name.end() && n < sizeof(ext); ++p) {
+                    ext[n++] = (char)(*p >= 'a' && *p <= 'z' ? *p - 32 : *p);
+                }
+
+                row("Type", n ? StringView((const u8*)ext, (const u8*)ext + n) : "?"_sv);
+            }
+
+            if (ready) {
+                key("Zoom");
+
+                {
+                    auto& text = sb();
+
+                    text << (i64)(zoom * 100.f + .5f) << "%"_sv;
+
+                    if (fit) {
+                        text << " (fit)"_sv;
+                    }
+
+                    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+
+                    if (ImGui::BeginCombo("##zoom", text.cStr())) {
+                        if (ImGui::Selectable("Fit", fit)) {
+                            fitView();
+                        }
+
+                        static const int presets[] = {25, 50, 100, 200, 400, 800};
+
+                        for (int preset : presets) {
+                            auto& label = sb();
+
+                            label << (i64)preset << "%"_sv;
+
+                            if (ImGui::Selectable(label.cStr(), !fit && (i64)(zoom * 100.f + .5f) == preset)) {
+                                panX = 0.f;
+                                panY = 0.f;
+                                setZoom((float)preset / 100.f);
+                            }
+                        }
+
+                        ImGui::EndCombo();
+                    }
+                }
+
+                {
+                    auto& text = sb();
+
+                    text << (i64)(rotation * 90) << "\xc2\xb0"_sv;
+                    row("Rotation", sv(text));
+                }
+            }
+
+            {
+                auto& text = sb();
+
+                text << (i64)(current + 1) << " / "_sv << (i64)entries.length();
+                row("Position", sv(text));
+            }
+
+            ImGui::EndTable();
+        }
+
+        if (ImGui::CollapsingHeader("File", ImGuiTreeNodeFlags_DefaultOpen) && table("file")) {
             StringView whole = sv(entry.path);
 
             row("Name", entry.name());
@@ -961,6 +1063,9 @@ namespace {
 
             ImGui::EndTable();
         }
+
+        ImGui::PopStyleColor(8);
+        ImGui::PopStyleVar(3);
     }
 
     void ViewApp::drawCanvas() {
@@ -1031,22 +1136,6 @@ namespace {
         }
     }
 
-    void ViewApp::drawStatus() {
-        auto& text = sb();
-        const Entry& entry = *entries[current];
-
-        if (shown == Load::Failed && shownIndex == current) {
-            text << "cannot show "_sv << entry.name() << ": "_sv << sv(shownError);
-        } else if (shown != Load::Ready || shownIndex != current) {
-            text << "decoding "_sv << entry.name();
-        } else {
-            text << (i64)texW << "x"_sv << (i64)texH << "   "_sv << (i64)(zoom * 100.f + .5f) << "%"_sv;
-        }
-
-        text << "   "_sv << (i64)(current + 1) << "/"_sv << (i64)entries.length();
-        ImGui::TextUnformatted(text.cStr());
-    }
-
     int ViewApp::frame() {
         ImGuiViewport* vp = ImGui::GetMainViewport();
 
@@ -1063,7 +1152,6 @@ namespace {
         // frame, and drawing into a hidden one would only be wasted
         ImGui::Begin("##view", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoSavedSettings);
 
-        float statusH = statusBar ? ImGui::GetTextLineHeight() + 2.f * statusPad * gUiScale : 0.f;
         float sideW = floorf(vp->Size.x * sideShare);
         float g = gap * gUiScale;
         bool left = panel && !fullscreen;
@@ -1076,15 +1164,15 @@ namespace {
 
         if (left) {
             ImGui::PushStyleColor(ImGuiCol_ChildBg, panelBg);
-            ImGui::BeginChild("gallery", ImVec2(sideW, -statusH), 0, ImGuiWindowFlags_NoScrollbar);
+            ImGui::BeginChild("gallery", ImVec2(sideW, 0.f), 0, ImGuiWindowFlags_NoScrollbar);
             drawGallery();
             ImGui::EndChild();
             ImGui::PopStyleColor();
             ImGui::SameLine();
-            fg->AddLine(ImVec2(vp->Pos.x + sideW, vp->Pos.y), ImVec2(vp->Pos.x + sideW, vp->Pos.y + vp->Size.y - statusH), hairline);
+            fg->AddLine(ImVec2(vp->Pos.x + sideW, vp->Pos.y), ImVec2(vp->Pos.x + sideW, vp->Pos.y + vp->Size.y), hairline);
         }
 
-        ImGui::BeginChild("canvas", ImVec2(right ? -sideW : 0.f, -statusH), 0, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        ImGui::BeginChild("canvas", ImVec2(right ? -sideW : 0.f, 0.f), 0, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
         drawCanvas();
         ImGui::EndChild();
 
@@ -1092,23 +1180,14 @@ namespace {
             ImGui::SameLine();
             ImGui::PushStyleColor(ImGuiCol_ChildBg, panelBg);
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(g, g));
-            ImGui::BeginChild("info", ImVec2(sideW, -statusH), ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoScrollbar);
+            ImGui::BeginChild("info", ImVec2(sideW, 0.f), ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoScrollbar);
             ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(g, 4.f * gUiScale));
             drawInfo();
             ImGui::PopStyleVar();
             ImGui::EndChild();
             ImGui::PopStyleVar();
             ImGui::PopStyleColor();
-            fg->AddLine(ImVec2(vp->Pos.x + vp->Size.x - sideW, vp->Pos.y), ImVec2(vp->Pos.x + vp->Size.x - sideW, vp->Pos.y + vp->Size.y - statusH), hairline);
-        }
-
-        if (statusBar) {
-            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(g, statusPad * gUiScale));
-            ImGui::BeginChild("status", ImVec2(0, statusH), ImGuiChildFlags_AlwaysUseWindowPadding);
-            drawStatus();
-            ImGui::EndChild();
-            ImGui::PopStyleVar();
-            fg->AddLine(ImVec2(vp->Pos.x, vp->Pos.y + vp->Size.y - statusH), ImVec2(vp->Pos.x + vp->Size.x, vp->Pos.y + vp->Size.y - statusH), hairline);
+            fg->AddLine(ImVec2(vp->Pos.x + vp->Size.x - sideW, vp->Pos.y), ImVec2(vp->Pos.x + vp->Size.x - sideW, vp->Pos.y + vp->Size.y), hairline);
         }
 
         ImGui::End();
