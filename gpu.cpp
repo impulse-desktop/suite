@@ -1097,6 +1097,26 @@ void setupImGui(ObjPool& pool, bool hdr) {
     pooledGuard(pool, [] {
         ImGui_ImplVulkan_Shutdown();
     });
+
+    // the backend leaves the texture limit unsaid; the device's
+    VkPhysicalDeviceProperties props;
+
+    vkGetPhysicalDeviceProperties(gPhys, &props);
+
+    ImGuiPlatformIO& pio = ImGui::GetPlatformIO();
+
+    pio.Renderer_TextureMaxWidth = (int)props.limits.maxImageDimension2D;
+    pio.Renderer_TextureMaxHeight = (int)props.limits.maxImageDimension2D;
+}
+
+void setupGpu(ObjPool& pool, plt::Window& window, const VulkanWants& wants) {
+    setupVulkan(pool, wants);
+
+    VkSurfaceKHR surface = createSurface(window);
+    plt::WindowInfo info = window.info();
+
+    setupVulkanWindow(pool, surface, (int)info.width, (int)info.height, wants.hdr);
+    setupImGui(pool, wants.hdr);
 }
 
 void finishTexture(VkFormat format, Texture& tex) {

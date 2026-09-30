@@ -125,8 +125,13 @@ void setupVulkanWindow(stl::ObjPool& pool, VkSurfaceKHR surface, int w, int h, b
 // output stage and the image pipeline drawImage runs
 void setupLinearHdr(stl::ObjPool& pool, u32 width, u32 height);
 // ImGui's context, at the ui scale, and its Vulkan backend on the
-// presenter (in the HDR scene, with the scene's fragment stage)
+// presenter (in the HDR scene, with the scene's fragment stage); the
+// largest texture the device makes goes into ImGui's platform io, for a
+// tool sizing its own textures by ImGui alone
 void setupImGui(stl::ObjPool& pool, bool hdr);
+// all of the above for a tool that draws by ImGui alone: the device,
+// the presenter on the window at its size, ImGui and its backend
+void setupGpu(stl::ObjPool& pool, plt::Window& window, const VulkanWants& wants);
 
 u32 findMemoryType(u32 typeBits, VkMemoryPropertyFlags props);
 

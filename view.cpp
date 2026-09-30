@@ -25,6 +25,7 @@
 #include <sys/stat.h>
 #include <plt/window.h>
 #include <plt/platform.h>
+#include <imgui_internal.h>
 
 using namespace stl;
 
@@ -34,6 +35,12 @@ using namespace stl;
 // the file's index; nothing touches the disk after. The shown image is
 // decoded from the bytes in memory when it is selected, on the one
 // thread, a fresh sandboxed ImageMagick every time.
+//
+// The viewer draws with ImGui alone. Its textures are ImGui's own
+// objects (ImTextureData): the viewer hands one the pixels and registers
+// it, the renderer backend makes it on the next render, draws from it
+// and tears it down in its own time once told, when no frame in flight
+// reads it any more. Which device is behind ImGui is gpu.cpp's business.
 
 namespace {
     // each side panel takes this share of the window's width
@@ -53,6 +60,8 @@ namespace {
     constexpr u32 thumbTexelsStep = 64;
     constexpr u32 thumbTexelsMin = 128;
     constexpr u32 thumbTexelsMax = 512;
+    // the shown image's long side when the renderer names no limit
+    constexpr u32 defaultMaxSide = 4096;
     constexpr float zoomMin = 0.02f;
     constexpr float zoomMax = 32.f;
     constexpr float zoomStep = 1.25f;
@@ -71,9 +80,7 @@ namespace {
         Buffer file;
         Buffer error;
         Load thumb = Load::None;
-        Texture thumbTex;
-        u32 thumbW = 0;
-        u32 thumbH = 0;
+        ImTextureData* thumbTex = nullptr;
         // the long side the thumbnail was asked at: a list grown much
         // wider since asks again
         u32 thumbSide = 0;
@@ -86,8 +93,20 @@ namespace {
         return StringView(whole.begin() + nameAt, whole.end());
     }
 
+    // a texture of ImGui's own with these pixels: registered, the
+    // renderer makes it on the next render
+    ImTextureData* makeTexture(const DecodedImage& image) {
+        ImTextureData* texture = IM_NEW(ImTextureData)();
+
+        texture->Create(ImTextureFormat_RGBA32, (int)image.width, (int)image.height);
+        memcpy(texture->GetPixels(), image.rgba.data(), (size_t)image.width * image.height * 4);
+        ImGui::RegisterUserTexture(texture);
+
+        return texture;
+    }
+
     // area-averaged to fit the side: what a thumbnail is, and what an image
-    // wider than the device's images becomes
+    // wider than the renderer's textures becomes
     void shrinkToSide(DecodedImage& img, u32 side) {
         if (img.width <= side && img.height <= side) {
             return;
@@ -284,8 +303,6 @@ namespace {
         entries.append(found.begin(), found.end());
     }
 
-    // the viewer: its list, the shown image, the view on it, and the
-    // exchange with the workers
     // a thumbnail's long side in texels for a list this wide, in steps,
     // so a list a few px wider asks nothing new
     u32 thumbSideFor(float innerW) {
@@ -297,7 +314,7 @@ namespace {
     // a row's height for the list's width: the thumbnail's proportion, or a
     // photo's until it is decoded; whole px, so rows do not blur
     float rowHeightFor(const Entry& entry, float innerW) {
-        float aspect = entry.thumb == Load::Ready && entry.thumbW ? (float)entry.thumbH / (float)entry.thumbW : placeholderAspect;
+        float aspect = entry.thumbTex && entry.thumbTex->Width ? (float)entry.thumbTex->Height / (float)entry.thumbTex->Width : placeholderAspect;
 
         return max(1.f, floorf(innerW * aspect + .5f));
     }
@@ -327,20 +344,21 @@ namespace {
         text << tenths / 10 << "."_sv << tenths % 10 << " "_sv << units[unit];
     }
 
+    // the viewer: its list, the shown image and the view on it
     struct ViewApp final: Ui {
         ObjPool* pool = nullptr;
         plt::Window* window = nullptr;
         Vector<Entry*> entries;
         size_t current = 0;
-        // what a Vulkan image may measure on this device
-        u32 maxSide = 4096;
+        // what a texture may measure, the renderer's word
+        u32 maxSide = defaultMaxSide;
         // the shown image's texture, or why there is none
         Load shown = Load::None;
         size_t shownIndex = (size_t)-1;
-        Texture tex;
-        u32 texW = 0;
-        u32 texH = 0;
+        ImTextureData* tex = nullptr;
         Buffer shownError;
+        // textures told to go, until the renderer has torn them down
+        Vector<ImTextureData*> dying;
         // the view on it
         float zoom = 1.f;
         bool fit = true;
@@ -364,7 +382,9 @@ namespace {
         void loadThumb(size_t index, u32 side);
         void show(size_t index);
         void step(long delta);
-        void retire(Texture& texture);
+        void retire(ImTextureData*& texture);
+        void tendTextures();
+        void dropTextures();
         void setZoom(float value);
         void fitView();
         void statFile();
@@ -374,16 +394,70 @@ namespace {
         void drawInfo();
     };
 
-    // a texture the frames may still read goes only once the device is done
-    void ViewApp::retire(Texture& texture) {
-        if (texture.image) {
-            vkDeviceWaitIdle(gDevice);
-            destroyTexture(texture);
+    // a texture no longer drawn: told to go, the renderer tears it down
+    // once the frames in flight are through with it, which it counts by
+    // the frames the texture goes unused
+    void ViewApp::retire(ImTextureData*& texture) {
+        if (texture) {
+            texture->WantDestroyNextFrame = true;
+            texture->SetStatus(ImTextureStatus_WantDestroy);
+            texture->UnusedFrames = 1;
+            dying.pushBack(texture);
+            texture = nullptr;
         }
     }
 
-    // a row's thumbnail, decoded from the bytes in memory and uploaded
-    // now, kept by the row's index
+    // once a frame, before drawing: the pixel copies the renderer has
+    // taken go, the textures it has torn down go, the rest of the dying
+    // count one more unused frame
+    void ViewApp::tendTextures() {
+        auto taken = [](ImTextureData* texture) {
+            if (texture && texture->Status == ImTextureStatus_OK && texture->Pixels) {
+                texture->DestroyPixels();
+            }
+        };
+
+        taken(tex);
+
+        for (Entry* entry : entries) {
+            taken(entry->thumbTex);
+        }
+
+        Vector<ImTextureData*> still;
+
+        for (ImTextureData* texture : dying) {
+            if (texture->Status == ImTextureStatus_Destroyed) {
+                ImGui::UnregisterUserTexture(texture);
+                IM_DELETE(texture);
+            } else {
+                texture->UnusedFrames++;
+                still.pushBack(texture);
+            }
+        }
+
+        dying.xchg(still);
+    }
+
+    // at the end, once ImGui and its renderer are gone and every
+    // texture's device side with them: the objects themselves
+    void ViewApp::dropTextures() {
+        IM_DELETE(tex);
+        tex = nullptr;
+
+        for (Entry* entry : entries) {
+            IM_DELETE(entry->thumbTex);
+            entry->thumbTex = nullptr;
+        }
+
+        for (ImTextureData* texture : dying) {
+            IM_DELETE(texture);
+        }
+
+        dying.clear();
+    }
+
+    // a row's thumbnail, decoded from the bytes in memory and handed to
+    // ImGui now, kept by the row's index
     void ViewApp::loadThumb(size_t index, u32 side) {
         Entry& entry = *entries[index];
         DecodedImage image;
@@ -400,15 +474,13 @@ namespace {
         }
 
         retire(entry.thumbTex);
-        uploadTexture(image.width, image.height, (const u8*)image.rgba.data(), entry.thumbTex);
-        entry.thumbW = image.width;
-        entry.thumbH = image.height;
+        entry.thumbTex = makeTexture(image);
         entry.thumbSide = side;
         entry.thumb = Load::Ready;
         traceText(sv(StringBuilder() << "thumbnail "_sv << entry.name()));
     }
 
-    // the selected image, decoded and uploaded now
+    // the selected image, decoded and handed to ImGui now
     void ViewApp::show(size_t index) {
         current = index;
         scrollToCurrent = true;
@@ -432,12 +504,10 @@ namespace {
         }
 
         retire(tex);
-        uploadTexture(image.width, image.height, (const u8*)image.rgba.data(), tex);
-        texW = image.width;
-        texH = image.height;
+        tex = makeTexture(image);
         shown = Load::Ready;
         shownIndex = index;
-        traceText(sv(StringBuilder() << "showing "_sv << entry.name() << " "_sv << (i64)texW << "x"_sv << (i64)texH));
+        traceText(sv(StringBuilder() << "showing "_sv << entry.name() << " "_sv << (i64)tex->Width << "x"_sv << (i64)tex->Height));
     }
 
     void ViewApp::step(long delta) {
@@ -704,7 +774,7 @@ namespace {
             ImVec2 centre((p0.x + p1.x) / 2.f, (p0.y + p1.y) / 2.f);
             ImVec2 half((p1.x - p0.x) / 2.f * scale, (p1.y - p0.y) / 2.f * scale);
 
-            fg->AddImage((ImTextureID)entry.thumbTex.ds, ImVec2(centre.x - half.x, centre.y - half.y), ImVec2(centre.x + half.x, centre.y + half.y));
+            fg->AddImage(entry.thumbTex->GetTexRef(), ImVec2(centre.x - half.x, centre.y - half.y), ImVec2(centre.x + half.x, centre.y + half.y));
         };
 
         // a bulged thumbnail spills over the list's edge onto the canvas:
@@ -790,9 +860,9 @@ namespace {
             if (ready) {
                 auto& text = sb();
                 // megapixels to a tenth
-                i64 tenths = ((i64)texW * (i64)texH + 50000) / 100000;
+                i64 tenths = ((i64)tex->Width * (i64)tex->Height + 50000) / 100000;
 
-                text << (i64)texW << " \xc3\x97 "_sv << (i64)texH << "   "_sv << tenths / 10 << "."_sv << tenths % 10 << " MP"_sv;
+                text << (i64)tex->Width << " \xc3\x97 "_sv << (i64)tex->Height << "   "_sv << tenths / 10 << "."_sv << tenths % 10 << " MP"_sv;
                 row("Dimensions", sv(text));
             }
 
@@ -922,8 +992,8 @@ namespace {
             return;
         }
 
-        float rw = (float)(rotation & 1 ? texH : texW);
-        float rh = (float)(rotation & 1 ? texW : texH);
+        float rw = (float)(rotation & 1 ? tex->Height : tex->Width);
+        float rh = (float)(rotation & 1 ? tex->Width : tex->Height);
 
         if (fit) {
             // fit shrinks: a small image stays at its own size
@@ -946,7 +1016,7 @@ namespace {
         const ImVec2 uv[4] = {ImVec2(0, 0), ImVec2(1, 0), ImVec2(1, 1), ImVec2(0, 1)};
         int r = rotation;
 
-        dl->AddImageQuad((ImTextureID)tex.ds, p0, ImVec2(p1.x, p0.y), p1, ImVec2(p0.x, p1.y), uv[(4 - r) & 3], uv[(5 - r) & 3], uv[(6 - r) & 3], uv[(7 - r) & 3]);
+        dl->AddImageQuad(tex->GetTexRef(), p0, ImVec2(p1.x, p0.y), p1, ImVec2(p0.x, p1.y), uv[(4 - r) & 3], uv[(5 - r) & 3], uv[(6 - r) & 3], uv[(7 - r) & 3]);
 
         ImGuiIO& io = ImGui::GetIO();
 
@@ -972,6 +1042,7 @@ namespace {
         ImGuiViewport* vp = ImGui::GetMainViewport();
 
         result = 0;
+        tendTextures();
         keys();
 
         ImGui::SetNextWindowPos(vp->Pos);
@@ -1118,7 +1189,7 @@ int mainView(int argc, char** argv) {
         }
 
         // the platform, the input bridge and the window live in the same
-        // arena: LIFO death tears the window down after every vulkan guard
+        // arena: LIFO death tears the window down after every gpu guard
         // below and before the platform it belongs to
         plt::Platform& platform = *plt::Platform::create(*shot);
         ImGuiPlt& imgui = *ImGuiPlt::create(*shot);
@@ -1159,27 +1230,22 @@ int mainView(int argc, char** argv) {
 
         VulkanWants wants;
 
-        wants.textures = (u32)app.entries.length() + 4;
-        setupVulkan(*shot, wants);
-
-        VkSurfaceKHR surface = createSurface(window);
-        plt::WindowInfo bootInfo = window.info();
-
-        setupVulkanWindow(*shot, surface, (int)bootInfo.width, (int)bootInfo.height, false);
-        setupImGui(*shot, false);
-
-        VkPhysicalDeviceProperties props;
-
-        vkGetPhysicalDeviceProperties(gPhys, &props);
-        app.maxSide = props.limits.maxImageDimension2D;
+        // ImGui holds a texture per thumbnail and one for the shown image,
+        // and for a few frames the ones they replace
+        wants.textures = 2 * (u32)app.entries.length() + 8;
+        // the textures are the viewer's objects: they go after ImGui and
+        // its renderer, which tear their device side down, have gone
         pooledGuard(*shot, [a = &app] {
-            vkDeviceWaitIdle(gDevice);
-            destroyTexture(a->tex);
-
-            for (size_t i = 0; i < a->entries.length(); i++) {
-                destroyTexture(a->entries[i]->thumbTex);
-            }
+            a->dropTextures();
         });
+        setupGpu(*shot, window, wants);
+
+        // what a texture may measure, the renderer's word, if it has one
+        ImGuiPlatformIO& pio = ImGui::GetPlatformIO();
+
+        if (pio.Renderer_TextureMaxWidth > 0 && pio.Renderer_TextureMaxHeight > 0) {
+            app.maxSide = (u32)min(pio.Renderer_TextureMaxWidth, pio.Renderer_TextureMaxHeight);
+        }
 
         app.window = &window;
         driver.platform = &platform;
@@ -1193,6 +1259,7 @@ int mainView(int argc, char** argv) {
             // bytes, then a thumbnail of each at the list's width
             readAll(app.entries);
 
+            plt::WindowInfo bootInfo = window.info();
             float innerW = max(1.f, floorf((float)bootInfo.width * sideShare) - 2.f * px(gap));
             u32 side = thumbSideFor((innerW + 2.f * px(gap)) * (1.f + bulge));
 
