@@ -10,8 +10,8 @@ with Session("usage") as s:
     shots = s.artifacts / "shots"
 
     code, log = s.run(command=s.binary)
-    assert code == 2 and "usage: im <tool> [args...]; tools: screenshot" in log, f"im alone: rc={code}:\n{log}"
-    code, log = s.run("view", command=s.binary)
+    assert code == 2 and "usage: im <tool> [args...]; tools: screenshot view" in log, f"im alone: rc={code}:\n{log}"
+    code, log = s.run("paint", command=s.binary)
     assert code == 2 and "usage: im <tool>" in log, f"an unknown tool: rc={code}:\n{log}"
     code, log = s.run("screenshot", command=s.binary)
     assert code == 2 and "usage: im screenshot <path|fd:N>" in log, f"im screenshot without a path: rc={code}:\n{log}"

@@ -163,8 +163,9 @@ namespace {
     };
 
     // ImGui keys name US-layout positions, so the layout-independent base
-    // codepoint is the right source; letters, digits and the punctuation
-    // row are all ImGui cares about
+    // codepoint is the right source; letters, digits, the punctuation row
+    // and the space (a printable key to the platform) are all ImGui cares
+    // about
     ImGuiKey printableKey(u32 codepoint) {
         // an ASCII letter of either case folds to lower case by its 0x20
         // bit; no other codepoint lands in a-z that way
@@ -179,6 +180,8 @@ namespace {
         }
 
         switch (codepoint) {
+            case ' ':
+                return ImGuiKey_Space;
             case '\'':
                 return ImGuiKey_Apostrophe;
             case ',':
