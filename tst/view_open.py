@@ -47,8 +47,8 @@ with Session("view_open", tool="view") as s:
     s.tap(KEY_BACKSPACE)
     s.said("selected a.png", 4)
     s.tap(KEY_LEFT)  # already first: stays
-    # the list's rows are as wide as the list (184 px) and as tall as the
-    # image's proportion, 8 px apart: a.png and b.png 138 px, c.png 184 px;
+    # the list's rows are as wide as the list (192 px) and as tall as the
+    # image's proportion, 4 px apart: a.png and b.png 144 px, c.png 192 px;
     # the third row starts 300 px down
     s.click(100, 400)
     s.said("selected c.png", 2)

@@ -15,7 +15,7 @@ with Session("view_gallery", tool="view") as s:
     s.focus()
     s.said("listed 40")
     s.said("showing f00.png 8x8")
-    # 8x8 images make 184 px square rows, 8 px apart: a 700 px window shows
+    # 8x8 images make 192 px square rows, 4 px apart: a 700 px window shows
     # three and part of the fourth, and two more are decoded ahead
     for i in range(6):
         s.said(f"thumbnail f{i:02}.png")
@@ -31,7 +31,7 @@ with Session("view_gallery", tool="view") as s:
     s.wait(lambda: any(f"thumbnail f{i:02}.png" in s.client_log() for i in range(20, 33)), "thumbnails of the rows scrolled into view")
     s.tap(KEY_HOME)
     s.said("selected f00.png")
-    # the third row spans 392..576 px
+    # the third row spans 396..588 px
     s.click(100, 470)
     s.said("selected f02.png")
     s.said("showing f02.png 8x8")

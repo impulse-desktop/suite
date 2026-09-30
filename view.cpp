@@ -46,7 +46,7 @@ namespace {
     // each side panel takes this share of the window's width
     constexpr float sideShare = .2f;
     // the gutter around thumbnails, a design length
-    constexpr Design gap = 8_d;
+    constexpr Design gap = 4_d;
     // a thumbnail fills the list's width; until it is decoded its row is
     // this tall for its width, a photo's proportion
     constexpr float placeholderAspect = .75f;
