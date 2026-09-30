@@ -1,5 +1,7 @@
 #include "imgui_plt.h"
 
+#include "gpu.h"
+
 #include "util.h"
 
 #include <std/ios/sys.h>
@@ -311,6 +313,11 @@ namespace {
 
     void ImGuiPltImpl::pointerMotion(const plt::PointerMotionInput& input) {
         traceInput("pointer"_sv, input.pixelX, input.pixelY);
+
+        if (gTraceFrames) {
+            sysE << "im pointer: "_sv << (i64)input.pixelX << " "_sv << (i64)input.pixelY << endL;
+        }
+
         ImGui::GetIO().AddMousePosEvent((float)input.pixelX, (float)input.pixelY);
     }
 
@@ -328,6 +335,12 @@ namespace {
     }
 
     void ImGuiPltImpl::scroll(const plt::ScrollInput& input) {
+        // the frame trace: every wheel event as plt hands it over, between
+        // the frames' lines
+        if (gTraceFrames) {
+            sysE << "im wheel: y/100 "_sv << (i64)(input.y * 100.0) << " precise "_sv << (i64)input.precise << " momentum "_sv << (i64)input.momentum << " phase "_sv << (i64)input.phase << endL;
+        }
+
         ImGui::GetIO().AddMouseWheelEvent((float)input.x, (float)input.y);
     }
 
