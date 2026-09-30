@@ -45,17 +45,12 @@ using namespace stl;
 namespace {
     // each side panel takes this share of the window's width
     constexpr float sideShare = .2f;
-    // the gutter around thumbnails and their corners' rounding, as design
-    // lengths
+    // the gutter around thumbnails, a design length
     constexpr Design gap = 8_d;
-    constexpr Design rounding = 4_d;
     // the panels sit a shade lighter than the canvas, hairlines part them
-    // from it and the sections from each other; ImGui's own blue marks
-    // the selection, as it does the menus
+    // from it and the sections from each other
     constexpr ImU32 panelBg = IM_COL32(33, 34, 39, 255);
     constexpr ImU32 hairline = IM_COL32(255, 255, 255, 20);
-    constexpr ImU32 accent = IM_COL32(66, 150, 250, 255);
-    constexpr ImU32 accentDim = IM_COL32(66, 150, 250, 96);
     // a thumbnail fills the list's width; until it is decoded its row is
     // this tall for its width, a photo's proportion
     constexpr float placeholderAspect = .75f;
@@ -811,7 +806,6 @@ namespace {
         ImVec2 origin = ImGui::GetCursorScreenPos();
         ImDrawList* dl = ImGui::GetWindowDrawList();
         ImU32 dimColor = ImGui::GetColorU32(ImGuiCol_TextDisabled);
-        float corner = px(rounding);
         float total = g;
         float currentTop = g;
         float currentH = 0.f;
@@ -882,23 +876,23 @@ namespace {
 
                 ImGui::PopID();
 
+                // the row around the thumbnail in ImGui's own selectable
+                // colours: half the gutter of it shows
+                if (i == current || hovered) {
+                    float half = g / 2.f;
+
+                    dl->AddRectFilled(ImVec2(p0.x - half, p0.y - half), ImVec2(p1.x + half, p1.y + half), ImGui::GetColorU32(hovered ? ImGuiCol_HeaderHovered : ImGuiCol_Header));
+                }
+
                 if (entry.thumb == Load::Ready) {
-                    dl->AddImageRounded((ImTextureID)entry.thumbTex.ds, p0, p1, ImVec2(0, 0), ImVec2(1, 1), IM_COL32_WHITE, corner);
+                    dl->AddImage((ImTextureID)entry.thumbTex.ds, p0, p1);
                     entry.drawnAt = frames;
                 } else {
                     const char* mark = entry.thumb == Load::Failed ? "?" : "\xe2\x80\xa6";
                     ImVec2 extent = ImGui::CalcTextSize(mark);
 
-                    dl->AddRectFilled(p0, p1, IM_COL32(255, 255, 255, 10), corner);
+                    dl->AddRectFilled(p0, p1, IM_COL32(255, 255, 255, 10));
                     dl->AddText(ImVec2(p0.x + (innerW - extent.x) / 2.f, p0.y + (h - extent.y) / 2.f), dimColor, mark);
-                }
-
-                if (i == current) {
-                    float inset = px(1_d);
-
-                    dl->AddRect(ImVec2(p0.x - inset, p0.y - inset), ImVec2(p1.x + inset, p1.y + inset), accent, corner + inset, 0, px(2_d));
-                } else if (hovered) {
-                    dl->AddRect(p0, p1, accentDim, corner, 0, px(1_d));
                 }
             }
 
