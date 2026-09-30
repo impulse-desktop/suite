@@ -12,8 +12,14 @@ with Session("view_scale", tool="view") as s:
     write_png(pics / "c.png", 64, 48, (0, 0, 255))
     s.launch(str(pics), IMGUI_SCALE="2")
     s.focus()
-    s.wait(lambda: s.size() == (s.width * 9 // 10, s.height * 9 // 10), "the window held to 90% of the output")
+    w, h = s.width * 9 // 10, s.height * 9 // 10
+    # the tool's own present at the clamped size, not the compositor's
+    # rect: a click into a window still being re-presented lands in a
+    # pointer leave (see the sway race in the fixture's history)
+    s.said(f"presenting {w}x{h}")
+    assert s.size() == (w, h), f"the window was not held to 90% of the output ({s.size()})"
     s.said("showing a.png 64x48")
+    s.settled("scaled")
     # rows are 208 px tall now: the second row's middle is c.png's neighbour b.png
     s.click(120, 312)
     s.said("selected b.png")
