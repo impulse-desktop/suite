@@ -1,8 +1,11 @@
 import build
 import build.flags as flags
 import fnmatch
+import glob
 import hashlib
 import os
+import shutil
+import subprocess
 
 
 std_build = os.path.join("ext", "libstd", "build.py")
@@ -76,11 +79,72 @@ imgui = library(
 )
 
 
+# ---- the image decoder: ImageMagick as a pure wasm module, compiled to C --
+# ext/decode/decode.wasm (ImageMagick and its coders built for wasm32-none,
+# from pg83/decode) imports nothing and exports decode(data, len, name,
+# name_len) -> {u32 width; u32 height; u8 rgba[]} or 0, with malloc and free.
+# wasm2c (wabt) turns it into C with every memory access checked, and with
+# the runtime it ships next to itself the module becomes an ordinary library
+# of the one binary: no interpreter, no JIT, and no way out of its own memory
+# for a coder that reads a hostile file. The runtime's public header sits in
+# include/ (a distribution's wabt) or with the runtime's sources (ix's).
+wasm2c = shutil.which("wasm2c")
+if wasm2c is None:
+    raise RuntimeError("wasm2c (wabt) is required: the image decoder is compiled from ext/decode/decode.wasm")
+wabt_prefix = os.path.dirname(os.path.dirname(os.path.realpath(wasm2c)))
+wasm_rt = os.path.join(wabt_prefix, "share", "wabt", "wasm2c")
+wasm_rt_header = next(
+    (d for d in (os.path.join(wabt_prefix, "include"), wasm_rt) if os.path.exists(os.path.join(d, "wasm-rt.h"))),
+    None,
+)
+if wasm_rt_header is None or not os.path.exists(os.path.join(wasm_rt, "wasm-rt-impl.c")):
+    raise RuntimeError(f"the wasm2c runtime (wasm-rt.h, wasm-rt-impl.c) is missing under {wabt_prefix}")
+wabt_version = subprocess.check_output([wasm2c, "--version"], text=True).strip()
+
+decode_dir = "$(B)/decode"
+decode_shards = 16
+# the runtime's sources and headers come along into the generated tree: one
+# include directory, and the shards see the runtime of the wasm2c that made them
+decode_runtime = sorted({
+    *glob.glob(os.path.join(wasm_rt, "wasm-rt*")),
+    *glob.glob(os.path.join(wasm_rt_header, "wasm-rt*.h")),
+})
+decode_runtime_files = [f"{decode_dir}/{os.path.basename(path)}" for path in decode_runtime]
+decode_headers = [f"{decode_dir}/decode.h", f"{decode_dir}/decode-impl.h"]
+decode_sources = [f"{decode_dir}/decode_{i}.c" for i in range(decode_shards)]
+decode_c = command(
+    name="decode_c",
+    inputs=["$(S)/ext/decode/decode.wasm"],
+    outputs=[*decode_sources, *decode_headers, *decode_runtime_files],
+    cmd=[
+        ["wasm2c", "$(S)/ext/decode/decode.wasm", "--module-name", "decode", "--num-outputs", str(decode_shards), "-o", f"{decode_dir}/decode.c"],
+        ["cp", *decode_runtime, f"{decode_dir}/"],
+    ],
+    # another wabt generates other C and ships another runtime
+    env={"WABT_VERSION": wabt_version},
+    descr="WC",
+)
+
+# 170 MB of generated C: its warnings are the generator's, and debug info
+# for it would outweigh the binary
+decode = library(
+    name="decode",
+    srcs=[
+        {"src": src, "inputs": [*decode_headers, *decode_runtime_files]}
+        for src in [*decode_sources, *[path for path in decode_runtime_files if path.endswith(".c")]]
+    ],
+    cflags=["-g0", "-w"],
+    includes=[decode_dir],
+    public_cppflags=[f"-I{decode_dir}"],
+    deps=[decode_c],
+)
+
+
 im_sources = build.glob("$(S)/*.cpp")
 # the vendored libraries' own dependencies come along by name: an imported
 # graph hands over its archive, not what the archive wants linked
 im_deps = [
-    *shader_rules, imgui, plt, libstd,
+    *shader_rules, imgui, decode, plt, libstd,
     wayland_client, xkb, vulkan, png, jxl, system,
 ]
 

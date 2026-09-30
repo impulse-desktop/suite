@@ -35,9 +35,15 @@ library is not used, the vocabulary comes from
 ./build im_test    # the test build: fault seam and trace lines compiled in
 ```
 
-The build wants clang, `pkg-config`, `wayland-scanner`, `glslangValidator`
-and the development files of wayland-client, vulkan, libpng and libjxl.
-`dev/style.py` formats the tree.
+The build wants clang, `pkg-config`, `wayland-scanner`, `glslangValidator`,
+`wasm2c` (wabt, with the wasm2c runtime it ships) and the development
+files of wayland-client, vulkan, libpng and libjxl. `dev/style.py` formats
+the tree.
+
+Images are decoded by ImageMagick, vendored as one pure WebAssembly module
+(`ext/decode/decode.wasm`, from [pg83/decode](https://github.com/pg83/decode))
+that wasm2c turns into C at build time: a sandboxed library of the binary,
+every memory access checked, with no interpreter or JIT behind it.
 
 ## Testing
 

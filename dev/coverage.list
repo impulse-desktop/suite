@@ -4,3 +4,6 @@
 # left alone with the rest.
 [clang]
 !src:*/ext/*
+# the image decoder is generated: wasm2c's C from ext/decode/decode.wasm,
+# and the runtime that came with it
+!src:*/decode/*
