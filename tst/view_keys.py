@@ -1,9 +1,10 @@
 """The view on an image: the wheel over the canvas zooms in, - and = step
 the zoom, 1 is 1:1 and 0 fits again; r turns the image a quarter clockwise
 (the 64x48 image stands 48x64), R back; f makes the window fullscreen and
-back; Tab hides the gallery, and the canvas takes its room."""
+back; Tab hides the gallery, and the canvas takes its room; b hides the
+status line; a drag pans; a window narrower than the gallery is fine."""
 
-from session import KEY_1, KEY_EQUAL, KEY_F, KEY_LEFTSHIFT, KEY_MINUS, KEY_R, KEY_TAB, KEY_ZERO, Session, colour_box, write_png
+from session import KEY_1, KEY_B, KEY_EQUAL, KEY_F, KEY_LEFTSHIFT, KEY_MINUS, KEY_R, KEY_TAB, KEY_ZERO, Session, colour_box, write_png
 
 with Session("view_keys", tool="view") as s:
     pics = s.artifacts / "pics"
@@ -63,5 +64,20 @@ with Session("view_keys", tool="view") as s:
     s.wait(lambda: (b := colour_box(s.capture("nopanel", region=canvas), reddish)) and before[0] - b[0] >= 100, "the image moved left")
     s.tap(KEY_TAB)
     s.said("panel on")
+    s.tap(KEY_B)
+    s.said("status off")
+    s.tap(KEY_B)
+    s.said("status on")
+    # a drag over the canvas pans (a fitted image stays centred)
+    cx, cy = canvas[0] + canvas[2] // 2, canvas[3] // 2
+    s.drag(cx, cy, cx + 40, cy + 30)
+    s.tap(KEY_ZERO)
+    s.said("fit", 2)
+    # a window narrower than the gallery leaves the canvas nothing to draw in
+    node = s.window()
+    s.ipc(f'[con_id={node["id"]}] resize set 200 px 150 px')
+    s.said("presenting 200x150")
+    s.ipc(f'[con_id={node["id"]}] resize set {r["width"]} px {r["height"]} px')
+    s.said(f"presenting {r['width']}x{r['height']}", 2)
     s.close()
-    print("OK: zoom, rotation, fullscreen and the gallery toggle work by key and wheel")
+    print("OK: zoom, rotation, fullscreen, the toggles, a drag and a tiny window work")

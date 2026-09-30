@@ -544,6 +544,8 @@ namespace {
             return;
         }
 
+        size_t before = readyThumbs;
+
         for (size_t i = 0; i < entries.length() && readyThumbs > maxThumbs / 2; i++) {
             Entry& entry = *entries[i];
 
@@ -553,6 +555,8 @@ namespace {
                 readyThumbs--;
             }
         }
+
+        traceText(sv(StringBuilder() << "evicted "_sv << (i64)(before - readyThumbs) << " thumbnails"_sv));
     }
 
     void ViewApp::show(size_t index) {
@@ -599,10 +603,6 @@ namespace {
     }
 
     void ViewApp::step(long delta) {
-        if (entries.empty()) {
-            return;
-        }
-
         long last = (long)entries.length() - 1;
         long next = (long)current + delta;
 
@@ -685,6 +685,7 @@ namespace {
 
         if (ImGui::IsKeyPressed(ImGuiKey_B)) {
             statusBar = !statusBar;
+            traceText(statusBar ? "status on"_sv : "status off"_sv);
         }
     }
 
@@ -766,7 +767,7 @@ namespace {
         ImDrawList* dl = ImGui::GetWindowDrawList();
 
         if (shown != Load::Ready) {
-            const char* text = entries.empty() ? "no images" : shown == Load::Failed ? "cannot show this image" : "decoding";
+            const char* text = shown == Load::Failed ? "cannot show this image" : "decoding";
             ImVec2 extent = ImGui::CalcTextSize(text);
 
             dl->AddText(ImVec2(origin.x + (size.x - extent.x) / 2.f, origin.y + (size.y - extent.y) / 2.f), ImGui::GetColorU32(ImGuiCol_TextDisabled), text);
@@ -822,23 +823,17 @@ namespace {
 
     void ViewApp::drawStatus() {
         auto& text = sb();
+        const Entry& entry = *entries[current];
 
-        if (entries.empty()) {
-            text << "no images"_sv;
+        if (shown == Load::Failed && shownIndex == current) {
+            text << "cannot show "_sv << entry.name() << ": "_sv << sv(shownError);
+        } else if (shown != Load::Ready || shownIndex != current) {
+            text << "decoding "_sv << entry.name();
         } else {
-            const Entry& entry = *entries[current];
-
-            if (shown == Load::Failed && shownIndex == current) {
-                text << "cannot show "_sv << entry.name() << ": "_sv << sv(shownError);
-            } else if (shown != Load::Ready || shownIndex != current) {
-                text << "decoding "_sv << entry.name();
-            } else {
-                text << entry.name() << "   "_sv << (i64)texW << "x"_sv << (i64)texH << "   "_sv << (i64)(zoom * 100.f + .5f) << "%"_sv;
-            }
-
-            text << "   "_sv << (i64)(current + 1) << "/"_sv << (i64)entries.length();
+            text << entry.name() << "   "_sv << (i64)texW << "x"_sv << (i64)texH << "   "_sv << (i64)(zoom * 100.f + .5f) << "%"_sv;
         }
 
+        text << "   "_sv << (i64)(current + 1) << "/"_sv << (i64)entries.length();
         ImGui::TextUnformatted(text.cStr());
     }
 

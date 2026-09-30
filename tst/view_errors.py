@@ -1,7 +1,8 @@
 """What the viewer does with what it cannot show: no arguments is a usage
-error, a path that is not there or a directory without images opens the
-error panel, a file no coder takes or a truncated one is reported on the
-status line and stays in the list, its neighbours showing all the same."""
+error, a path that is not there, a directory without images or one that
+cannot be read opens the error panel, a file no coder takes or a truncated
+one is reported on the status line and stays in the list, its neighbours
+showing all the same; a Vulkan that fails ends the tool with the error."""
 
 import os
 
@@ -24,6 +25,15 @@ with Session("view_errors", tool="view") as s:
     assert s.size() == (480, 180), f"an empty directory did not open the error panel ({s.size()})"
     s.close()
 
+    locked = s.artifacts / "locked"
+    locked.mkdir()
+    locked.chmod(0)
+    s.launch(str(locked))
+    s.focus()
+    assert s.size() == (480, 180), f"an unreadable directory did not open the error panel ({s.size()})"
+    s.close()
+    assert "opendir() failed" in s.client_log(), "the unreadable directory was not reported"
+
     pics = s.artifacts / "pics"
     pics.mkdir()
     (pics / "bad.png").write_bytes(os.urandom(4096))
@@ -43,4 +53,8 @@ with Session("view_errors", tool="view") as s:
     s.said("selected trunc.png")
     s.said("cannot show trunc.png: ")
     s.close()
-    print("OK: unusable inputs are reported, the rest shows")
+
+    # a Vulkan that fails at its first call ends the tool with the error
+    code, log = s.run(str(pics), IM_CHAOS="vulkan=1")
+    assert code == 1 and "vulkan error" in log, f"a failed Vulkan did not end the viewer with the error (rc={code}):\n{log}"
+    print("OK: unusable inputs are reported, the rest shows, and a failed Vulkan ends the viewer")
