@@ -20,9 +20,10 @@ with Session("view_open", tool="view") as s:
     for name in ("a.png", "b.png", "c.png"):
         s.said(f"thumbnail {name}")
     # the canvas sits between the list and the properties panel, a fifth
-    # of the width (200 px) each
+    # of the width (200 px) each; a thumbnail bulging towards the pointer
+    # reaches 215 px, so the region starts past that
     r = s.window()["rect"]
-    canvas = (210, 0, r["width"] - 420, r["height"])
+    canvas = (220, 0, r["width"] - 420, r["height"])
 
     def shows(rgb, count, label):
         s.wait(lambda: near(s.capture(label, region=canvas), rgb) >= count, f"the canvas showing {label}")

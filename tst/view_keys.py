@@ -14,7 +14,7 @@ with Session("view_keys", tool="view") as s:
     s.focus()
     s.said("showing a.png 64x48")
     r = s.window()["rect"]
-    canvas = (210, 0, r["width"] - 420, r["height"])
+    canvas = (220, 0, r["width"] - 420, r["height"])
 
     def reddish(red, green, blue):
         return red >= 100 and green <= 80 and blue <= 80
