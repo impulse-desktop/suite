@@ -147,13 +147,14 @@ decode_defines = [
 
 # 170 MB of generated C: its warnings are the generator's, and debug info
 # for it would outweigh the binary; the exception a trap becomes unwinds
-# through its frames
+# through its frames. Every source and header here is an output of the one
+# node above, so a source names no inputs: naming the headers too repeats
+# the producer among a shard's dependencies, and the runner then keeps a
+# second copy of every shard for the scenarios, whose dependency on
+# im_test lists it once
 decode = library(
     name="decode",
-    srcs=[
-        {"src": src, "inputs": [*decode_headers, *decode_runtime_files]}
-        for src in [*decode_sources, *[path for path in decode_runtime_files if path.endswith(".c")]]
-    ],
+    srcs=[*decode_sources, *[path for path in decode_runtime_files if path.endswith(".c")]],
     cflags=["-g0", "-w", "-fexceptions"],
     cppflags=decode_defines,
     includes=[decode_dir],
@@ -279,11 +280,14 @@ for scenario in sorted(set(build.glob("$(S)/tst/*.py")) - set(harness)):
     if int(hashlib.sha1(name.encode()).hexdigest(), 16) % shard_count != shard_index:
         continue
     out = f"$(B)/test-results/{name}.json"
+    # the binary and the helpers by their directory, not by name: a program's
+    # output named in a command's line makes the runner build that program
+    # (and its libraries, the generated decoder above all) a second time as
+    # a host tool; the deps below order the scenario after them all the same
     cmd = [
         "python3", "$(S)/dev/run_test.py",
         "--scenario", scenario,
-        "--binary", "$(B)/im_test",
-        "--helpers", "$(B)/e2e",
+        "--build-dir", "$(B)",
         "--out", out,
     ]
     if flags.runtime:
