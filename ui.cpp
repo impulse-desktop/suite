@@ -8,8 +8,11 @@
 using namespace stl;
 
 namespace {
+    // the scale is the output's, as the window reports it, times the
+    // user's factor from IM_SCALE
+    float gContent = 1.f;
+    float gUser = 1.f;
     float gScale = 1.f;
-    bool gFixed = false;
     // ImGui's drag and double-click thresholds, as a design length: its
     // ScaleAllSizes leaves them alone
     constexpr Design mouseThreshold = 6_d;
@@ -24,18 +27,19 @@ void initUiScale() {
         double v = parseFloat(StringView(s));
 
         if (v > 0.0) {
-            gScale = (float)v;
-            gFixed = true;
+            gUser = (float)v;
+            gScale = gUser * gContent;
         }
     }
 }
 
 bool followContentScale(float contentScale) {
-    if (gFixed || contentScale <= 0.f || contentScale == gScale) {
+    if (contentScale <= 0.f || contentScale == gContent) {
         return false;
     }
 
-    gScale = contentScale;
+    gContent = contentScale;
+    gScale = gUser * gContent;
 
     return true;
 }

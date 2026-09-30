@@ -20,14 +20,18 @@ constexpr Design operator""_d(unsigned long long v) {
     return {(float)v};
 }
 
-// the scale: IM_SCALE when set, pixels per design unit as the tests and a
-// user ask for, else the window's content scale, followed as the window
-// moves between outputs. Nothing here knows how the platform found it
+// the scale: the window's content scale, followed as the window moves
+// between outputs, times IM_SCALE, a user's factor over it (the tests set
+// it on an output of scale 1). Nothing here knows how the platform found
+// its scale. A window is asked for in the platform's logical units, which
+// its output scales by itself: before the window exists the content scale
+// counts as 1, so a design size then is the user's factor alone, as it
+// should be
 float uiScale();
-// IM_SCALE, once at start; 1 until a window says otherwise
+// IM_SCALE, once at start
 void initUiScale();
-// the window's content scale, unless IM_SCALE fixed the scale; true when
-// the scale changed, so the style is to be applied again
+// the window's content scale; true when the scale changed, so the style
+// is to be applied again
 bool followContentScale(float contentScale);
 
 // a design length in whole pixels, never under one for a positive length;
