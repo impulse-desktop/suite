@@ -52,7 +52,10 @@ bool gRebuild = false;
 bool gLinearHdr = false;
 
 namespace {
-    constexpr u32 kMinImageCount = 2;
+    // three: MoltenVK takes the CAMetalLayer drawable at submit, and with
+    // two the submit blocks until the frame before last has left the
+    // screen, a display link tick lost each time
+    constexpr u32 kMinImageCount = 3;
     VkRenderPass gScenePass = VK_NULL_HANDLE;
     VkImage gSceneImage = VK_NULL_HANDLE;
     VkDeviceMemory gSceneMemory = VK_NULL_HANDLE;
