@@ -47,10 +47,6 @@ namespace {
     constexpr float sideShare = .2f;
     // the gutter around thumbnails, a design length
     constexpr Design gap = 8_d;
-    // the panels sit a shade lighter than the canvas, hairlines part them
-    // from it and the sections from each other
-    constexpr ImU32 panelBg = IM_COL32(33, 34, 39, 255);
-    constexpr ImU32 hairline = IM_COL32(255, 255, 255, 20);
     // a thumbnail fills the list's width; until it is decoded its row is
     // this tall for its width, a photo's proportion
     constexpr float placeholderAspect = .75f;
@@ -891,7 +887,6 @@ namespace {
                     const char* mark = entry.thumb == Load::Failed ? "?" : "\xe2\x80\xa6";
                     ImVec2 extent = ImGui::CalcTextSize(mark);
 
-                    dl->AddRectFilled(p0, p1, IM_COL32(255, 255, 255, 10));
                     dl->AddText(ImVec2(p0.x + (innerW - extent.x) / 2.f, p0.y + (h - extent.y) / 2.f), dimColor, mark);
                 }
             }
@@ -912,23 +907,8 @@ namespace {
         const Entry& entry = *entries[current];
         bool ready = shown == Load::Ready && shownIndex == current;
 
-        // ImGui's own spacing, frames and blues; every row one frame tall,
-        // text sitting where a frame's would
-        ImGui::PushStyleColor(ImGuiCol_Separator, hairline);
-
-        // a section's title: a row with an arrow, no bar; the hairlines
-        // between the sections do the grouping
-        auto section = [&](const char* title) {
-            ImGui::PushStyleColor(ImGuiCol_Header, IM_COL32(0, 0, 0, 0));
-            ImGui::PushStyleColor(ImGuiCol_HeaderHovered, IM_COL32(255, 255, 255, 16));
-            ImGui::PushStyleColor(ImGuiCol_HeaderActive, IM_COL32(255, 255, 255, 28));
-
-            bool open = ImGui::CollapsingHeader(title, ImGuiTreeNodeFlags_DefaultOpen);
-
-            ImGui::PopStyleColor(3);
-
-            return open;
-        };
+        // ImGui's own spacing, frames and colours; every row one frame
+        // tall, text sitting where a frame's would
         // a key in the dim column, the value beside it
         auto key = [&](const char* name) {
             ImGui::TableNextRow();
@@ -958,7 +938,7 @@ namespace {
             return true;
         };
 
-        if (section("Image") && table("image")) {
+        if (ImGui::CollapsingHeader("Image", ImGuiTreeNodeFlags_DefaultOpen) && table("image")) {
             if (shown == Load::Failed && shownIndex == current) {
                 row("Error", sv(shownError));
             } else if (!ready) {
@@ -1055,7 +1035,7 @@ namespace {
         ImGui::Separator();
         ImGui::Spacing();
 
-        if (section("File") && table("file")) {
+        if (ImGui::CollapsingHeader("File", ImGuiTreeNodeFlags_DefaultOpen) && table("file")) {
             StringView whole = sv(entry.path);
 
             row("Name", entry.name());
@@ -1076,8 +1056,6 @@ namespace {
 
             ImGui::EndTable();
         }
-
-        ImGui::PopStyleColor();
     }
 
     void ViewApp::drawCanvas() {
@@ -1167,16 +1145,12 @@ namespace {
         float sideW = floorf(vp->Size.x * sideShare);
         bool left = panel && !fullscreen;
         bool right = info && !fullscreen;
-        ImDrawList* fg = ImGui::GetForegroundDrawList();
 
         if (left) {
-            ImGui::PushStyleColor(ImGuiCol_ChildBg, panelBg);
             ImGui::BeginChild("gallery", ImVec2(sideW, 0.f), 0, ImGuiWindowFlags_NoScrollbar);
             drawGallery();
             ImGui::EndChild();
-            ImGui::PopStyleColor();
             ImGui::SameLine();
-            fg->AddLine(ImVec2(vp->Pos.x + sideW, vp->Pos.y), ImVec2(vp->Pos.x + sideW, vp->Pos.y + vp->Size.y), hairline);
         }
 
         ImGui::BeginChild("canvas", ImVec2(right ? -sideW : 0.f, 0.f), 0, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
@@ -1188,12 +1162,9 @@ namespace {
             // the zeros placed the children; inside the panel ImGui's own
             // padding and spacing
             ImGui::PopStyleVar(2);
-            ImGui::PushStyleColor(ImGuiCol_ChildBg, panelBg);
             ImGui::BeginChild("info", ImVec2(sideW, 0.f), ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoScrollbar);
             drawInfo();
             ImGui::EndChild();
-            ImGui::PopStyleColor();
-            fg->AddLine(ImVec2(vp->Pos.x + vp->Size.x - sideW, vp->Pos.y), ImVec2(vp->Pos.x + vp->Size.x - sideW, vp->Pos.y + vp->Size.y), hairline);
         } else {
             ImGui::PopStyleVar(2);
         }
