@@ -1,7 +1,7 @@
 #include "imgui_plt.h"
 
-#include "gpu.h"
 #include "ui.h"
+#include "gpu.h"
 #include "util.h"
 
 #include <std/ios/sys.h>
