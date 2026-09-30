@@ -47,6 +47,11 @@ namespace {
     constexpr float sideShare = .2f;
     // the gutter around thumbnails, a design length
     constexpr Design gap = 4_d;
+    // under the pointer the thumbnails bulge: the scale gained by the one
+    // right under it, and the height over which the bulge fades to nothing
+    constexpr float bulge = .2f;
+    constexpr Design bulgeReach = 240_d;
+    constexpr float pi = 3.14159265f;
     // a thumbnail fills the list's width; until it is decoded its row is
     // this tall for its width, a photo's proportion
     constexpr float placeholderAspect = .75f;
@@ -791,19 +796,27 @@ namespace {
     }
 
     // the list: thumbnails one under another, each as wide as the list
-    // and as tall as its proportion asks, the selected one framed. The
-    // rows in view and a few beyond get their thumbnails decoded
+    // and as tall as its proportion asks, the selected one's row filled.
+    // The rows in view and a few beyond get their thumbnails decoded.
+    // Under the pointer the thumbnails bulge: each scales about its own
+    // centre by how close the pointer is in height, the nearest most, so
+    // they are drawn from the far ones to the nearest, without a sort:
+    // the rows above it top down, the rows below it bottom up
     void ViewApp::drawGallery() {
         float g = px(gap);
         float innerW = max(1.f, ImGui::GetWindowWidth() - 2.f * g);
-        // the texels for the row's whole width, the hovered thumbnail's:
-        // both sizes it is drawn at are then reductions
-        u32 side = thumbSideFor(innerW + 2.f * g);
+        // the texels for a bulged thumbnail's width: what it is drawn at
+        // is then a reduction at every scale
+        u32 side = thumbSideFor((innerW + 2.f * g) * (1.f + bulge));
         float viewH = ImGui::GetWindowHeight();
         size_t count = entries.length();
         ImVec2 origin = ImGui::GetCursorScreenPos();
+        ImVec2 windowPos = ImGui::GetWindowPos();
         ImDrawList* dl = ImGui::GetWindowDrawList();
         ImU32 dimColor = ImGui::GetColorU32(ImGuiCol_TextDisabled);
+        ImVec2 mouse = ImGui::GetIO().MousePos;
+        bool pointed = mouse.x >= windowPos.x && mouse.x < windowPos.x + ImGui::GetWindowWidth() && mouse.y >= windowPos.y && mouse.y < windowPos.y + viewH;
+        float reach = px(bulgeReach);
         float total = g;
         float currentTop = g;
         float currentH = 0.f;
@@ -830,15 +843,12 @@ namespace {
         float scrollY = clampf(ImGui::GetScrollY(), 0.f, max(0.f, total - viewH));
         size_t first = count;
         size_t last = 0;
+        float firstTop = 0.f;
+        float lastBottom = 0.f;
+        // the row nearest the pointer in height, and its distance
+        size_t nearest = count;
+        float nearestD = 0.f;
         float top = g;
-        // two layers: the selection's fill under the thumbnails. The hovered
-        // thumbnail grows over its gutter, drawn after the rest so it lies
-        // over its neighbours' gutters
-        Entry* hoveredEntry = nullptr;
-        ImVec2 hover0;
-        ImVec2 hover1;
-
-        dl->ChannelsSplit(2);
 
         for (size_t i = 0; i < count; i++) {
             Entry& entry = *entries[i];
@@ -847,8 +857,13 @@ namespace {
             bool inView = bottom > scrollY && top < scrollY + viewH;
 
             if (inView) {
-                first = min(first, i);
-                last = max(last, i);
+                if (first == count) {
+                    first = i;
+                    firstTop = top;
+                }
+
+                last = i;
+                lastBottom = bottom;
             }
 
             // a row is worth an item when it is in view or about to be
@@ -878,50 +893,87 @@ namespace {
                     show(i);
                 }
 
-                bool hovered = ImGui::IsItemHovered();
-
                 ImGui::PopID();
 
                 // the row is the thumbnail with its whole gutter, so two rows
-                // meet in the gap; the selection fills its row under the
-                // thumbnails
-                ImVec2 r0(p0.x - g, p0.y - g);
-                ImVec2 r1(p1.x + g, p1.y + g);
-
+                // meet in the gap; the selection fills its row, under every
+                // thumbnail
                 if (i == current) {
-                    dl->ChannelsSetCurrent(0);
-                    dl->AddRectFilled(r0, r1, ImGui::GetColorU32(ImGuiCol_Header));
+                    dl->AddRectFilled(ImVec2(p0.x - g, p0.y - g), ImVec2(p1.x + g, p1.y + g), ImGui::GetColorU32(ImGuiCol_Header));
                 }
 
-                dl->ChannelsSetCurrent(1);
+                if (pointed) {
+                    float d = fabsf(mouse.y - (p0.y + p1.y) / 2.f);
 
-                if (entry.thumb == Load::Ready) {
-                    if (hovered) {
-                        hoveredEntry = &entry;
-                        hover0 = r0;
-                        hover1 = r1;
-                    } else {
-                        dl->AddImage((ImTextureID)entry.thumbTex.ds, p0, p1);
+                    if (nearest == count || d < nearestD) {
+                        nearest = i;
+                        nearestD = d;
                     }
-
-                    entry.drawnAt = frames;
-                } else {
-                    const char* mark = entry.thumb == Load::Failed ? "?" : "\xe2\x80\xa6";
-                    ImVec2 extent = ImGui::CalcTextSize(mark);
-
-                    dl->AddText(ImVec2(p0.x + (innerW - extent.x) / 2.f, p0.y + (h - extent.y) / 2.f), dimColor, mark);
                 }
             }
 
             top = bottom + g;
         }
 
-        if (hoveredEntry != nullptr) {
-            dl->ChannelsSetCurrent(1);
-            dl->AddImage((ImTextureID)hoveredEntry->thumbTex.ds, hover0, hover1);
-        }
+        // a row's thumbnail, scaled about its centre by the pointer's
+        // distance in height: the full bulge at none, nothing at the reach
+        auto draw = [&](size_t i, float rowTop, float h) {
+            Entry& entry = *entries[i];
+            ImVec2 p0(origin.x + g, origin.y + rowTop);
+            ImVec2 p1(p0.x + innerW, p0.y + h);
 
-        dl->ChannelsMerge();
+            if (entry.thumb != Load::Ready) {
+                const char* mark = entry.thumb == Load::Failed ? "?" : "\xe2\x80\xa6";
+                ImVec2 extent = ImGui::CalcTextSize(mark);
+
+                dl->AddText(ImVec2(p0.x + (innerW - extent.x) / 2.f, p0.y + (h - extent.y) / 2.f), dimColor, mark);
+
+                return;
+            }
+
+            float scale = 1.f;
+
+            if (pointed) {
+                float t = fabsf(mouse.y - (p0.y + p1.y) / 2.f) / reach;
+
+                if (t < 1.f) {
+                    scale += bulge * .5f * (1.f + cosf(pi * t));
+                }
+            }
+
+            ImVec2 centre((p0.x + p1.x) / 2.f, (p0.y + p1.y) / 2.f);
+            ImVec2 half((p1.x - p0.x) / 2.f * scale, (p1.y - p0.y) / 2.f * scale);
+
+            dl->AddImage((ImTextureID)entry.thumbTex.ds, ImVec2(centre.x - half.x, centre.y - half.y), ImVec2(centre.x + half.x, centre.y + half.y));
+            entry.drawnAt = frames;
+        };
+
+        if (first < count) {
+            size_t stop = nearest == count ? last + 1 : nearest;
+            float y = firstTop;
+
+            // top down to the nearest row
+            for (size_t i = first; i < stop; i++) {
+                float h = rowHeightFor(*entries[i], innerW);
+
+                draw(i, y, h);
+                y += h + g;
+            }
+
+            if (nearest != count) {
+                // bottom up to it, then the nearest itself, over all
+                float bottom = lastBottom;
+
+                for (size_t i = last; i > nearest; i--) {
+                    float h = rowHeightFor(*entries[i], innerW);
+
+                    draw(i, bottom - h, h);
+                    bottom -= h + g;
+                }
+
+                draw(nearest, bottom - rowHeightFor(*entries[nearest], innerW), rowHeightFor(*entries[nearest], innerW));
+            }
+        }
 
         LockGuard lock(shared.mutex);
 
