@@ -1405,10 +1405,18 @@ bool FrameDriver::frame(const plt::WindowInfo& info) {
     }
 
     ImGui_ImplVulkan_NewFrame();
+
+    u64 backend = nowNs();
+
     imgui->newFrame(*window);
+
+    u64 informed = nowNs();
+
     ImGui::NewFrame();
 
+    u64 begun = nowNs();
     int result = ui->frame();
+    u64 drew = nowNs();
 
     ImGui::Render();
 
@@ -1434,6 +1442,17 @@ bool FrameDriver::frame(const plt::WindowInfo& info) {
         appendMs(text, gap);
         text << " ui "_sv;
         appendMs(text, drawn - began);
+        text << " (backend "_sv;
+        appendMs(text, backend - began);
+        text << " info "_sv;
+        appendMs(text, informed - backend);
+        text << " new "_sv;
+        appendMs(text, begun - informed);
+        text << " tool "_sv;
+        appendMs(text, drew - begun);
+        text << " render "_sv;
+        appendMs(text, drawn - drew);
+        text << ")"_sv;
         text << " acquire "_sv;
         appendMs(text, gAcquireNs);
         text << " fence "_sv;
