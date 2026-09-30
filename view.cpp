@@ -576,9 +576,11 @@ namespace {
                 }
             }
         } else if (entry.full == Load::Failed) {
+            // decoded ahead, as a neighbour, and failed then
             shown = Load::Failed;
             shownIndex = index;
             shownError = Buffer(sv(entry.error));
+            traceText(sv(StringBuilder() << "cannot show "_sv << entry.name() << ": "_sv << sv(entry.error)));
         } else {
             shown = Load::Pending;
             shownIndex = index;
