@@ -796,7 +796,9 @@ namespace {
     void ViewApp::drawGallery() {
         float g = px(gap);
         float innerW = max(1.f, ImGui::GetWindowWidth() - 2.f * g);
-        u32 side = thumbSideFor(innerW);
+        // the texels for the row's whole width, the hovered thumbnail's:
+        // both sizes it is drawn at are then reductions
+        u32 side = thumbSideFor(innerW + 2.f * g);
         float viewH = ImGui::GetWindowHeight();
         size_t count = entries.length();
         ImVec2 origin = ImGui::GetCursorScreenPos();
@@ -829,10 +831,12 @@ namespace {
         size_t first = count;
         size_t last = 0;
         float top = g;
-        // two layers: the rows' fills under the thumbnails
+        // two layers: the selection's fill under the thumbnails. The hovered
+        // thumbnail grows over its gutter, drawn after the rest so it lies
+        // over its neighbours' gutters
+        Entry* hoveredEntry = nullptr;
         ImVec2 hover0;
         ImVec2 hover1;
-        bool anyHovered = false;
 
         dl->ChannelsSplit(2);
 
@@ -878,9 +882,9 @@ namespace {
 
                 ImGui::PopID();
 
-                // the row is the thumbnail with its whole gutter, so two rows'
-                // fills meet in the gap; the selection's fill goes under,
-                // the hovered row's over it, both under the thumbnails
+                // the row is the thumbnail with its whole gutter, so two rows
+                // meet in the gap; the selection fills its row under the
+                // thumbnails
                 ImVec2 r0(p0.x - g, p0.y - g);
                 ImVec2 r1(p1.x + g, p1.y + g);
 
@@ -889,16 +893,17 @@ namespace {
                     dl->AddRectFilled(r0, r1, ImGui::GetColorU32(ImGuiCol_Header));
                 }
 
-                if (hovered) {
-                    hover0 = r0;
-                    hover1 = r1;
-                    anyHovered = true;
-                }
-
                 dl->ChannelsSetCurrent(1);
 
                 if (entry.thumb == Load::Ready) {
-                    dl->AddImage((ImTextureID)entry.thumbTex.ds, p0, p1);
+                    if (hovered) {
+                        hoveredEntry = &entry;
+                        hover0 = r0;
+                        hover1 = r1;
+                    } else {
+                        dl->AddImage((ImTextureID)entry.thumbTex.ds, p0, p1);
+                    }
+
                     entry.drawnAt = frames;
                 } else {
                     const char* mark = entry.thumb == Load::Failed ? "?" : "\xe2\x80\xa6";
@@ -911,9 +916,9 @@ namespace {
             top = bottom + g;
         }
 
-        if (anyHovered) {
-            dl->ChannelsSetCurrent(0);
-            dl->AddRectFilled(hover0, hover1, ImGui::GetColorU32(ImGuiCol_HeaderHovered));
+        if (hoveredEntry != nullptr) {
+            dl->ChannelsSetCurrent(1);
+            dl->AddImage((ImTextureID)hoveredEntry->thumbTex.ds, hover0, hover1);
         }
 
         dl->ChannelsMerge();
