@@ -47,8 +47,9 @@ namespace {
     constexpr float sideShare = .2f;
     // the gutter around thumbnails, a design length
     constexpr Design gap = 4_d;
-    // under the pointer the thumbnails bulge: the scale gained by the one
-    // right under it, and the height over which the bulge fades to nothing
+    // the thumbnails bulge towards the pointer: the scale gained by one
+    // centred right under it, and the distance over which the bulge fades
+    // to nothing
     constexpr float bulge = .2f;
     constexpr Design bulgeReach = 240_d;
     constexpr float pi = 3.14159265f;
@@ -340,6 +341,10 @@ namespace {
         float aspect = entry.thumb == Load::Ready && entry.thumbW ? (float)entry.thumbH / (float)entry.thumbW : placeholderAspect;
 
         return max(1.f, floorf(innerW * aspect + .5f));
+    }
+
+    float distance(ImVec2 a, ImVec2 b) {
+        return sqrtf((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y));
     }
 
     // "1.5 MB", or the bytes themselves under a KB
@@ -798,10 +803,11 @@ namespace {
     // the list: thumbnails one under another, each as wide as the list
     // and as tall as its proportion asks, the selected one's row filled.
     // The rows in view and a few beyond get their thumbnails decoded.
-    // Under the pointer the thumbnails bulge: each scales about its own
-    // centre by how close the pointer is in height, the nearest most, so
-    // they are drawn from the far ones to the nearest, without a sort:
-    // the rows above it top down, the rows below it bottom up
+    // The thumbnails bulge towards the pointer: each scales about its own
+    // centre by how close the pointer is, the nearest most, so they are
+    // drawn from the far ones to the nearest, without a sort: the rows
+    // above it top down, the rows below it bottom up (their centres share
+    // an x, so the nearest in height is the nearest)
     void ViewApp::drawGallery() {
         float g = px(gap);
         float innerW = max(1.f, ImGui::GetWindowWidth() - 2.f * g);
@@ -815,7 +821,9 @@ namespace {
         ImDrawList* dl = ImGui::GetWindowDrawList();
         ImU32 dimColor = ImGui::GetColorU32(ImGuiCol_TextDisabled);
         ImVec2 mouse = ImGui::GetIO().MousePos;
-        bool pointed = mouse.x >= windowPos.x && mouse.x < windowPos.x + ImGui::GetWindowWidth() && mouse.y >= windowPos.y && mouse.y < windowPos.y + viewH;
+        ImGuiViewport* vp = ImGui::GetMainViewport();
+        // the pointer anywhere over the window counts
+        bool pointed = mouse.x >= vp->Pos.x && mouse.x < vp->Pos.x + vp->Size.x && mouse.y >= vp->Pos.y && mouse.y < vp->Pos.y + vp->Size.y;
         float reach = px(bulgeReach);
         float total = g;
         float currentTop = g;
@@ -903,7 +911,7 @@ namespace {
                 }
 
                 if (pointed) {
-                    float d = fabsf(mouse.y - (p0.y + p1.y) / 2.f);
+                    float d = distance(mouse, ImVec2((p0.x + p1.x) / 2.f, (p0.y + p1.y) / 2.f));
 
                     if (nearest == count || d < nearestD) {
                         nearest = i;
@@ -918,7 +926,8 @@ namespace {
         ImDrawList* fg = ImGui::GetForegroundDrawList();
 
         // a row's thumbnail, scaled about its centre by the pointer's
-        // distance in height: the full bulge at none, nothing at the reach
+        // distance from that centre: the full bulge at none, nothing at
+        // the reach
         auto draw = [&](size_t i, float rowTop, float h) {
             Entry& entry = *entries[i];
             ImVec2 p0(origin.x + g, origin.y + rowTop);
@@ -936,7 +945,7 @@ namespace {
             float scale = 1.f;
 
             if (pointed) {
-                float t = fabsf(mouse.y - (p0.y + p1.y) / 2.f) / reach;
+                float t = distance(mouse, ImVec2((p0.x + p1.x) / 2.f, (p0.y + p1.y) / 2.f)) / reach;
 
                 if (t < 1.f) {
                     scale += bulge * .5f * (1.f + cosf(pi * t));
@@ -953,7 +962,7 @@ namespace {
         // a bulged thumbnail spills over the list's edge onto the canvas:
         // the thumbnails go on the foreground, over every window, clipped
         // to the list's height and the window's right edge
-        ImVec2 viewportEnd(ImGui::GetMainViewport()->Pos.x + ImGui::GetMainViewport()->Size.x, windowPos.y + viewH);
+        ImVec2 viewportEnd(vp->Pos.x + vp->Size.x, windowPos.y + viewH);
 
         fg->PushClipRect(windowPos, viewportEnd, false);
 
