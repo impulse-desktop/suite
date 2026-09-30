@@ -60,8 +60,10 @@ namespace {
     constexpr u32 thumbTexelsStep = 64;
     constexpr u32 thumbTexelsMin = 128;
     constexpr u32 thumbTexelsMax = 512;
-    // decoded thumbnails kept at most; the rows in view are re-requested
+    // decoded thumbnails kept at most; over that, the ones farther than
+    // this many rows from the rows in view go
     constexpr size_t maxThumbs = 256;
+    constexpr size_t thumbKeep = 64;
     // the rows around the ones in view whose thumbnails are still wanted
     constexpr size_t thumbMargin = 8;
     // the rows beyond the ones in view whose thumbnails are decoded ahead
@@ -88,8 +90,6 @@ namespace {
         // the long side the thumbnail was asked at: a list grown much
         // wider since asks again
         u32 thumbSide = 0;
-        // the frame the thumbnail was last drawn in, for the eviction
-        u64 drawnAt = 0;
         // the full image: decoded and cached, or failed with this reason
         Load full = Load::None;
         Buffer error;
@@ -396,7 +396,6 @@ namespace {
         bool panel = true;
         bool info = true;
         bool scrollToCurrent = true;
-        u64 frames = 0;
         size_t readyThumbs = 0;
         int result = 0;
         // the shown file's own facts, for the properties panel: its size
@@ -625,19 +624,32 @@ namespace {
         }
     }
 
-    // thumbnails drawn a while ago go when there are many
+    // thumbnails far from the rows in view go when there are many; the
+    // ones around the view stay, so scrolling back a little decodes
+    // nothing again. The device is waited for once, for the batch
     void ViewApp::evictThumbs() {
         if (readyThumbs <= maxThumbs) {
             return;
         }
 
         size_t before = readyThumbs;
+        size_t first;
+        size_t last;
 
-        for (size_t i = 0; i < entries.length() && readyThumbs > maxThumbs / 2; i++) {
+        {
+            LockGuard lock(shared.mutex);
+
+            first = shared.wantFirst;
+            last = shared.wantLast;
+        }
+
+        vkDeviceWaitIdle(gDevice);
+
+        for (size_t i = 0; i < entries.length(); i++) {
             Entry& entry = *entries[i];
 
-            if (entry.thumb == Load::Ready && entry.drawnAt + 1 < frames) {
-                retire(entry.thumbTex);
+            if (entry.thumb == Load::Ready && (i + thumbKeep < first || i > last + thumbKeep)) {
+                destroyTexture(entry.thumbTex);
                 entry.thumb = Load::None;
                 readyThumbs--;
             }
@@ -956,7 +968,6 @@ namespace {
             ImVec2 half((p1.x - p0.x) / 2.f * scale, (p1.y - p0.y) / 2.f * scale);
 
             fg->AddImage((ImTextureID)entry.thumbTex.ds, ImVec2(centre.x - half.x, centre.y - half.y), ImVec2(centre.x + half.x, centre.y + half.y));
-            entry.drawnAt = frames;
         };
 
         // a bulged thumbnail spills over the list's edge onto the canvas:
@@ -1230,7 +1241,6 @@ namespace {
     int ViewApp::frame() {
         ImGuiViewport* vp = ImGui::GetMainViewport();
 
-        frames++;
         result = 0;
         keys();
 
