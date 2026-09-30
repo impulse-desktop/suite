@@ -2,9 +2,12 @@
 
 ImageMagick and its coders (PNG, JPEG, WebP, TIFF, JPEG 2000, JPEG XL, GIF,
 BMP, PNM/PAM, TGA, PCX, SGI, MIFF) as one pure WebAssembly module, from
-[pg83/decode](https://github.com/pg83/decode): the ix package
-`lib/image/magick/wasm(target=wasm32-none)`, whose build proves the module
-imports nothing and decodes every format against the host ImageMagick.
+[pg83/decode](https://github.com/pg83/decode): release 1,
+`https://github.com/pg83/decode/releases/download/1/decode.wasm.zstd`,
+decompressed (sha256 of the module
+40e0bcec0760cd018fd804d1ddebe5d89987b8d5c699b4b7c3d11f7fd0e3d738). The
+build behind it proves the module imports nothing and decodes every
+format against the host ImageMagick.
 
 The module exports its `memory`, `malloc`, `free` and
 
