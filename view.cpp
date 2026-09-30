@@ -1140,16 +1140,21 @@ namespace {
         // Begin's and BeginChild's results go unread here and below: a
         // window that cannot collapse, and a child of one, is shown every
         // frame, and drawing into a hidden one would only be wasted
-        ImGui::Begin("##view", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoSavedSettings);
+        // as an ImGui application lays out: the panels are windows, in the
+        // window colour, the canvas between them is the application's own
+        // background, the presenter's clear colour
+        ImGui::Begin("##view", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBackground);
 
         float sideW = floorf(vp->Size.x * sideShare);
         bool left = panel && !fullscreen;
         bool right = info && !fullscreen;
 
         if (left) {
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImGui::GetStyleColorVec4(ImGuiCol_WindowBg));
             ImGui::BeginChild("gallery", ImVec2(sideW, 0.f), 0, ImGuiWindowFlags_NoScrollbar);
             drawGallery();
             ImGui::EndChild();
+            ImGui::PopStyleColor();
             ImGui::SameLine();
         }
 
@@ -1162,9 +1167,11 @@ namespace {
             // the zeros placed the children; inside the panel ImGui's own
             // padding and spacing
             ImGui::PopStyleVar(2);
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImGui::GetStyleColorVec4(ImGuiCol_WindowBg));
             ImGui::BeginChild("info", ImVec2(sideW, 0.f), ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoScrollbar);
             drawInfo();
             ImGui::EndChild();
+            ImGui::PopStyleColor();
         } else {
             ImGui::PopStyleVar(2);
         }
