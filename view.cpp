@@ -352,6 +352,7 @@ namespace {
         void show(size_t index);
         void step(long delta);
         void retire(Texture& texture);
+        void stopWorkers();
         void evictThumbs();
         void evictCache();
         void setZoom(float value);
@@ -424,6 +425,24 @@ namespace {
         job->index = index;
         job->thumbnail = false;
         submit(job);
+    }
+
+    // the workers end before the jobs they write into: a job still running
+    // when the pool dies would write into a dead one. Once: the guard that
+    // covers a setup that threw finds nothing to do after the normal end
+    void ViewApp::stopWorkers() {
+        if (!threads) {
+            return;
+        }
+
+        {
+            LockGuard lock(shared.mutex);
+
+            shared.quit = true;
+        }
+
+        threads->join();
+        threads = nullptr;
     }
 
     // a texture the frames may still read goes only once the device is done
@@ -1044,13 +1063,7 @@ int mainView(int argc, char** argv) {
 
         app.threads = ThreadPool::simple(&*shot, workers);
         pooledGuard(*shot, [a = &app] {
-            {
-                LockGuard lock(a->shared.mutex);
-
-                a->shared.quit = true;
-            }
-
-            a->threads->join();
+            a->stopWorkers();
         });
         pooledGuard(*shot, [a = &app] {
             vkDeviceWaitIdle(gDevice);
@@ -1075,6 +1088,9 @@ int mainView(int argc, char** argv) {
         }
 
         runUi(driver);
+        // the jobs live in the pool, after every guard: the workers stop
+        // here, before the pool's LIFO death reaches them
+        app.stopWorkers();
     } catch (...) {
         sysE << "im view: "_sv << Exception::current() << endL;
         rc = 1;
