@@ -876,6 +876,9 @@ void setupVulkanWindow(ObjPool& pool, VkSurfaceKHR surface, int w, int h, bool h
     traceText(hdr ? "surface HDR10 PQ"_sv : "surface sRGB"_sv);
     createPresentPass();
     createSwapchain((u32)w, (u32)h);
+    // the first present's size, as every later rebuild's: a scenario waits
+    // for the size the tool draws at, whichever way it got there
+    traceSize("presenting"_sv, gPresent.width, gPresent.height);
 }
 
 u32 findMemoryType(u32 typeBits, VkMemoryPropertyFlags props) {
