@@ -1,6 +1,27 @@
 #include "util.h"
 
+#include <string.h>
+
 using namespace stl;
+
+ToolError::ToolError(Buffer m)
+    : msg((Buffer&&)m)
+{
+}
+
+ExceptionKind ToolError::kind() const noexcept {
+    return ExceptionKind::Verify;
+}
+
+StringView ToolError::description() {
+    return sv(msg);
+}
+
+void fail(StringView m, const char* file, int line) {
+    const char* base = strrchr(file, '/');
+
+    throw ToolError(Buffer(sv(StringBuilder() << StringView(base ? base + 1 : file) << ":"_sv << (long)line << ": "_sv << m)));
+}
 
 StringBuilder& sb() {
     static StringBuilder b(512);

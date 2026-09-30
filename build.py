@@ -52,10 +52,10 @@ warning_flags = ["-Wall", "-Wextra", "-Werror", "-Wno-missing-field-initializers
 shader_rules = []
 for shader, stage in [
     ("fullscreen", "vert"),
-    ("screenshot_scene", "frag"),
-    ("screenshot_image", "vert"),
-    ("screenshot_image", "frag"),
-    ("screenshot_output", "frag"),
+    ("gpu_scene", "frag"),
+    ("gpu_image", "vert"),
+    ("gpu_image", "frag"),
+    ("gpu_output", "frag"),
 ]:
     shader_rules.append(command(
         name=f"shader_{shader}_{stage}",

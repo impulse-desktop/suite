@@ -3,7 +3,7 @@
 // The HDR viewer's ImGui fragment stage (ImGui_ImplVulkan_InitInfo's
 // CustomShaderFragCreateInfo): the interface draws into a linear BT.2020
 // scene with SDR white at 1.0; the output stage scales it to nits. The
-// screenshot itself is drawn by screenshot_image.frag.
+// image itself is drawn by gpu_image.frag.
 
 layout(location = 0) out vec4 fColor;
 layout(set = 0, binding = 0) uniform sampler2D sTexture;
