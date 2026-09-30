@@ -10,11 +10,8 @@
 
 #include <std/sys/fs.h>
 #include <std/ios/sys.h>
-#include <std/thr/pool.h>
 #include <std/alg/qsort.h>
 #include <std/sys/throw.h>
-#include <std/thr/guard.h>
-#include <std/thr/mutex.h>
 #include <std/alg/minmax.h>
 #include <std/lib/vector.h>
 #include <std/ios/fs_utils.h>
@@ -25,22 +22,17 @@
 #include <errno.h>
 #include <imgui.h>
 #include <string.h>
-#include <unistd.h>
 #include <sys/stat.h>
-#include <plt/poller.h>
 #include <plt/window.h>
 #include <plt/platform.h>
-#include <plt/loop_wake.h>
 
 using namespace stl;
 
 // im view <file|dir>...: the list on the left, the image in the middle,
-// the file's properties on the right. Decoding runs on a thread pool, a
-// fresh sandboxed ImageMagick for every file; the results come back to
-// the platform thread through its loop's doorbell, where the textures are
-// made. Thumbnails are decoded for the rows in view and a few beyond (and
-// dropped again when many have scrolled by), the shown image and its two
-// neighbours are kept decoded.
+// the file's properties on the right. Decoding is done here and now, on
+// the one thread, a fresh sandboxed ImageMagick for every file: a
+// thumbnail for each row in view and a few beyond, kept by its index
+// until many have scrolled by; the shown image when it is selected.
 
 namespace {
     // each side panel takes this share of the window's width
@@ -64,8 +56,6 @@ namespace {
     // this many rows from the rows in view go
     constexpr size_t maxThumbs = 256;
     constexpr size_t thumbKeep = 64;
-    // the rows around the ones in view whose thumbnails are still wanted
-    constexpr size_t thumbMargin = 8;
     // the rows beyond the ones in view whose thumbnails are decoded ahead
     constexpr size_t thumbAhead = 2;
     constexpr float zoomMin = 0.02f;
@@ -74,7 +64,6 @@ namespace {
 
     enum class Load : u8 {
         None,
-        Pending,
         Ready,
         Failed
     };
@@ -90,10 +79,6 @@ namespace {
         // the long side the thumbnail was asked at: a list grown much
         // wider since asks again
         u32 thumbSide = 0;
-        // the full image: decoded and cached, or failed with this reason
-        Load full = Load::None;
-        Buffer error;
-
         StringView name() const;
     };
 
@@ -102,36 +87,6 @@ namespace {
 
         return StringView(whole.begin() + nameAt, whole.end());
     }
-
-    // a decode handed to a worker and back: the file to read, the answer
-    struct Job {
-        size_t index = 0;
-        bool thumbnail = false;
-        // a thumbnail's long side in texels
-        u32 side = 0;
-        Buffer path;
-        Buffer name;
-        DecodedImage image;
-        Buffer error;
-        bool ok = false;
-        // a worker found the job no longer wanted and left it undone
-        bool skipped = false;
-    };
-
-    // what the platform thread and the workers share, under the mutex
-    struct Shared {
-        Mutex* mutex = nullptr;
-        plt::LoopWake* bell = nullptr;
-        Vector<Job*> done;
-        // the rows in view: a thumbnail outside them is not worth decoding
-        size_t wantFirst = 0;
-        size_t wantLast = 0;
-        // the shown entry: a full decode of another than its neighbours is stale
-        size_t current = 0;
-        bool quit = false;
-        // what a Vulkan image may measure on this device
-        u32 maxSide = 4096;
-    };
 
     // area-averaged to fit the side: what a thumbnail is, and what an image
     // wider than the device's images becomes
@@ -185,43 +140,20 @@ namespace {
         img.rgba.xchg(out);
     }
 
-    // a worker's whole job: read, decode, shrink, hand back. The decoder
-    // and its pool live for the one file: a failure spends the decoder,
-    // and a module grown to a large image's pixel cache never shrinks
-    void runJob(Shared& shared, Job& job) {
-        {
-            LockGuard lock(shared.mutex);
+    // a file read, decoded and shrunk to the side, here and now. The
+    // decoder and its pool live for the one file: a failure spends the
+    // decoder, and a module grown to a large image's pixel cache never
+    // shrinks. A failure is thrown, the decoder's own words
+    void decodeFile(const Entry& entry, u32 side, DecodedImage& out) {
+        Buffer path(sv(entry.path));
+        Buffer file;
 
-            if (shared.quit) {
-                job.skipped = true;
-            } else if (job.thumbnail) {
-                job.skipped = job.index + thumbMargin < shared.wantFirst || job.index > shared.wantLast + thumbMargin;
-            } else {
-                job.skipped = job.index + 1 < shared.current || job.index > shared.current + 1;
-            }
-        }
+        readFileContent(path, file);
 
-        if (!job.skipped) {
-            try {
-                Buffer file;
+        ObjPool::Ref pool = ObjPool::fromMemory();
 
-                readFileContent(job.path, file);
-
-                ObjPool::Ref pool = ObjPool::fromMemory();
-
-                Decoder::create(*pool)->decode(sv(file), sv(job.name), job.image);
-                shrinkToSide(job.image, job.thumbnail ? job.side : shared.maxSide);
-                job.ok = true;
-            } catch (...) {
-                job.error = Buffer(Exception::current());
-                job.ok = false;
-            }
-        }
-
-        LockGuard lock(shared.mutex);
-
-        shared.done.pushBack(&job);
-        shared.bell->signal();
+        Decoder::create(*pool)->decode(sv(file), entry.name(), out);
+        shrinkToSide(out, side);
     }
 
     bool imageName(StringView name) {
@@ -368,17 +300,16 @@ namespace {
         text << tenths / 10 << "."_sv << tenths % 10 << " "_sv << units[unit];
     }
 
-    struct ViewApp final: Ui, plt::TimerCallback {
+    struct ViewApp final: Ui {
         ObjPool* pool = nullptr;
         plt::Window* window = nullptr;
-        ThreadPool* threads = nullptr;
-        Shared shared;
         Vector<Entry*> entries;
-        // jobs done with, for the next request
-        Vector<Job*> spare;
-        // decoded full images: the shown one and its neighbours
-        Vector<Job*> cache;
         size_t current = 0;
+        // what a Vulkan image may measure on this device
+        u32 maxSide = 4096;
+        // the rows in view, from the last frame's list
+        size_t viewFirst = 0;
+        size_t viewLast = 0;
         // the shown image's texture, or why there is none
         Load shown = Load::None;
         size_t shownIndex = (size_t)-1;
@@ -404,21 +335,12 @@ namespace {
         Buffer fileModified;
 
         int frame() override;
-        void ready() override;
 
-        Job* takeJob();
-        void recycle(Job* job);
-        void submit(Job* job);
-        void requestThumb(size_t index, u32 side);
-        void requestFull(size_t index);
-        void apply(Job& job);
-        void adopt(Job& job);
+        void loadThumb(size_t index, u32 side);
         void show(size_t index);
         void step(long delta);
         void retire(Texture& texture);
-        void stopWorkers();
         void evictThumbs();
-        void evictCache();
         void setZoom(float value);
         void fitView();
         void statFile();
@@ -428,90 +350,6 @@ namespace {
         void drawInfo();
     };
 
-    Job* ViewApp::takeJob() {
-        if (!spare.empty()) {
-            return spare.popBack();
-        }
-
-        return pool->make<Job>();
-    }
-
-    void ViewApp::recycle(Job* job) {
-        Job fresh;
-
-        // the buffers go back to nothing; the job's memory stays for the next
-        job->image.rgba.xchg(fresh.image.rgba);
-        job->image.width = 0;
-        job->image.height = 0;
-        job->error.xchg(fresh.error);
-        job->path.xchg(fresh.path);
-        job->name.xchg(fresh.name);
-        job->ok = false;
-        job->skipped = false;
-        spare.pushBack(job);
-    }
-
-    void ViewApp::submit(Job* job) {
-        const Entry& entry = *entries[job->index];
-
-        job->path = Buffer(sv(entry.path));
-        job->name = Buffer(entry.name());
-
-        Shared* exchange = &shared;
-
-        threads->submit([job, exchange] {
-            runJob(*exchange, *job);
-        });
-    }
-
-    void ViewApp::requestThumb(size_t index, u32 side) {
-        Entry& entry = *entries[index];
-
-        entry.thumb = Load::Pending;
-        entry.thumbSide = side;
-
-        Job* job = takeJob();
-
-        job->index = index;
-        job->thumbnail = true;
-        job->side = side;
-        submit(job);
-    }
-
-    void ViewApp::requestFull(size_t index) {
-        Entry& entry = *entries[index];
-
-        if (entry.full != Load::None) {
-            return;
-        }
-
-        entry.full = Load::Pending;
-
-        Job* job = takeJob();
-
-        job->index = index;
-        job->thumbnail = false;
-        submit(job);
-    }
-
-    // the workers end before the jobs they write into: a job still running
-    // when the pool dies would write into a dead one. Once: the guard that
-    // covers a setup that threw finds nothing to do after the normal end
-    void ViewApp::stopWorkers() {
-        if (!threads) {
-            return;
-        }
-
-        {
-            LockGuard lock(shared.mutex);
-
-            shared.quit = true;
-        }
-
-        threads->join();
-        threads = nullptr;
-    }
-
     // a texture the frames may still read goes only once the device is done
     void ViewApp::retire(Texture& texture) {
         if (texture.image) {
@@ -520,108 +358,30 @@ namespace {
         }
     }
 
-    // the shown image from a decoded job
-    void ViewApp::adopt(Job& job) {
-        retire(tex);
-        uploadTexture(job.image.width, job.image.height, (const u8*)job.image.rgba.data(), tex);
-        texW = job.image.width;
-        texH = job.image.height;
-        shown = Load::Ready;
-        shownIndex = job.index;
-        traceText(sv(StringBuilder() << "showing "_sv << entries[job.index]->name() << " "_sv << (i64)texW << "x"_sv << (i64)texH));
-    }
+    // a row's thumbnail, decoded and uploaded now, kept by the row's index
+    void ViewApp::loadThumb(size_t index, u32 side) {
+        Entry& entry = *entries[index];
+        DecodedImage image;
 
-    void ViewApp::apply(Job& job) {
-        Entry& entry = *entries[job.index];
+        try {
+            decodeFile(entry, side, image);
+        } catch (...) {
+            Buffer error(Exception::current());
 
-        if (job.skipped) {
-            // asked again when it matters
-            if (job.thumbnail) {
-                entry.thumb = Load::None;
-            } else {
-                entry.full = Load::None;
-            }
-
-            recycle(&job);
+            entry.thumb = Load::Failed;
+            traceText(sv(StringBuilder() << "no thumbnail "_sv << entry.name() << ": "_sv << sv(error)));
 
             return;
         }
 
-        if (job.thumbnail) {
-            if (job.ok) {
-                retire(entry.thumbTex);
-                uploadTexture(job.image.width, job.image.height, (const u8*)job.image.rgba.data(), entry.thumbTex);
-                entry.thumbW = job.image.width;
-                entry.thumbH = job.image.height;
-                entry.thumb = Load::Ready;
-                readyThumbs++;
-                traceText(sv(StringBuilder() << "thumbnail "_sv << entry.name()));
-            } else {
-                entry.thumb = Load::Failed;
-                traceText(sv(StringBuilder() << "no thumbnail "_sv << entry.name() << ": "_sv << sv(job.error)));
-            }
-
-            recycle(&job);
-
-            return;
-        }
-
-        if (!job.ok) {
-            entry.full = Load::Failed;
-            entry.error = Buffer(sv(job.error));
-
-            if (job.index == current) {
-                shown = Load::Failed;
-                shownIndex = job.index;
-                shownError = Buffer(sv(job.error));
-                traceText(sv(StringBuilder() << "cannot show "_sv << entry.name() << ": "_sv << sv(job.error)));
-            }
-
-            recycle(&job);
-
-            return;
-        }
-
-        entry.full = Load::Ready;
-        cache.pushBack(&job);
-
-        if (job.index == current) {
-            adopt(job);
-        }
-    }
-
-    // the workers' answers, on the platform thread
-    void ViewApp::ready() {
-        Vector<Job*> arrived;
-
-        {
-            LockGuard lock(shared.mutex);
-
-            arrived.xchg(shared.done);
-        }
-
-        for (Job* job : arrived) {
-            apply(*job);
-        }
-
-        evictCache();
-        window->requestFrame();
-    }
-
-    // the cache keeps the shown image and its neighbours
-    void ViewApp::evictCache() {
-        for (size_t i = 0; i < cache.length();) {
-            Job* job = cache[i];
-
-            if (job->index + 1 < current || job->index > current + 1) {
-                entries[job->index]->full = Load::None;
-                recycle(job);
-                cache.mut(i) = cache.back();
-                cache.popBack();
-            } else {
-                i++;
-            }
-        }
+        retire(entry.thumbTex);
+        uploadTexture(image.width, image.height, (const u8*)image.rgba.data(), entry.thumbTex);
+        entry.thumbW = image.width;
+        entry.thumbH = image.height;
+        entry.thumbSide = side;
+        entry.thumb = Load::Ready;
+        readyThumbs++;
+        traceText(sv(StringBuilder() << "thumbnail "_sv << entry.name()));
     }
 
     // thumbnails far from the rows in view go when there are many; the
@@ -633,15 +393,8 @@ namespace {
         }
 
         size_t before = readyThumbs;
-        size_t first;
-        size_t last;
-
-        {
-            LockGuard lock(shared.mutex);
-
-            first = shared.wantFirst;
-            last = shared.wantLast;
-        }
+        size_t first = viewFirst;
+        size_t last = viewLast;
 
         vkDeviceWaitIdle(gDevice);
 
@@ -658,48 +411,36 @@ namespace {
         traceText(sv(StringBuilder() << "evicted "_sv << (i64)(before - readyThumbs) << " thumbnails"_sv));
     }
 
+    // the selected image, decoded and uploaded now
     void ViewApp::show(size_t index) {
         current = index;
         scrollToCurrent = true;
-
-        {
-            LockGuard lock(shared.mutex);
-
-            shared.current = index;
-        }
 
         Entry& entry = *entries[index];
 
         traceText(sv(StringBuilder() << "selected "_sv << entry.name()));
         statFile();
 
-        if (entry.full == Load::Ready) {
-            for (Job* job : cache) {
-                if (job->index == index) {
-                    adopt(*job);
-                }
-            }
-        } else if (entry.full == Load::Failed) {
-            // decoded ahead, as a neighbour, and failed then
+        DecodedImage image;
+
+        try {
+            decodeFile(entry, maxSide, image);
+        } catch (...) {
             shown = Load::Failed;
             shownIndex = index;
-            shownError = Buffer(sv(entry.error));
-            traceText(sv(StringBuilder() << "cannot show "_sv << entry.name() << ": "_sv << sv(entry.error)));
-        } else {
-            shown = Load::Pending;
-            shownIndex = index;
-            requestFull(index);
+            shownError = Buffer(Exception::current());
+            traceText(sv(StringBuilder() << "cannot show "_sv << entry.name() << ": "_sv << sv(shownError)));
+
+            return;
         }
 
-        if (index + 1 < entries.length()) {
-            requestFull(index + 1);
-        }
-
-        if (index > 0) {
-            requestFull(index - 1);
-        }
-
-        evictCache();
+        retire(tex);
+        uploadTexture(image.width, image.height, (const u8*)image.rgba.data(), tex);
+        texW = image.width;
+        texH = image.height;
+        shown = Load::Ready;
+        shownIndex = index;
+        traceText(sv(StringBuilder() << "showing "_sv << entry.name() << " "_sv << (i64)texW << "x"_sv << (i64)texH));
     }
 
     void ViewApp::step(long delta) {
@@ -814,7 +555,7 @@ namespace {
 
     // the list: thumbnails one under another, each as wide as the list
     // and as tall as its proportion asks, the selected one's row filled.
-    // The rows in view and a few beyond get their thumbnails decoded.
+    // The rows in view and a few beyond get their thumbnails decoded now.
     // The thumbnails bulge towards the pointer: each scales about its own
     // centre by how close the pointer is, the nearest most, so they are
     // drawn from the far ones to the nearest, without a sort: the rows
@@ -898,7 +639,7 @@ namespace {
                 }
 
                 if (entry.thumb == Load::None) {
-                    requestThumb(i, side);
+                    loadThumb(i, side);
                 }
             }
 
@@ -1006,10 +747,8 @@ namespace {
 
         fg->PopClipRect();
 
-        LockGuard lock(shared.mutex);
-
-        shared.wantFirst = first;
-        shared.wantLast = last;
+        viewFirst = first;
+        viewLast = last;
     }
 
     // the properties panel: sections that fold to their title. The image's
@@ -1053,8 +792,6 @@ namespace {
         if (ImGui::CollapsingHeader("Image", ImGuiTreeNodeFlags_DefaultOpen) && table("image")) {
             if (shown == Load::Failed && shownIndex == current) {
                 row("Error", sv(shownError));
-            } else if (!ready) {
-                row("State", "decoding\xe2\x80\xa6"_sv);
             }
 
             if (ready) {
@@ -1439,22 +1176,10 @@ int mainView(int argc, char** argv) {
         setupVulkanWindow(*shot, surface, (int)bootInfo.width, (int)bootInfo.height, false);
         setupImGui(*shot, false);
 
-        // the workers; their pool is joined before anything they may still
-        // write to goes
         VkPhysicalDeviceProperties props;
 
         vkGetPhysicalDeviceProperties(gPhys, &props);
-        app.shared.maxSide = props.limits.maxImageDimension2D;
-        app.shared.mutex = Mutex::create(&*shot);
-        app.shared.bell = platform.createLoopWake(*shot, app);
-
-        long cpus = sysconf(_SC_NPROCESSORS_ONLN);
-        size_t workers = (size_t)(cpus < 1 ? 1 : cpus > 4 ? 4 : cpus);
-
-        app.threads = ThreadPool::simple(&*shot, workers);
-        pooledGuard(*shot, [a = &app] {
-            a->stopWorkers();
-        });
+        app.maxSide = props.limits.maxImageDimension2D;
         pooledGuard(*shot, [a = &app] {
             vkDeviceWaitIdle(gDevice);
             destroyTexture(a->tex);
@@ -1478,9 +1203,6 @@ int mainView(int argc, char** argv) {
         }
 
         runUi(driver);
-        // the jobs live in the pool, after every guard: the workers stop
-        // here, before the pool's LIFO death reaches them
-        app.stopWorkers();
     } catch (...) {
         sysE << "im view: "_sv << Exception::current() << endL;
         rc = 1;

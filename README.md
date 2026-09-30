@@ -34,9 +34,9 @@ does the same from the one binary. Tools so far:
   its ends, a thumbnail click selects; the wheel zooms about the pointer,
   a drag pans, `-`/`=` step the zoom, `1` is 1:1, `0`/`w` fit; `r`/`R`
   turn the image, `f` fullscreen, Tab hides the list, `i` the properties,
-  `q`/Escape leave. Decoding runs on a thread pool,
-  through the sandboxed decoder below; the shown image's neighbours and
-  the thumbnails just beyond the view are decoded ahead.
+  `q`/Escape leave. Decoding runs on the one thread, here and now,
+  through the sandboxed decoder below: the shown image when it is
+  selected, a thumbnail for each row in view and two beyond.
 
 Single-threaded by design. Every object lives in a pool; the C++ standard
 library is not used, the vocabulary comes from
