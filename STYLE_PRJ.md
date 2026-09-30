@@ -17,7 +17,3 @@ Per-project settings that the shared [STYLE.md](STYLE.md) delegates here.
   an extension taking the slower path) is a meaningful local recovery path.
   `vkc` may be caught at such a boundary; without one its failure reaches the
   top-level handler.
-- `decode_glue.c`, with `decode_glue.h`, is C: the calls into the generated
-  decoder module go through the wasm2c runtime's try macro, which names the
-  runtime's thread-local state with the keyword C gives it and a C++ unit
-  cannot repeat.

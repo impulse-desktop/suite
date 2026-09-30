@@ -130,25 +130,31 @@ decode_c = command(
 # size in the code itself (the alternative, guard pages around a reserved
 # range with a SIGSEGV handler to catch the misses, is faster but makes the
 # process's memory faults the runtime's business); the memory mapped, so
-# its base never moves and the checks stay cheap; and a call depth counted
+# its base never moves and the checks stay cheap; a call depth counted
 # instead of a stack guard, at a limit well above the forty-odd frames the
-# coders were seen to use, so the workers' native stacks stay small.
+# coders were seen to use, so the workers' native stacks stay small; and a
+# trap handed to the decoder's own handler (decoder.cpp), which throws it
+# as a C++ exception through the module's C frames, instead of the
+# runtime's longjmp into its thread-local state; the runtime declares the
+# handler by this name.
 decode_defines = [
     "-DWASM_RT_USE_MMAP=1",
     "-DWASM_RT_MEMCHECK_BOUNDS_CHECK=1",
     "-DWASM_RT_MEMCHECK_GUARD_PAGES=0",
     "-DWASM_RT_MAX_CALL_STACK_DEPTH=250",
+    "-DWASM_RT_TRAP_HANDLER=decodeTrapHandler",
 ]
 
 # 170 MB of generated C: its warnings are the generator's, and debug info
-# for it would outweigh the binary
+# for it would outweigh the binary; the exception a trap becomes unwinds
+# through its frames
 decode = library(
     name="decode",
     srcs=[
         {"src": src, "inputs": [*decode_headers, *decode_runtime_files]}
         for src in [*decode_sources, *[path for path in decode_runtime_files if path.endswith(".c")]]
     ],
-    cflags=["-g0", "-w"],
+    cflags=["-g0", "-w", "-fexceptions"],
     cppflags=decode_defines,
     includes=[decode_dir],
     public_cppflags=[f"-I{decode_dir}", *decode_defines],
@@ -156,12 +162,7 @@ decode = library(
 )
 
 
-# the tools, and the C the calls into the decoder module are made from: it
-# sees the module's generated headers
-im_sources = [
-    *build.glob("$(S)/*.cpp"),
-    {"src": "$(S)/decode_glue.c", "inputs": [*decode_headers, *decode_runtime_files]},
-]
+im_sources = build.glob("$(S)/*.cpp")
 # the vendored libraries' own dependencies come along by name: an imported
 # graph hands over its archive, not what the archive wants linked
 im_deps = [
