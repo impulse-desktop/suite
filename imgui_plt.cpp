@@ -1,5 +1,6 @@
 #include "imgui_plt.h"
 
+#include "ui.h"
 #include "gpu.h"
 
 #include "util.h"
@@ -341,7 +342,23 @@ namespace {
             sysE << "im wheel: y/100 "_sv << (i64)(input.y * 100.0) << " precise "_sv << (i64)input.precise << " momentum "_sv << (i64)input.momentum << " phase "_sv << (i64)input.phase << endL;
         }
 
-        ImGui::GetIO().AddMouseWheelEvent((float)input.x, (float)input.y);
+        // plt's precise scroll is tenths of a logical pixel (a finger on a
+        // trackpad, points on Cocoa), its notched one is wheel steps. ImGui
+        // moves a window by five lines per wheel unit, so a finger's point
+        // is turned into the units that make it one design pixel of
+        // content, as the platform's own scrolling does; a notch stays
+        // ImGui's five lines
+        float x = (float)input.x;
+        float y = (float)input.y;
+
+        if (input.precise && ImGui::GetFontSize() > 0.f) {
+            float unit = 10.f * uiScale() / (5.f * ImGui::GetFontSize());
+
+            x *= unit;
+            y *= unit;
+        }
+
+        ImGui::GetIO().AddMouseWheelEvent(x, y);
     }
 
     void ImGuiPltImpl::focus(bool focused) {
