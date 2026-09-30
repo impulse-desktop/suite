@@ -13,6 +13,8 @@ in its own process.
 ```
 im screenshot fd:3      # the screenshot editor the compositor spawns
 imscreenshot shot.imw   # the same tool, by its link
+im view ~/pictures      # the image viewer on a directory
+imview photo.jpg        # on one file, among its directory's
 ```
 
 A link named `im<tool>` runs that tool under its own name; `im <tool>`
@@ -22,6 +24,14 @@ does the same from the one binary. Tools so far:
   [shell](https://github.com/impulse-desktop/shell) hands over on the
   screenshot chord: a self-describing memfd, or on KMS the scanout dma-buf
   itself, encoded to PNG or JPEG XL, SDR or HDR.
+- `view` — shows images: a directory's, by name, in a gallery on the left
+  with the image on the right, or the named files. Arrows, j/k, Space and
+  Backspace walk the list, Home/End (g/G) jump to its ends, a row click
+  selects; the wheel zooms about the pointer, a drag pans, `-`/`=` step
+  the zoom, `1` is 1:1, `0`/`w` fit; `r`/`R` turn the image, `f`
+  fullscreen, Tab hides the gallery, `b` the status line, `q`/Escape
+  leave. Decoding runs on a thread pool, through the sandboxed decoder
+  below; the shown image's neighbours are decoded ahead.
 
 Single-threaded by design. Every object lives in a pool; the C++ standard
 library is not used, the vocabulary comes from

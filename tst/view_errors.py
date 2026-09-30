@@ -1,0 +1,46 @@
+"""What the viewer does with what it cannot show: no arguments is a usage
+error, a path that is not there or a directory without images opens the
+error panel, a file no coder takes or a truncated one is reported on the
+status line and stays in the list, its neighbours showing all the same."""
+
+import os
+
+from session import KEY_RIGHT, Session, png, write_png
+
+with Session("view_errors", tool="view") as s:
+    code, log = s.run()
+    assert code == 2 and "usage: im view" in log, f"no arguments did not give the usage (rc={code}):\n{log}"
+
+    s.launch(str(s.artifacts / "nowhere"))
+    s.focus()
+    assert s.size() == (480, 180), f"a missing path did not open the error panel ({s.size()})"
+    s.close()
+    assert "no images to show" in s.client_log(), "the missing path was not reported"
+
+    empty = s.artifacts / "empty"
+    empty.mkdir()
+    s.launch(str(empty))
+    s.focus()
+    assert s.size() == (480, 180), f"an empty directory did not open the error panel ({s.size()})"
+    s.close()
+
+    pics = s.artifacts / "pics"
+    pics.mkdir()
+    (pics / "bad.png").write_bytes(os.urandom(4096))
+    write_png(pics / "good.png", 64, 48, (255, 0, 0))
+    whole = png(64, 48, bytes((0, 255, 0)) * (64 * 48))
+    (pics / "trunc.png").write_bytes(whole[: len(whole) * 2 // 3])
+    s.launch(str(pics))
+    s.focus()
+    s.said("listed 3")
+    s.said("selected bad.png")
+    s.said("cannot show bad.png: ")
+    s.said("no thumbnail bad.png: ")
+    s.said("thumbnail good.png")
+    s.tap(KEY_RIGHT)
+    s.said("showing good.png 64x48")
+    s.tap(KEY_RIGHT)
+    s.said("selected trunc.png")
+    s.said("cannot show trunc.png: ")
+    s.close()
+    print("OK: unusable inputs are reported, the rest shows")

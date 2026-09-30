@@ -125,6 +125,21 @@ decode_c = command(
     descr="WC",
 )
 
+# The runtime's shape, the same for the generated C, the runtime and the
+# decoder that calls them: every load and store checked against the memory's
+# size in the code itself (the alternative, guard pages around a reserved
+# range with a SIGSEGV handler to catch the misses, is faster but makes the
+# process's memory faults the runtime's business); the memory mapped, so
+# its base never moves and the checks stay cheap; and a call depth counted
+# instead of a stack guard, at a limit well above the forty-odd frames the
+# coders were seen to use, so the workers' native stacks stay small.
+decode_defines = [
+    "-DWASM_RT_USE_MMAP=1",
+    "-DWASM_RT_MEMCHECK_BOUNDS_CHECK=1",
+    "-DWASM_RT_MEMCHECK_GUARD_PAGES=0",
+    "-DWASM_RT_MAX_CALL_STACK_DEPTH=250",
+]
+
 # 170 MB of generated C: its warnings are the generator's, and debug info
 # for it would outweigh the binary
 decode = library(
@@ -134,8 +149,9 @@ decode = library(
         for src in [*decode_sources, *[path for path in decode_runtime_files if path.endswith(".c")]]
     ],
     cflags=["-g0", "-w"],
+    cppflags=decode_defines,
     includes=[decode_dir],
-    public_cppflags=[f"-I{decode_dir}"],
+    public_cppflags=[f"-I{decode_dir}", *decode_defines],
     deps=[decode_c],
 )
 
@@ -169,7 +185,7 @@ im_test = program(
     deps=im_deps,
 )
 
-tools = ["screenshot"]
+tools = ["screenshot", "view"]
 
 links = command(
     name="links",

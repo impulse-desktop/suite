@@ -2,8 +2,8 @@
 
 #include "util.h"
 
-#include <std/mem/obj_pool.h>
 #include <std/str/builder.h>
+#include <std/mem/obj_pool.h>
 
 #include <string.h>
 
@@ -48,18 +48,6 @@ namespace {
         bool fits(u64 offset, u64 length);
         void drop();
     };
-
-    // the runtime's per-thread state (the alternate stack its signal handler
-    // runs on), once per thread that decodes; the main thread's came with
-    // the runtime's own initialization
-    thread_local bool threadReady = false;
-
-    void readyThread() {
-        if (!threadReady) {
-            wasm_rt_init_thread();
-            threadReady = true;
-        }
-    }
 }
 
 DecoderImpl::~DecoderImpl() noexcept {
@@ -82,8 +70,6 @@ void DecoderImpl::drop() {
 }
 
 bool DecoderImpl::decode(StringView file, StringView name, DecodedImage& out, Buffer& error) {
-    readyThread();
-
     if (file.length() > 0xffffffffu - name.length()) {
         error = Buffer("the file is too large for the decoder"_sv);
 
@@ -169,11 +155,6 @@ bool DecoderImpl::decode(StringView file, StringView name, DecodedImage& out, Bu
     }
 
     return true;
-}
-
-void Decoder::initProcess() {
-    wasm_rt_init();
-    threadReady = true;
 }
 
 Decoder* Decoder::create(ObjPool& pool) {

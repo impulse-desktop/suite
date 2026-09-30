@@ -21,18 +21,41 @@ import zlib
 # the exit status of a skipped scenario, as dev/run_test.py reads it
 SKIPPED = 77
 
-# the tool under test is spawned by its link's name, as the compositor
-# spawns it: every scenario says which tool, this one has one
+# the tools under test are spawned by their links' names, as the
+# compositor spawns them; a session names its tool
 SCREENSHOT = "imscreenshot"
+VIEW = "imview"
+TOOLS = {"screenshot": SCREENSHOT, "view": VIEW}
 
 # the evdev codes the scenarios press
 KEY_ESC = 1
+KEY_1 = 2
 KEY_ZERO = 11
 KEY_MINUS = 12
 KEY_EQUAL = 13
+KEY_BACKSPACE = 14
+KEY_TAB = 15
+KEY_Q = 16
+KEY_W = 17
+KEY_R = 19
 KEY_ENTER = 28
 KEY_LEFTCTRL = 29
 KEY_A = 30
+KEY_F = 33
+KEY_G = 34
+KEY_J = 36
+KEY_K = 37
+KEY_LEFTSHIFT = 42
+KEY_B = 48
+KEY_SPACE = 57
+KEY_HOME = 102
+KEY_UP = 103
+KEY_PAGEUP = 104
+KEY_LEFT = 105
+KEY_RIGHT = 106
+KEY_END = 107
+KEY_DOWN = 108
+KEY_PAGEDOWN = 109
 BTN_LEFT = 272
 BTN_RIGHT = 273
 BTN_MIDDLE = 274
@@ -44,8 +67,10 @@ class Skip(Exception):
 
 
 class Session:
-    def __init__(self, name, width=1280, height=800):
+    def __init__(self, name, width=1280, height=800, tool="screenshot"):
         self.name = name
+        self.tool = tool
+        self.link = TOOLS[tool]
         self.binary = Path(os.environ["IM_E2E_BINARY"]).resolve()
         helpers = Path(os.environ["IM_E2E_HELPERS"]).resolve()
         self.devices_binary = helpers / "devices"
@@ -124,10 +149,11 @@ class Session:
                     self.globals[word[1]] = int(word[2])
             self.wait(lambda: any(item["type"] == "keyboard" for item in json.loads(
                 self.command("swaymsg", "-r", "-t", "get_inputs"))), "virtual keyboard", client=False)
-            # the tool by its link's name, as the compositor spawns it
+            # the tools by their links' names, as the compositor spawns them
             bin_dir = runtime / "bin"
             bin_dir.mkdir()
-            os.symlink(self.binary, bin_dir / SCREENSHOT)
+            for link in TOOLS.values():
+                os.symlink(self.binary, bin_dir / link)
             self.env["PATH"] = f"{bin_dir}{os.pathsep}{self.env.get('PATH', '')}"
             return self
         except BaseException:
@@ -167,25 +193,25 @@ class Session:
     # ---- the tool under test ----
 
     def launch(self, *args, cwd=None, mapped=True, unset=(), fd3=None, **environment):
-        """Start imscreenshot with args and the given environment (the
-        compositor's IMWAY_SHOT_* words, IMGUI_SCALE, IM_CHAOS; unset names
-        the variables it must not see); a mapped launch waits for its
-        window."""
+        """Start the session's tool with args and the given environment
+        (the compositor's IMWAY_SHOT_* words, IMGUI_SCALE, IM_CHAOS; unset
+        names the variables it must not see); a mapped launch waits for
+        its window."""
         self.clients += 1
-        self.client = self.start([SCREENSHOT, *args], f"client{self.clients}", cwd=cwd, unset=unset, fd3=fd3, **environment)
+        self.client = self.start([self.link, *args], f"client{self.clients}", cwd=cwd, unset=unset, fd3=fd3, **environment)
         if mapped:
             self.wait(lambda: self.windows(), "mapped window")
         return self.client
 
-    def run(self, *args, command=SCREENSHOT, cwd=None, timeout=60, unset=(), fd3=None, **environment):
-        """Run imscreenshot (or the one binary itself, by its path as
-        command) to its end without a window: the exit status and its
+    def run(self, *args, command=None, cwd=None, timeout=60, unset=(), fd3=None, **environment):
+        """Run the session's tool (or the one binary itself, by its path
+        as command) to its end without a window: the exit status and its
         output."""
         self.clients += 1
         log = self.artifacts / f"client{self.clients}.log"
         with log.open("wb") as out:
             process = subprocess.Popen(
-                [str(command), *args], env=self.environment(unset, environment), stdout=out, stderr=subprocess.STDOUT,
+                [str(command or self.link), *args], env=self.environment(unset, environment), stdout=out, stderr=subprocess.STDOUT,
                 cwd=cwd, **as_fd3(fd3),
             )
             try:
@@ -329,7 +355,7 @@ class Session:
     def said(self, what, times=1):
         """The tool's own account of what it did (the test build's trace
         lines), the times-th time."""
-        return self.wait(lambda: self.client_log().count(f"im screenshot: {what}") >= times, f"the tool saying {what!r} {times}x")
+        return self.wait(lambda: self.client_log().count(f"im {self.tool}: {what}") >= times, f"the tool saying {what!r} {times}x")
 
     # ---- pixels ----
 
@@ -500,6 +526,33 @@ def udmabuf(pixels):
     with open("/dev/udmabuf", "r+b", buffering=0) as device:
         # a mutable buffer, so the call's own result, the new descriptor, comes back
         return fcntl.ioctl(device.fileno(), UDMABUF_CREATE, bytearray(struct.pack("=IIQQ", memfd, UDMABUF_FLAGS_CLOEXEC, 0, size)))
+
+
+def write_png(path, width, height, rgb):
+    """A solid PNG of the colour, as a file for the viewer."""
+    Path(path).write_bytes(png(width, height, bytes(rgb) * (width * height)))
+
+
+def near(capture, rgb, tolerance=3):
+    """How many pixels of a capture are the colour, within the tolerance
+    per channel."""
+    w, h, px = capture
+    r, g, b = rgb
+    return sum(1 for i in range(0, w * h * 3, 3) if abs(px[i] - r) <= tolerance and abs(px[i + 1] - g) <= tolerance and abs(px[i + 2] - b) <= tolerance)
+
+
+def colour_box(capture, accept):
+    """The bounding box x0,y0,x1,y1 (inclusive) of the capture's pixels
+    accept(r, g, b) takes, or None."""
+    w, h, px = capture
+    xs, ys = [], []
+    for i in range(w * h):
+        if accept(px[i * 3], px[i * 3 + 1], px[i * 3 + 2]):
+            xs.append(i % w)
+            ys.append(i // w)
+    if not xs:
+        return None
+    return min(xs), min(ys), max(xs), max(ys)
 
 
 def differing(a, b):
