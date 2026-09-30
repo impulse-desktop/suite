@@ -352,6 +352,8 @@ namespace {
         bool info = true;
         bool scrollToCurrent = true;
         int result = 0;
+        // the list's scroll the frame trace last reported
+        float tracedScrollY = 0.f;
         // the shown file's own facts, for the properties panel: its size
         // (-1 when unknown) and modification time
         i64 fileBytes = -1;
@@ -596,6 +598,16 @@ namespace {
         }
 
         float scrollY = clampf(ImGui::GetScrollY(), 0.f, max(0.f, total - viewH));
+
+        // the frame trace: how far the list moved this frame, and what the
+        // wheel said
+        if (gTraceFrames && scrollY != tracedScrollY) {
+            auto& text = sb();
+
+            text << "im scroll: y "_sv << (i64)scrollY << " dy "_sv << (i64)(scrollY - tracedScrollY) << " wheel/100 "_sv << (i64)(ImGui::GetIO().MouseWheel * 100.f);
+            sysE << sv(text) << endL;
+            tracedScrollY = scrollY;
+        }
         size_t first = count;
         size_t last = 0;
         float firstTop = 0.f;
