@@ -82,6 +82,37 @@ namespace {
     // two the submit blocks until the frame before last has left the
     // screen, a display link tick lost each time
     constexpr u32 kMinImageCount = 3;
+
+    // the display's own answer: which presented frames it has shown
+    // (VK_GOOGLE_display_timing, where the device has it; MoltenVK does).
+    // Every present carries a number, the past timings say which numbers
+    // reached the screen. A display link tick is a clock, not that
+    // answer: a frame drawn while the ones before it are still on their
+    // way only queues behind the display, and from then on every submit
+    // waits a vblank for a drawable on this thread, the input with it,
+    // for good. So a tick that finds kPendingLimit frames on their way
+    // draws nothing. Wayland has no such report; its frame callback is
+    // the answer already
+    bool gPacing = false;
+    PFN_vkGetPastPresentationTimingGOOGLE gPastTimings = nullptr;
+    PFN_vkGetRefreshCycleDurationGOOGLE gRefreshCycle = nullptr;
+    // the last present's number, the last number reported shown, and
+    // whether this swapchain's display has reported at all: a silent one
+    // (a hidden window, a driver that offers the extension and says
+    // nothing) paces nothing
+    u32 gPresentId = 0;
+    u32 gShownId = 0;
+    bool gReported = false;
+    // ticks skipped in a row; past kSkipLimit the display is taken as
+    // silent until it reports again
+    u32 gSkips = 0;
+    constexpr u32 kPendingLimit = 3;
+    constexpr u32 kSkipLimit = 4;
+    // the last report's time, the gap to the one before and whether one
+    // came this tick, for the trace
+    u64 gShownAt = 0;
+    u64 gShownGapNs = 0;
+    bool gShownNow = false;
     VkRenderPass gScenePass = VK_NULL_HANDLE;
     VkImage gSceneImage = VK_NULL_HANDLE;
     VkDeviceMemory gSceneMemory = VK_NULL_HANDLE;
@@ -346,6 +377,24 @@ namespace {
         gPresent.height = (int)extent.height;
         gPresent.frameIndex = 0;
         gPresent.syncIndex = 0;
+        // a new swapchain, a new history of presents
+        gPresentId = 0;
+        gShownId = 0;
+        gReported = false;
+        gSkips = 0;
+        gShownAt = 0;
+
+        if (gTraceFrames && gRefreshCycle) {
+            VkRefreshCycleDurationGOOGLE cycle{};
+
+            if (gRefreshCycle(gDevice, swapchain, &cycle) == VK_SUCCESS) {
+                auto& text = sb();
+
+                text << "im display: refresh "_sv;
+                appendMs(text, cycle.refreshDuration);
+                sysE << sv(text) << endL;
+            }
+        }
 
         u32 count = 0;
 
@@ -700,6 +749,17 @@ namespace {
 
         Sync& sync = gPresent.syncs.mut(gPresent.syncIndex);
         VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
+        VkPresentTimeGOOGLE time{0, 0};
+        VkPresentTimesInfoGOOGLE times{VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE};
+
+        times.swapchainCount = 1;
+        times.pTimes = &time;
+
+        if (gPacing) {
+            // numbered, for the display to report on
+            time.presentID = ++gPresentId;
+            pi.pNext = &times;
+        }
 
         pi.waitSemaphoreCount = 1;
         pi.pWaitSemaphores = &sync.rendered;
@@ -717,6 +777,60 @@ namespace {
         }
 
         gPresent.syncIndex = (gPresent.syncIndex + 1) % (u32)gPresent.syncs.length();
+    }
+
+    // the display's answer since the last tick, and whether this tick
+    // should draw nothing: kPendingLimit presented frames are still on
+    // their way
+    bool tickWaits() {
+        if (!gPacing || !gPresent.swapchain) {
+            return false;
+        }
+
+        gShownNow = false;
+
+        for (int round = 0; round < 16; round++) {
+            VkPastPresentationTimingGOOGLE timings[8];
+            u32 count = 8;
+            VkResult e = gPastTimings(gDevice, gPresent.swapchain, &count, timings);
+
+            if (e != VK_SUCCESS && e != VK_INCOMPLETE) {
+                return false;
+            }
+
+            for (u32 i = 0; i < count; i++) {
+                const VkPastPresentationTimingGOOGLE& timing = timings[i];
+
+                if (timing.presentID > gShownId) {
+                    gShownId = timing.presentID;
+                }
+
+                gShownGapNs = gShownAt && timing.actualPresentTime > gShownAt ? timing.actualPresentTime - gShownAt : 0;
+                gShownAt = timing.actualPresentTime;
+                gShownNow = true;
+                gReported = true;
+            }
+
+            if (e == VK_SUCCESS) {
+                break;
+            }
+        }
+
+        if (!gReported || gPresentId - gShownId < kPendingLimit) {
+            gSkips = 0;
+
+            return false;
+        }
+
+        if (++gSkips > kSkipLimit) {
+            // the display fell silent: draw on until it answers again
+            gReported = false;
+            gSkips = 0;
+
+            return false;
+        }
+
+        return true;
     }
 }
 
@@ -746,6 +860,7 @@ void traceText(StringView what) {
 }
 
 void setupVulkan(ObjPool& pool, const VulkanWants& wants) {
+    gTraceFrames = getenv("IM_TRACE_FRAMES") != nullptr;
     VkApplicationInfo app = {};
 
     app.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
@@ -838,6 +953,12 @@ void setupVulkan(ObjPool& pool, const VulkanWants& wants) {
         devExts.pushBack(portability);
     }
 #endif
+
+    // the display's report of shown frames, where the device has it
+    if (hasDeviceExtension(gPhys, VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME)) {
+        devExts.pushBack(VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME);
+        gPacing = true;
+    }
     float prio = 1.0f;
     VkDeviceQueueCreateInfo qi = {};
 
@@ -858,6 +979,12 @@ void setupVulkan(ObjPool& pool, const VulkanWants& wants) {
         vkDestroyDevice(gDevice, gAlloc);
     });
     vkGetDeviceQueue(gDevice, gQueueFamily, 0, &gQueue);
+
+    if (gPacing) {
+        gPastTimings = (PFN_vkGetPastPresentationTimingGOOGLE)vkGetDeviceProcAddr(gDevice, "vkGetPastPresentationTimingGOOGLE");
+        gRefreshCycle = (PFN_vkGetRefreshCycleDurationGOOGLE)vkGetDeviceProcAddr(gDevice, "vkGetRefreshCycleDurationGOOGLE");
+        gPacing = gPastTimings != nullptr;
+    }
 
     // the backend's own sets, and one for every texture the tool registers
     VkDescriptorPoolSize sz = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, IMGUI_IMPL_VULKAN_MINIMUM_IMAGE_SAMPLER_POOL_SIZE + wants.textures};
@@ -1390,6 +1517,19 @@ bool FrameDriver::frame(const plt::WindowInfo& info) {
     u64 began = nowNs();
     u64 gap = gFrameBegan ? began - gFrameBegan : 0;
 
+    if (!gRebuild && gPresent.width == nw && gPresent.height == nh && tickWaits()) {
+        if (gTraceFrames) {
+            sysE << "im skip: pending "_sv << (i64)(gPresentId - gShownId) << endL;
+        }
+
+        // the frame stays requested: the next tick asks again. false
+        // makes plt retry by its own timer where it paces by frame
+        // callbacks
+        window->requestFrame();
+
+        return false;
+    }
+
     gFrameBegan = began;
     gAcquireNs = gFenceNs = gSubmitNs = gPresentNs = 0;
 
@@ -1464,6 +1604,15 @@ bool FrameDriver::frame(const plt::WindowInfo& info) {
         text << " total "_sv;
         appendMs(text, nowNs() - began);
 
+        if (gPacing) {
+            text << " pending "_sv << (i64)(gPresentId - gShownId);
+
+            if (gShownNow && gShownGapNs) {
+                text << " shown +"_sv;
+                appendMs(text, gShownGapNs);
+            }
+        }
+
         if (gRebuild) {
             text << " rebuild"_sv;
         }
@@ -1491,7 +1640,6 @@ void FrameDriver::close() {
 }
 
 int runUi(FrameDriver& driver) {
-    gTraceFrames = getenv("IM_TRACE_FRAMES") != nullptr;
     driver.action = 0;
     driver.window->requestShow();
     driver.window->requestFrame();

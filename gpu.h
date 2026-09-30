@@ -34,8 +34,10 @@ extern stl::StringView gTool;
 // the fault seam, configured from the tool's environment in the test build
 extern ChaosMonkey* gChaos;
 // IM_TRACE_FRAMES: a line per frame on stderr with the gap since the last
-// one and the time of each phase, and one per decode; to see where a
-// jerk comes from
+// one and the time of each phase, and one per decode; with the display's
+// report (VK_GOOGLE_display_timing) the presents still on their way, the
+// gap between shown frames and a line per tick skipped for them; to see
+// where a jerk comes from
 extern bool gTraceFrames;
 u64 nowNs();
 // "12.3", milliseconds to a tenth
