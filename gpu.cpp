@@ -1107,6 +1107,13 @@ void setupImGui(ObjPool& pool, bool hdr) {
 
     pio.Renderer_TextureMaxWidth = (int)props.limits.maxImageDimension2D;
     pio.Renderer_TextureMaxHeight = (int)props.limits.maxImageDimension2D;
+
+    // the last guard in, the first out: the device finishes the frames
+    // in flight before the backend's textures, the frames and their
+    // fences go under them
+    pooledGuard(pool, [] {
+        vkDeviceWaitIdle(gDevice);
+    });
 }
 
 void setupGpu(ObjPool& pool, plt::Window& window, const VulkanWants& wants) {
