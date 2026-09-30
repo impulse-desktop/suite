@@ -16,8 +16,10 @@ case "$mode" in
         "$CXX" --version | grep -qi clang
         sanitizer=address
         if [[ "$mode" == ubsan ]]; then sanitizer=undefined; fi
-        export CFLAGS="${CFLAGS:-} -g -fsanitize=$sanitizer -fno-sanitize-recover=all -fno-omit-frame-pointer"
-        export CXXFLAGS="${CXXFLAGS:-} -g -fsanitize=$sanitizer -fno-sanitize-recover=all -fno-omit-frame-pointer"
+        # the ignore list keeps the generated decoder out of the instrumentation
+        instrument="-g -fsanitize=$sanitizer -fno-sanitize-recover=all -fno-omit-frame-pointer -fsanitize-ignorelist=$root/dev/sanitize.list"
+        export CFLAGS="${CFLAGS:-} $instrument"
+        export CXXFLAGS="${CXXFLAGS:-} $instrument"
         export LDFLAGS="${LDFLAGS:-} -fsanitize=$sanitizer"
         export ASAN_OPTIONS=detect_leaks=1:abort_on_error=1
         export LSAN_OPTIONS="suppressions=$root/dev/lsan.supp"
