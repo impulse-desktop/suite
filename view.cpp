@@ -45,10 +45,9 @@ using namespace stl;
 namespace {
     // each side panel takes this share of the window's width
     constexpr float sideShare = .2f;
-    // the gutter around thumbnails, the panels' padding and the corners'
-    // rounding, as design lengths
+    // the gutter around thumbnails and their corners' rounding, as design
+    // lengths
     constexpr Design gap = 8_d;
-    constexpr Design padding = 12_d;
     constexpr Design rounding = 4_d;
     // the panels sit a shade lighter than the canvas, hairlines part them
     // from it and the sections from each other; ImGui's own blue marks
@@ -917,16 +916,10 @@ namespace {
     // file's own facts
     void ViewApp::drawInfo() {
         const Entry& entry = *entries[current];
-        float g = px(gap);
-        float keyW = ImGui::CalcTextSize("Dimensions").x + g;
         bool ready = shown == Load::Ready && shownIndex == current;
 
-        // every row one frame tall, text sitting where a frame's would;
-        // ImGui's own blues for the menu and its list
-        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, px(gap, 5_d));
-        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, px(rounding));
-        ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, px(rounding));
-        ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, px(6_d, 4_d));
+        // ImGui's own spacing, frames and blues; every row one frame tall,
+        // text sitting where a frame's would
         ImGui::PushStyleColor(ImGuiCol_Separator, hairline);
 
         // a section's title: a row with an arrow, no bar; the hairlines
@@ -957,15 +950,15 @@ namespace {
             ImGui::TextUnformatted((const char*)value.begin(), (const char*)value.end());
             ImGui::PopTextWrapPos();
         };
-        // the key column fixed, the value column the rest, its weight given:
-        // a weight derived from the contents is nothing on the first pass,
-        // and nothing over nothing is not a width
+        // the key column as wide as its keys, the value column the rest,
+        // its weight given: a weight derived from the contents is nothing
+        // on the first pass, and nothing over nothing is not a width
         auto table = [&](const char* id) {
             if (!ImGui::BeginTable(id, 2, ImGuiTableFlags_SizingStretchSame)) {
                 return false;
             }
 
-            ImGui::TableSetupColumn("key", ImGuiTableColumnFlags_WidthFixed, keyW);
+            ImGui::TableSetupColumn("key", ImGuiTableColumnFlags_WidthFixed);
             ImGui::TableSetupColumn("value", ImGuiTableColumnFlags_WidthStretch, 1.f);
 
             return true;
@@ -1091,7 +1084,6 @@ namespace {
         }
 
         ImGui::PopStyleColor();
-        ImGui::PopStyleVar(4);
     }
 
     void ViewApp::drawCanvas() {
@@ -1179,7 +1171,6 @@ namespace {
         ImGui::Begin("##view", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoSavedSettings);
 
         float sideW = floorf(vp->Size.x * sideShare);
-        float pad = px(padding);
         bool left = panel && !fullscreen;
         bool right = info && !fullscreen;
         ImDrawList* fg = ImGui::GetForegroundDrawList();
@@ -1200,20 +1191,20 @@ namespace {
 
         if (right) {
             ImGui::SameLine();
+            // the zeros placed the children; inside the panel ImGui's own
+            // padding and spacing
+            ImGui::PopStyleVar(2);
             ImGui::PushStyleColor(ImGuiCol_ChildBg, panelBg);
-            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(pad, pad));
             ImGui::BeginChild("info", ImVec2(sideW, 0.f), ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoScrollbar);
-            ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, px(gap, 6_d));
             drawInfo();
-            ImGui::PopStyleVar();
             ImGui::EndChild();
-            ImGui::PopStyleVar();
             ImGui::PopStyleColor();
             fg->AddLine(ImVec2(vp->Pos.x + vp->Size.x - sideW, vp->Pos.y), ImVec2(vp->Pos.x + vp->Size.x - sideW, vp->Pos.y + vp->Size.y), hairline);
+        } else {
+            ImGui::PopStyleVar(2);
         }
 
         ImGui::End();
-        ImGui::PopStyleVar(2);
         evictThumbs();
 
         return result;
