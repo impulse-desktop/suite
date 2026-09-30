@@ -145,6 +145,7 @@ namespace {
     // decoder, and a module grown to a large image's pixel cache never
     // shrinks. A failure is thrown, the decoder's own words
     void decodeFile(const Entry& entry, u32 side, DecodedImage& out) {
+        u64 began = nowNs();
         Buffer path(sv(entry.path));
         Buffer file;
 
@@ -153,7 +154,20 @@ namespace {
         ObjPool::Ref pool = ObjPool::fromMemory();
 
         Decoder::create(*pool)->decode(sv(file), entry.name(), out);
+
+        u64 decoded = nowNs();
+
         shrinkToSide(out, side);
+
+        if (gTraceFrames) {
+            auto& text = sb();
+
+            text << "im decode "_sv << entry.name() << ": decode "_sv;
+            appendMs(text, decoded - began);
+            text << " shrink "_sv;
+            appendMs(text, nowNs() - decoded);
+            sysE << sv(text) << endL;
+        }
     }
 
     bool imageName(StringView name) {

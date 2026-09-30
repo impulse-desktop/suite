@@ -3,6 +3,7 @@
 #include <std/str/view.h>
 #include <std/sys/types.h>
 #include <std/lib/vector.h>
+#include <std/str/builder.h>
 
 #include <plt/window.h>
 #include <vulkan/vulkan.h>
@@ -32,6 +33,13 @@ struct ImGuiStyle;
 extern stl::StringView gTool;
 // the fault seam, configured from the tool's environment in the test build
 extern ChaosMonkey* gChaos;
+// IM_TRACE_FRAMES: a line per frame on stderr with the gap since the last
+// one and the time of each phase, and one per decode; to see where a
+// jerk comes from
+extern bool gTraceFrames;
+u64 nowNs();
+// "12.3", milliseconds to a tenth
+void appendMs(stl::StringBuilder& text, u64 ns);
 
 extern VkAllocationCallbacks* gAlloc;
 extern VkInstance gInstance;

@@ -8,6 +8,7 @@
 
 #include <std/ios/sys.h>
 
+#include <time.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -51,7 +52,32 @@ float gSdrWhiteNits = 203.f;
 bool gRebuild = false;
 bool gLinearHdr = false;
 
+bool gTraceFrames = false;
+
+u64 nowNs() {
+    struct timespec ts;
+
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+
+    return (u64)ts.tv_sec * 1000000000ull + (u64)ts.tv_nsec;
+}
+
+void appendMs(StringBuilder& text, u64 ns) {
+    u64 tenths = (ns + 50000) / 100000;
+
+    text << (i64)(tenths / 10) << "."_sv << (i64)(tenths % 10);
+}
+
 namespace {
+    // the frame trace's clocks: when the last frame began, how many there
+    // were, and how long each phase of this one took
+    u64 gFrameBegan = 0;
+    u64 gFrameCount = 0;
+    u64 gAcquireNs = 0;
+    u64 gFenceNs = 0;
+    u64 gSubmitNs = 0;
+    u64 gPresentNs = 0;
+
     // three: MoltenVK takes the CAMetalLayer drawable at submit, and with
     // two the submit blocks until the frame before last has left the
     // screen, a display link tick lost each time
@@ -584,7 +610,10 @@ namespace {
 
     void frameRender(ImDrawData* draw) {
         Sync& sync = gPresent.syncs.mut(gPresent.syncIndex);
+        u64 t0 = nowNs();
         VkResult e = gChaos->swapchain(vkAcquireNextImageKHR(gDevice, gPresent.swapchain, UINT64_MAX, sync.acquired, VK_NULL_HANDLE, &gPresent.frameIndex));
+
+        gAcquireNs = nowNs() - t0;
 
         if (e == VK_ERROR_OUT_OF_DATE_KHR || e == VK_SUBOPTIMAL_KHR) {
             gRebuild = true;
@@ -596,7 +625,9 @@ namespace {
 
         Frame& fd = gPresent.frames.mut(gPresent.frameIndex);
 
+        t0 = nowNs();
         vkWaitForFences(gDevice, 1, &fd.fence, VK_TRUE, UINT64_MAX);
+        gFenceNs = nowNs() - t0;
         vkResetFences(gDevice, 1, &fd.fence);
         vkResetCommandPool(gDevice, fd.commandPool, 0);
 
@@ -657,7 +688,9 @@ namespace {
         si.signalSemaphoreCount = 1;
         si.pSignalSemaphores = &sync.rendered;
         vkEndCommandBuffer(fd.commandBuffer);
+        t0 = nowNs();
         vkQueueSubmit(gQueue, 1, &si, fd.fence);
+        gSubmitNs = nowNs() - t0;
     }
 
     void framePresent() {
@@ -674,7 +707,10 @@ namespace {
         pi.pSwapchains = &gPresent.swapchain;
         pi.pImageIndices = &gPresent.frameIndex;
 
+        u64 t0 = nowNs();
         VkResult e = gChaos->swapchain(vkQueuePresentKHR(gQueue, &pi));
+
+        gPresentNs = nowNs() - t0;
 
         if (e == VK_ERROR_OUT_OF_DATE_KHR || e == VK_SUBOPTIMAL_KHR) {
             gRebuild = true;
@@ -1351,6 +1387,11 @@ int drawErrorPanel(StringView msg) {
 bool FrameDriver::frame(const plt::WindowInfo& info) {
     int nw = (int)info.width;
     int nh = (int)info.height;
+    u64 began = nowNs();
+    u64 gap = gFrameBegan ? began - gFrameBegan : 0;
+
+    gFrameBegan = began;
+    gAcquireNs = gFenceNs = gSubmitNs = gPresentNs = 0;
 
     if (gRebuild || gPresent.width != nw || gPresent.height != nh) {
         createSwapchain((u32)nw, (u32)nh);
@@ -1379,8 +1420,37 @@ bool FrameDriver::frame(const plt::WindowInfo& info) {
     gPresent.clear.color.float32[2] = 0.1f;
     gPresent.clear.color.float32[3] = 1.0f;
 
+    u64 drawn = nowNs();
+
     frameRender(dd);
     framePresent();
+
+    if (gTraceFrames) {
+        // a line per frame: the gap since the last one began, then this
+        // one's phases, ImGui and the tool's own drawing first
+        auto& text = sb();
+
+        text << "im frame "_sv << (i64)gFrameCount++ << ": gap "_sv;
+        appendMs(text, gap);
+        text << " ui "_sv;
+        appendMs(text, drawn - began);
+        text << " acquire "_sv;
+        appendMs(text, gAcquireNs);
+        text << " fence "_sv;
+        appendMs(text, gFenceNs);
+        text << " submit "_sv;
+        appendMs(text, gSubmitNs);
+        text << " present "_sv;
+        appendMs(text, gPresentNs);
+        text << " total "_sv;
+        appendMs(text, nowNs() - began);
+
+        if (gRebuild) {
+            text << " rebuild"_sv;
+        }
+
+        sysE << sv(text) << endL;
+    }
 
     if (result != 0) {
         action = result;
@@ -1402,6 +1472,7 @@ void FrameDriver::close() {
 }
 
 int runUi(FrameDriver& driver) {
+    gTraceFrames = getenv("IM_TRACE_FRAMES") != nullptr;
     driver.action = 0;
     driver.window->requestShow();
     driver.window->requestFrame();
