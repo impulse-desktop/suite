@@ -1340,16 +1340,18 @@ int mainView(int argc, char** argv) {
 
         plt::Window& window = *platform.createWindow(*shot, options);
 
-        // the window knows its output's scale, the ui follows it
-        followContentScale(window.info().contentScale);
+        // the window was asked for in the platform's logical units, and it
+        // says what pixels it made of them: not the design's pixels on an
+        // output that scales logical units by itself, or over the screen;
+        // a resize is in pixels
+        plt::WindowInfo made = window.info();
+        int wantW = winW;
+        int wantH = winH;
 
-        int clampedW = winW;
-        int clampedH = winH;
+        clampWindowSize(made, wantW, wantH);
 
-        clampWindowSize(window.info(), clampedW, clampedH);
-
-        if (clampedW != winW || clampedH != winH) {
-            window.requestResize((u32)clampedW, (u32)clampedH);
+        if (wantW != (int)made.width || wantH != (int)made.height) {
+            window.requestResize((u32)wantW, (u32)wantH);
         }
 
         VulkanWants wants;

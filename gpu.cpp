@@ -1349,12 +1349,6 @@ bool FrameDriver::frame(const plt::WindowInfo& info) {
     int nw = (int)info.width;
     int nh = (int)info.height;
 
-    // the window moved to an output of another scale: the ui follows,
-    // ImGui's part through a fresh style before its frame
-    if (followContentScale(info.contentScale)) {
-        applyUiStyle();
-    }
-
     if (gRebuild || gPresent.width != nw || gPresent.height != nh) {
         createSwapchain((u32)nw, (u32)nh);
         traceSize("presenting"_sv, gPresent.width, gPresent.height);
