@@ -34,9 +34,10 @@ does the same from the one binary. Tools so far:
   its ends, a thumbnail click selects; the wheel zooms about the pointer,
   a drag pans, `-`/`=` step the zoom, `1` is 1:1, `0`/`w` fit; `r`/`R`
   turn the image, `f` fullscreen, Tab hides the list, `i` the properties,
-  `q`/Escape leave. Decoding runs on the one thread, here and now,
-  through the sandboxed decoder below: the shown image when it is
-  selected, a thumbnail for each row in view and two beyond.
+  `q`/Escape leave. The whole directory is read at the start, every
+  file's bytes and a thumbnail decoded from each through the sandboxed
+  decoder below; nothing touches the disk after, the shown image decodes
+  from memory when selected, all on the one thread.
 
 Single-threaded by design. Every object lives in a pool; the C++ standard
 library is not used, the vocabulary comes from

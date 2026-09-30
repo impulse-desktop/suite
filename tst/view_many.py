@@ -1,6 +1,5 @@
-"""Three hundred files: Down held walks the whole list by the client's
-own key repeat, every row's thumbnail is decoded on its way through
-view, and the oldest go once more than 256 are kept."""
+"""Three hundred files: every thumbnail is decoded at the start, and
+Down held walks the whole list by the client's own key repeat."""
 
 from session import KEY_DOWN, Session, write_png
 
@@ -20,6 +19,5 @@ with Session("view_many", tool="view") as s:
     s.said("selected f299.png")
     s.said("showing f299.png 8x8")
     s.said("thumbnail f299.png")
-    s.said("evicted ")
     s.close()
     print("OK: a long list walks by key repeat, and old thumbnails are dropped")
