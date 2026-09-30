@@ -4,8 +4,8 @@
 #include <std/sys/types.h>
 #include <std/lib/vector.h>
 
-#include <vulkan/vulkan.h>
 #include <plt/window.h>
+#include <vulkan/vulkan.h>
 
 namespace stl {
     class ObjPool;
