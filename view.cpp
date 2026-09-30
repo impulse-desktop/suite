@@ -915,6 +915,8 @@ namespace {
             top = bottom + g;
         }
 
+        ImDrawList* fg = ImGui::GetForegroundDrawList();
+
         // a row's thumbnail, scaled about its centre by the pointer's
         // distance in height: the full bulge at none, nothing at the reach
         auto draw = [&](size_t i, float rowTop, float h) {
@@ -944,9 +946,16 @@ namespace {
             ImVec2 centre((p0.x + p1.x) / 2.f, (p0.y + p1.y) / 2.f);
             ImVec2 half((p1.x - p0.x) / 2.f * scale, (p1.y - p0.y) / 2.f * scale);
 
-            dl->AddImage((ImTextureID)entry.thumbTex.ds, ImVec2(centre.x - half.x, centre.y - half.y), ImVec2(centre.x + half.x, centre.y + half.y));
+            fg->AddImage((ImTextureID)entry.thumbTex.ds, ImVec2(centre.x - half.x, centre.y - half.y), ImVec2(centre.x + half.x, centre.y + half.y));
             entry.drawnAt = frames;
         };
+
+        // a bulged thumbnail spills over the list's edge onto the canvas:
+        // the thumbnails go on the foreground, over every window, clipped
+        // to the list's height and the window's right edge
+        ImVec2 viewportEnd(ImGui::GetMainViewport()->Pos.x + ImGui::GetMainViewport()->Size.x, windowPos.y + viewH);
+
+        fg->PushClipRect(windowPos, viewportEnd, false);
 
         if (first < count) {
             size_t stop = nearest == count ? last + 1 : nearest;
@@ -974,6 +983,8 @@ namespace {
                 draw(nearest, bottom - rowHeightFor(*entries[nearest], innerW), rowHeightFor(*entries[nearest], innerW));
             }
         }
+
+        fg->PopClipRect();
 
         LockGuard lock(shared.mutex);
 
