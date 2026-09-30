@@ -45,24 +45,32 @@ case "$mode" in
 esac
 
 "$CXX" --version
-python3 ./build -B "$build_dir" -j "$jobs" im im_test links devices jxl_dump device_uuid
+# One graph for the tools and the scenarios: a second invocation for the
+# scenarios rebuilt the tools (the generated decoder above all) instead of
+# taking them from the cache. -k: a scenario node never fails, but a build
+# error in one must not stop the others; the final test node reads every
+# verdict. The scenarios' Wayland sockets need a short path; what a failed
+# one captured is kept for the job's artifacts.
+targets=(im im_test links devices jxl_dump device_uuid)
+status=0
+if [[ "$mode" == build ]]; then
+    python3 ./build -B "$build_dir" -j "$jobs" "${targets[@]}" || status=1
+else
+    python3 ./build -B "$build_dir" -j "$jobs" -k -Druntime=/tmp/im-e2e -Devidence="$build_dir/evidence" "${targets[@]}" test || status=1
+fi
 # Test controls must never ship in the production binary.
-python3 - "$build_dir/im" "$build_dir/im_test" <<'PY_CHECK'
+if [[ -f "$build_dir/im" && -f "$build_dir/im_test" ]]; then
+    python3 - "$build_dir/im" "$build_dir/im_test" <<'PY_CHECK'
 from pathlib import Path
 import sys
 production, testing = (Path(name).read_bytes() for name in sys.argv[1:])
 assert b"IM_CHAOS" not in production, "test fault controls in the production binary"
 assert b"IM_CHAOS" in testing, "the test binary lacks its fault controls"
 PY_CHECK
-if [[ "$mode" == build ]]; then
-    exit 0
 fi
-# -k: a scenario node never fails, but a build error in one must not stop
-# the others; the final test node reads every verdict. The scenarios'
-# Wayland sockets need a short path; what a failed one captured is kept
-# for the job's artifacts.
-status=0
-python3 ./build -B "$build_dir" -j "$jobs" -k -Druntime=/tmp/im-e2e -Devidence="$build_dir/evidence" test || status=1
+if [[ "$mode" == build ]]; then
+    exit "$status"
+fi
 if [[ "$mode" == coverage ]]; then
     bash dev/ci_coverage.sh "$build_dir" "$build_dir/profiles"
     # the report is read by the host's runner user once the container is
