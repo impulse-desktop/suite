@@ -156,7 +156,12 @@ decode = library(
 )
 
 
-im_sources = build.glob("$(S)/*.cpp")
+# the tools, and the C the calls into the decoder module are made from: it
+# sees the module's generated headers
+im_sources = [
+    *build.glob("$(S)/*.cpp"),
+    {"src": "$(S)/decode_glue.c", "inputs": [*decode_headers, *decode_runtime_files]},
+]
 # the vendored libraries' own dependencies come along by name: an imported
 # graph hands over its archive, not what the archive wants linked
 im_deps = [

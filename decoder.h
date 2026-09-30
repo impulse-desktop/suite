@@ -19,15 +19,15 @@ struct DecodedImage {
 // module of ImageMagick and its coders, compiled to C by wasm2c with every
 // load and store checked against the module's memory in the code itself and
 // its call depth counted, so a coder reading a hostile file can reach
-// nothing but its own memory, and no signal handler is involved. One
-// decoder serves one thread. A file that traps the module (a coder that
-// cannot take it, an access past the memory, a recursion past the depth
-// limit) is reported and the module is thrown away; the next decode starts
-// a fresh one.
+// nothing but its own memory, and no signal handler is involved. A decoder
+// is one instance of the module, in the pool that made it, serving one
+// thread. A decode that fails throws (ToolError with the reason: a file no
+// coder takes, a trap of the module) and the decoder is spent with it: it
+// goes with its pool, and the next decode takes a new one.
 struct Decoder {
     // the file's bytes and its name (the coder is picked by the extension
-    // when the bytes do not say); false with the reason in error
-    virtual bool decode(stl::StringView file, stl::StringView name, DecodedImage& out, stl::Buffer& error) = 0;
+    // when the bytes do not say)
+    virtual void decode(stl::StringView file, stl::StringView name, DecodedImage& out) = 0;
 
     static Decoder* create(stl::ObjPool& pool);
 };

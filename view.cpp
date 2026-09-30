@@ -9,35 +9,33 @@
 
 #include <std/sys/fs.h>
 #include <std/ios/sys.h>
-#include <std/alg/minmax.h>
 #include <std/thr/pool.h>
 #include <std/alg/qsort.h>
+#include <std/sys/throw.h>
 #include <std/thr/guard.h>
 #include <std/thr/mutex.h>
+#include <std/alg/minmax.h>
 #include <std/lib/vector.h>
-#include <std/sys/throw.h>
 #include <std/ios/fs_utils.h>
 #include <std/mem/obj_pool.h>
 
 #include <math.h>
 #include <errno.h>
+#include <imgui.h>
 #include <string.h>
 #include <unistd.h>
 #include <sys/stat.h>
-
-#include <plt/loop_wake.h>
-#include <plt/platform.h>
 #include <plt/poller.h>
 #include <plt/window.h>
-
-#include <imgui.h>
+#include <plt/platform.h>
+#include <plt/loop_wake.h>
 
 using namespace stl;
 
 // im view <file|dir>...: the gallery on the left, the image on the right.
-// Decoding runs on a thread pool, a sandboxed ImageMagick per worker; the
-// results come back to the platform thread through its loop's doorbell,
-// where the textures are made. Thumbnails are decoded for the rows in view
+// Decoding runs on a thread pool, a fresh sandboxed ImageMagick for every
+// file; the results come back to the platform thread through its loop's
+// doorbell, where the textures are made. Thumbnails are decoded for the rows in view
 // (and dropped again when many have scrolled by), the shown image and its
 // two neighbours are kept decoded.
 
@@ -167,8 +165,10 @@ namespace {
         img.rgba.xchg(out);
     }
 
-    // a worker's whole job: read, decode, shrink, hand back
-    void runJob(Shared& shared, Decoder& decoder, Job& job) {
+    // a worker's whole job: read, decode, shrink, hand back. The decoder
+    // and its pool live for the one file: a failure spends the decoder,
+    // and a module grown to a large image's pixel cache never shrinks
+    void runJob(Shared& shared, Job& job) {
         {
             LockGuard lock(shared.mutex);
 
@@ -182,18 +182,19 @@ namespace {
         }
 
         if (!job.skipped) {
-            Buffer file;
-
             try {
+                Buffer file;
+
                 readFileContent(job.path, file);
-                job.ok = decoder.decode(sv(file), sv(job.name), job.image, job.error);
+
+                ObjPool::Ref pool = ObjPool::fromMemory();
+
+                Decoder::create(*pool)->decode(sv(file), sv(job.name), job.image);
+                shrinkToSide(job.image, job.thumbnail ? thumbTexels : shared.maxSide);
+                job.ok = true;
             } catch (...) {
                 job.error = Buffer(Exception::current());
                 job.ok = false;
-            }
-
-            if (job.ok) {
-                shrinkToSide(job.image, job.thumbnail ? thumbTexels : shared.maxSide);
             }
         }
 
@@ -205,8 +206,27 @@ namespace {
 
     bool imageName(StringView name) {
         static const char* const extensions[] = {
-            "png", "jpg", "jpeg", "jpe", "webp", "tif", "tiff", "jp2", "j2k", "jxl", "gif", "bmp",
-            "pnm", "ppm", "pgm", "pbm", "pam", "tga", "pcx", "sgi", "miff",
+            "png",
+            "jpg",
+            "jpeg",
+            "jpe",
+            "webp",
+            "tif",
+            "tiff",
+            "jp2",
+            "j2k",
+            "jxl",
+            "gif",
+            "bmp",
+            "pnm",
+            "ppm",
+            "pgm",
+            "pbm",
+            "pam",
+            "tga",
+            "pcx",
+            "sgi",
+            "miff",
         };
         size_t dot = name.length();
 
@@ -291,7 +311,6 @@ namespace {
         ObjPool* pool = nullptr;
         plt::Window* window = nullptr;
         ThreadPool* threads = nullptr;
-        Vector<Decoder*> decoders;
         Shared shared;
         Vector<Entry*> entries;
         // jobs done with, for the next request
@@ -373,14 +392,9 @@ namespace {
         job->name = Buffer(entry.name());
 
         Shared* exchange = &shared;
-        ThreadPool* workers = threads;
-        Decoder* const* decodersData = decoders.data();
 
-        threads->submit([job, exchange, workers, decodersData] {
-            size_t id = 0;
-
-            workers->workerId(&id);
-            runJob(*exchange, *decodersData[id], *job);
+        threads->submit([job, exchange] {
+            runJob(*exchange, *job);
         });
     }
 
@@ -1019,8 +1033,8 @@ int mainView(int argc, char** argv) {
 
         setupImGui(*shot, uiStyle, false);
 
-        // the decoders: one per worker, made here, run there; the pool is
-        // joined before anything it may still write to goes
+        // the workers; their pool is joined before anything they may still
+        // write to goes
         VkPhysicalDeviceProperties props;
 
         vkGetPhysicalDeviceProperties(gPhys, &props);
@@ -1030,10 +1044,6 @@ int mainView(int argc, char** argv) {
 
         long cpus = sysconf(_SC_NPROCESSORS_ONLN);
         size_t workers = (size_t)(cpus < 1 ? 1 : cpus > 4 ? 4 : cpus);
-
-        for (size_t i = 0; i < workers; i++) {
-            app.decoders.pushBack(Decoder::create(*shot));
-        }
 
         app.threads = ThreadPool::simple(&*shot, workers);
         pooledGuard(*shot, [a = &app] {
