@@ -10,11 +10,17 @@
 #include <stdlib.h>
 #include <string.h>
 
-// vulkan_wayland.h only names these through pointers
+// the window's surface: a CAMetalLayer on macOS (MoltenVK's metal
+// surface), a Wayland surface elsewhere; the platform headers name the
+// native objects through pointers only
+#if defined(__APPLE__)
+    #include <vulkan/vulkan_metal.h>
+#else
 struct wl_display;
 struct wl_surface;
 
-#include <vulkan/vulkan_wayland.h>
+    #include <vulkan/vulkan_wayland.h>
+#endif
 
 #include <plt/platform.h>
 
@@ -721,7 +727,11 @@ void setupVulkan(ObjPool& pool, const VulkanWants& wants) {
     Vector<const char*> instanceExts;
 
     instanceExts.pushBack(VK_KHR_SURFACE_EXTENSION_NAME);
+#if defined(__APPLE__)
+    instanceExts.pushBack(VK_EXT_METAL_SURFACE_EXTENSION_NAME);
+#else
     instanceExts.pushBack(VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME);
+#endif
 
     if (wants.hdr) {
         instanceExts.pushBack(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME);
@@ -773,19 +783,32 @@ void setupVulkan(ObjPool& pool, const VulkanWants& wants) {
 
     gQueueFamily = selectQueueFamily(gPhys);
 
-    const char* devExts[] = {
+    const char* wantedExts[] = {
         VK_KHR_SWAPCHAIN_EXTENSION_NAME,
         VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
         VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME,
         VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME,
     };
-    u32 devExtCount = wants.sharedBuffer ? 4 : 1;
+    u32 wantedCount = wants.sharedBuffer ? 4 : 1;
+    Vector<const char*> devExts;
 
-    for (u32 i = 0; i < devExtCount; i++) {
-        if (!hasDeviceExtension(gPhys, devExts[i])) {
-            fail(sv(StringBuilder() << "vulkan lacks "_sv << StringView(devExts[i])));
+    for (u32 i = 0; i < wantedCount; i++) {
+        if (!hasDeviceExtension(gPhys, wantedExts[i])) {
+            fail(sv(StringBuilder() << "vulkan lacks "_sv << StringView(wantedExts[i])));
         }
+
+        devExts.pushBack(wantedExts[i]);
     }
+
+#if defined(__APPLE__)
+    // a device that is a portability subset (MoltenVK over Metal) wants to
+    // be told that it is used as one
+    const char* portability = "VK_KHR_portability_subset";
+
+    if (hasDeviceExtension(gPhys, portability)) {
+        devExts.pushBack(portability);
+    }
+#endif
     float prio = 1.0f;
     VkDeviceQueueCreateInfo qi = {};
 
@@ -799,8 +822,8 @@ void setupVulkan(ObjPool& pool, const VulkanWants& wants) {
     dci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     dci.queueCreateInfoCount = 1;
     dci.pQueueCreateInfos = &qi;
-    dci.enabledExtensionCount = devExtCount;
-    dci.ppEnabledExtensionNames = devExts;
+    dci.enabledExtensionCount = (u32)devExts.length();
+    dci.ppEnabledExtensionNames = devExts.data();
     vkc(vkCreateDevice(gPhys, &dci, gAlloc, &gDevice));
     pooledGuard(pool, [] {
         vkDestroyDevice(gDevice, gAlloc);
@@ -824,14 +847,21 @@ void setupVulkan(ObjPool& pool, const VulkanWants& wants) {
 
 VkSurfaceKHR createSurface(plt::Window& window) {
     plt::RenderContext render = window.renderContext();
+    VkSurfaceKHR surface = VK_NULL_HANDLE;
+
+#if defined(__APPLE__)
+    // plt's Cocoa window draws through a CAMetalLayer, its connection
+    VkMetalSurfaceCreateInfoEXT sci{VK_STRUCTURE_TYPE_METAL_SURFACE_CREATE_INFO_EXT};
+
+    sci.pLayer = (const CAMetalLayer*)render.connection;
+    vkc(vkCreateMetalSurfaceEXT(gInstance, &sci, gAlloc, &surface));
+#else
     VkWaylandSurfaceCreateInfoKHR sci{VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR};
 
     sci.display = (wl_display*)render.connection;
     sci.surface = (wl_surface*)render.window;
-
-    VkSurfaceKHR surface = VK_NULL_HANDLE;
-
     vkc(vkCreateWaylandSurfaceKHR(gInstance, &sci, gAlloc, &surface));
+#endif
 
     return surface;
 }

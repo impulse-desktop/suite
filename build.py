@@ -30,9 +30,34 @@ flags.allow({
 })
 
 
-wayland_client = pkg_config("wayland-client")
-xkb = pkg_config("xkbcommon")
-vulkan = pkg_config("vulkan")
+# ---- the platform ----------------------------------------------------------
+# Linux draws through Wayland, plt's backend there, and runs the scenarios
+# under a compositor; macOS draws through Cocoa and MoltenVK and only builds:
+# the compositor the screenshot tool serves is not there, the viewer is
+darwin = "apple-darwin" in build.target
+
+if darwin:
+    # MoltenVK by name, with the frameworks it and plt's Cocoa backend stand
+    # on: the imported plt graph brings its archive, not its link flags
+    platform_deps = [dependency(ldflags=[
+        "-lMoltenVK",
+        "-Wl,-framework,AppKit",
+        "-Wl,-framework,Carbon",
+        "-Wl,-framework,CoreFoundation",
+        "-Wl,-framework,CoreGraphics",
+        "-Wl,-framework,CoreVideo",
+        "-Wl,-framework,Foundation",
+        "-Wl,-framework,IOKit",
+        "-Wl,-framework,IOSurface",
+        "-Wl,-framework,Metal",
+        "-Wl,-framework,QuartzCore",
+    ])]
+else:
+    wayland_client = pkg_config("wayland-client")
+    xkb = pkg_config("xkbcommon")
+    vulkan = pkg_config("vulkan")
+    platform_deps = [wayland_client, xkb, vulkan]
+
 png = pkg_config("libpng")
 jxl = pkg_config("libjxl")
 
@@ -75,7 +100,7 @@ for shader, stage in [
 imgui = library(
     name="imgui",
     srcs=build.glob("$(S)/ext/imgui/*.cpp"),
-    deps=[vulkan],
+    deps=platform_deps,
 )
 
 
@@ -168,7 +193,7 @@ im_sources = build.glob("$(S)/*.cpp")
 # graph hands over its archive, not what the archive wants linked
 im_deps = [
     *shader_rules, imgui, decode, plt, libstd,
-    wayland_client, xkb, vulkan, png, jxl, system,
+    *platform_deps, png, jxl, system,
 ]
 
 # one binary, every tool: `im screenshot ...`, and a link named after the
@@ -216,103 +241,105 @@ install(im, links)
 # fails `./build test`. -Dfilter=GLOB restricts which scenarios build,
 # -Druntime=DIR keeps their Wayland sockets under a short path, and
 # -Devidence=DIR keeps what a failed one captured, outside the graph.
-e2e_protocols = []
-e2e_protocol_headers = []
-for xml, name in [
-    ("wlr-virtual-pointer-unstable-v1", "virtual-pointer"),
-    ("virtual-keyboard-unstable-v1", "virtual-keyboard"),
-]:
-    source = f"$(S)/tst/{xml}.xml"
-    header = f"$(B)/e2e-protocol/{name}-client.h"
-    code = f"$(B)/e2e-protocol/{name}-code.h"
-    e2e_protocol_headers += [header, code]
-    e2e_protocols.append(command(
-        name=f"protocol_{name}",
-        inputs=[source],
-        outputs=[header, code],
-        cmd=[
-            ["wayland-scanner", "client-header", source, header],
-            ["wayland-scanner", "private-code", source, code],
-        ],
+# Linux only: the compositor and the devices are Wayland's.
+if not darwin:
+    e2e_protocols = []
+    e2e_protocol_headers = []
+    for xml, name in [
+        ("wlr-virtual-pointer-unstable-v1", "virtual-pointer"),
+        ("virtual-keyboard-unstable-v1", "virtual-keyboard"),
+    ]:
+        source = f"$(S)/tst/{xml}.xml"
+        header = f"$(B)/e2e-protocol/{name}-client.h"
+        code = f"$(B)/e2e-protocol/{name}-code.h"
+        e2e_protocol_headers += [header, code]
+        e2e_protocols.append(command(
+            name=f"protocol_{name}",
+            inputs=[source],
+            outputs=[header, code],
+            cmd=[
+                ["wayland-scanner", "client-header", source, header],
+                ["wayland-scanner", "private-code", source, code],
+            ],
+            cflags=["-I$(B)/e2e-protocol"],
+            descr="WL",
+        ))
+
+    devices = program(
+        name="devices",
+        output="$(B)/e2e/devices",
+        srcs=[{"src": "$(S)/tst/devices.cpp", "inputs": e2e_protocol_headers}],
         cflags=["-I$(B)/e2e-protocol"],
-        descr="WL",
-    ))
-
-devices = program(
-    name="devices",
-    output="$(B)/e2e/devices",
-    srcs=[{"src": "$(S)/tst/devices.cpp", "inputs": e2e_protocol_headers}],
-    cflags=["-I$(B)/e2e-protocol"],
-    deps=[*e2e_protocols, wayland_client, xkb],
-)
-
-# the scenarios read a saved JPEG XL through this, as the image's own
-# code values
-jxl_dump = program(
-    name="jxl_dump",
-    output="$(B)/e2e/jxl_dump",
-    srcs=["$(S)/tst/jxl_dump.cpp"],
-    deps=[jxl],
-)
-
-# and name the Vulkan device a shared buffer is imported on through this
-device_uuid = program(
-    name="device_uuid",
-    output="$(B)/e2e/device_uuid",
-    srcs=["$(S)/tst/device_uuid.cpp"],
-    deps=[vulkan],
-)
-helpers = [devices, jxl_dump, device_uuid]
-
-# -Dshard=K/N splits the scenarios into N slices by a hash of the name, so
-# CI jobs can run them side by side; the slice a scenario falls in does not
-# move when others are added
-shard_index, shard_count = (int(part) for part in flags.shard.split("/")) if flags.shard else (0, 1)
-# the fixture and the runner: any change to the harness re-runs every scenario
-harness = ["$(S)/tst/session.py", "$(S)/dev/run_test.py"]
-
-test_nodes = []
-test_verdicts = []
-for scenario in sorted(set(build.glob("$(S)/tst/*.py")) - set(harness)):
-    name = os.path.basename(scenario)[:-len(".py")]
-    if flags.filter and not fnmatch.fnmatch(name, flags.filter):
-        continue
-    if int(hashlib.sha1(name.encode()).hexdigest(), 16) % shard_count != shard_index:
-        continue
-    out = f"$(B)/test-results/{name}.json"
-    cmd = [
-        "python3", "$(S)/dev/run_test.py",
-        "--scenario", scenario,
-        "--binary", "$(B)/im_test",
-        "--helpers", "$(B)/e2e",
-        "--out", out,
-    ]
-    if flags.runtime:
-        cmd += ["--runtime", flags.runtime]
-    if flags.evidence:
-        cmd += ["--evidence", flags.evidence]
-    test_verdicts.append(out)
-    test_nodes.append(command(
-        name=f"test_{name}",
-        inputs=[scenario, *harness],
-        outputs=[out],
-        deps=[im_test, *helpers],
-        cmd=cmd,
-        descr="TS",
-        color="cyan",
-    ))
-
-if test_nodes:
-    test = command(
-        name="test",
-        inputs=["$(S)/dev/aggregate_tests.py"],
-        outputs=["$(B)/test-results/verdict.txt"],
-        deps=test_nodes,
-        cmd=[
-            "python3", "$(S)/dev/aggregate_tests.py",
-            "--out", "$(B)/test-results/verdict.txt",
-            *test_verdicts,
-        ],
-        descr="OK",
-        color="light-green",
+        deps=[*e2e_protocols, wayland_client, xkb],
     )
+
+    # the scenarios read a saved JPEG XL through this, as the image's own
+    # code values
+    jxl_dump = program(
+        name="jxl_dump",
+        output="$(B)/e2e/jxl_dump",
+        srcs=["$(S)/tst/jxl_dump.cpp"],
+        deps=[jxl],
+    )
+
+    # and name the Vulkan device a shared buffer is imported on through this
+    device_uuid = program(
+        name="device_uuid",
+        output="$(B)/e2e/device_uuid",
+        srcs=["$(S)/tst/device_uuid.cpp"],
+        deps=[vulkan],
+    )
+    helpers = [devices, jxl_dump, device_uuid]
+
+    # -Dshard=K/N splits the scenarios into N slices by a hash of the name, so
+    # CI jobs can run them side by side; the slice a scenario falls in does not
+    # move when others are added
+    shard_index, shard_count = (int(part) for part in flags.shard.split("/")) if flags.shard else (0, 1)
+    # the fixture and the runner: any change to the harness re-runs every scenario
+    harness = ["$(S)/tst/session.py", "$(S)/dev/run_test.py"]
+
+    test_nodes = []
+    test_verdicts = []
+    for scenario in sorted(set(build.glob("$(S)/tst/*.py")) - set(harness)):
+        name = os.path.basename(scenario)[:-len(".py")]
+        if flags.filter and not fnmatch.fnmatch(name, flags.filter):
+            continue
+        if int(hashlib.sha1(name.encode()).hexdigest(), 16) % shard_count != shard_index:
+            continue
+        out = f"$(B)/test-results/{name}.json"
+        cmd = [
+            "python3", "$(S)/dev/run_test.py",
+            "--scenario", scenario,
+            "--binary", "$(B)/im_test",
+            "--helpers", "$(B)/e2e",
+            "--out", out,
+        ]
+        if flags.runtime:
+            cmd += ["--runtime", flags.runtime]
+        if flags.evidence:
+            cmd += ["--evidence", flags.evidence]
+        test_verdicts.append(out)
+        test_nodes.append(command(
+            name=f"test_{name}",
+            inputs=[scenario, *harness],
+            outputs=[out],
+            deps=[im_test, *helpers],
+            cmd=cmd,
+            descr="TS",
+            color="cyan",
+        ))
+
+    if test_nodes:
+        test = command(
+            name="test",
+            inputs=["$(S)/dev/aggregate_tests.py"],
+            outputs=["$(B)/test-results/verdict.txt"],
+            deps=test_nodes,
+            cmd=[
+                "python3", "$(S)/dev/aggregate_tests.py",
+                "--out", "$(B)/test-results/verdict.txt",
+                *test_verdicts,
+            ],
+            descr="OK",
+            color="light-green",
+        )

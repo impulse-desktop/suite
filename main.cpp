@@ -7,7 +7,7 @@
 
 #include <string.h>
 
-#ifdef IM_FOR_TESTS
+#if defined(IM_FOR_TESTS) && defined(__linux__)
     #include <sys/prctl.h>
 #endif
 
@@ -73,7 +73,7 @@ namespace {
 }
 
 int main(int argc, char** argv) {
-#ifdef IM_FOR_TESTS
+#if defined(IM_FOR_TESTS) && defined(__linux__)
     // the scenario that started this tool may read its stacks when it fails
     // with the tool alive; Yama lets only an ancestor attach otherwise
     prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY, 0, 0, 0);

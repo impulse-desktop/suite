@@ -55,6 +55,32 @@ Images are decoded by ImageMagick, vendored as one pure WebAssembly module
 that wasm2c turns into C at build time: a sandboxed library of the binary,
 every memory access checked, with no interpreter or JIT behind it.
 
+## macOS
+
+The tools build for macOS as well, on plt's Cocoa backend with MoltenVK
+in place of a Vulkan loader: `build.py` takes the target from the runner
+(`--target aarch64-apple-darwin11`, the triple an ix darwin realm names),
+links MoltenVK and the frameworks it and Cocoa need, and leaves the
+Wayland-only parts out: the compositor's devices and the scenarios. The
+viewer is what runs there; the screenshot tool builds but serves a
+compositor that is not there. On a Mac, an ix realm with `lib/molten/vk`,
+`lib/png`, `lib/jxl`, `lib/vulkan/headers` and the host tools (`bin/wabt`,
+`bin/glslang`, `bin/pkg/config`) is enough:
+
+```
+./build --target aarch64-apple-darwin11
+```
+
+From Linux the same build cross-checks through the overlay in `dev/ix`,
+which puts the darwin libraries into a host realm; the compiler is the
+toolchain's own, on PATH by hand:
+
+```
+IX_PATH=$PWD/dev/ix:{builtin} ix run set/suite/darwin -- sh -c \
+  'PATH=$(echo "$CPPFLAGS" | grep -o "/ix/store/[^ ]*-bin-clang-[0-9]*/share/include" | head -1 | sed "s|/share/include|/bin|"):$PATH \
+   ./build --target aarch64-apple-darwin11 -B .build-darwin im'
+```
+
 ## Testing
 
 ```
