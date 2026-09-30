@@ -1,5 +1,6 @@
 #include "screenshot.h"
 
+#include "ui.h"
 #include "gpu.h"
 #include "util.h"
 #include "color.h"
@@ -754,10 +755,10 @@ namespace {
     void initialWindowSize(const Image& img, const ImGuiStyle& style, int& w, int& h) {
         float zoom = (float)kInitialZoom / 100.f;
 
-        w = (int)ceilf(200.f * gUiScale + style.ItemSpacing.x + img.w * zoom);
+        w = (int)ceilf(px(200_d) + style.ItemSpacing.x + img.w * zoom);
         h = (int)ceilf(img.h * zoom);
 
-        int minH = (int)(220.f * gUiScale);
+        int minH = pxi(220_d);
 
         if (h < minH) {
             h = minH;
@@ -954,7 +955,7 @@ namespace {
         // window that cannot collapse, and a child of one, is shown every
         // frame, and drawing into a hidden one would only be wasted
         ImGui::Begin("##shot", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoSavedSettings);
-        const float panelW = 200.f * gUiScale;
+        const float panelW = px(200_d);
 
         // +/- zoom, handled before the panel so the slider reflects it
         if (ImGui::IsKeyPressed(ImGuiKey_Equal) || ImGui::IsKeyPressed(ImGuiKey_KeypadAdd)) {
@@ -1031,7 +1032,7 @@ namespace {
 
 int mainScreenshot(StringView path) {
     gTool = "screenshot"_sv;
-    readUiScale();
+    initUiScale();
 
     // load first; any failure becomes an on-screen error panel, not a console
     // line, so it reads like a message from the compositor
@@ -1046,16 +1047,6 @@ int mainScreenshot(StringView path) {
         errText = Buffer(e.description());
     } catch (...) {
         errText = Buffer(Exception::current());
-    }
-
-    // Prepare the exact style that drawUi will use before sizing the native
-    // window. drawUi holds WindowPadding at zero while creating both children,
-    // so only SameLine's ItemSpacing separates the panel and image viewport.
-    ImGuiStyle uiStyle;
-
-    if (gUiScale != 1.f) {
-        uiStyle.FontScaleMain = gUiScale;
-        uiStyle.ScaleAllSizes(gUiScale);
     }
 
     int rc = 0;
@@ -1085,10 +1076,12 @@ int mainScreenshot(StringView path) {
         int winW, winH;
 
         if (loaded) {
-            initialWindowSize(img, uiStyle, winW, winH);
+            // sized with the style drawUi will use: WindowPadding at zero
+            // there, only SameLine's ItemSpacing parts the panel and the image
+            initialWindowSize(img, uiStyle(), winW, winH);
         } else {
-            winW = (int)(480.f * gUiScale);
-            winH = (int)(180.f * gUiScale);
+            winW = pxi(480_d);
+            winH = pxi(180_d);
         }
 
         plt::WindowOptions options;
@@ -1102,6 +1095,9 @@ int mainScreenshot(StringView path) {
         options.frame = &driver;
 
         plt::Window& window = *platform.createWindow(*shot, options);
+
+        // the window knows its output's scale, the ui follows it
+        followContentScale(window.info().contentScale);
 
         // the output size arrived with the platform's registry roundtrips;
         // only a window can report it, so the clamp lands as a resize
@@ -1132,7 +1128,7 @@ int mainScreenshot(StringView path) {
             setupLinearHdr(*shot, (u32)fbw, (u32)fbh);
         }
 
-        setupImGui(*shot, uiStyle, loaded && img.color.hdr);
+        setupImGui(*shot, loaded && img.color.hdr);
         gSdrWhiteNits = (float)img.color.sdrWhiteNits;
 
         if (loaded) {

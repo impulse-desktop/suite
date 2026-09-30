@@ -1,5 +1,6 @@
 #include "view.h"
 
+#include "ui.h"
 #include "gpu.h"
 #include "util.h"
 #include "pooled.h"
@@ -44,11 +45,11 @@ using namespace stl;
 namespace {
     // each side panel takes this share of the window's width
     constexpr float sideShare = .2f;
-    // the gutter around thumbnails, in logical px before the ui scale; the
-    // panels' padding and the corners' rounding
-    constexpr float gap = 8.f;
-    constexpr float padding = 12.f;
-    constexpr float rounding = 4.f;
+    // the gutter around thumbnails, the panels' padding and the corners'
+    // rounding, as design lengths
+    constexpr Design gap = 8_d;
+    constexpr Design padding = 12_d;
+    constexpr Design rounding = 4_d;
     // the panels sit a shade lighter than the canvas, hairlines part them
     // from it and the sections from each other; ImGui's own blue marks
     // the selection, as it does the menus
@@ -803,7 +804,7 @@ namespace {
     // and as tall as its proportion asks, the selected one framed. The
     // rows in view and a few beyond get their thumbnails decoded
     void ViewApp::drawGallery() {
-        float g = gap * gUiScale;
+        float g = px(gap);
         float innerW = max(1.f, ImGui::GetWindowWidth() - 2.f * g);
         u32 side = thumbSideFor(innerW);
         float viewH = ImGui::GetWindowHeight();
@@ -811,7 +812,7 @@ namespace {
         ImVec2 origin = ImGui::GetCursorScreenPos();
         ImDrawList* dl = ImGui::GetWindowDrawList();
         ImU32 dimColor = ImGui::GetColorU32(ImGuiCol_TextDisabled);
-        float corner = rounding * gUiScale;
+        float corner = px(rounding);
         float total = g;
         float currentTop = g;
         float currentH = 0.f;
@@ -894,11 +895,11 @@ namespace {
                 }
 
                 if (i == current) {
-                    float inset = gUiScale;
+                    float inset = px(1_d);
 
-                    dl->AddRect(ImVec2(p0.x - inset, p0.y - inset), ImVec2(p1.x + inset, p1.y + inset), accent, corner + inset, 0, 2.f * gUiScale);
+                    dl->AddRect(ImVec2(p0.x - inset, p0.y - inset), ImVec2(p1.x + inset, p1.y + inset), accent, corner + inset, 0, px(2_d));
                 } else if (hovered) {
-                    dl->AddRect(p0, p1, accentDim, corner, 0, gUiScale);
+                    dl->AddRect(p0, p1, accentDim, corner, 0, px(1_d));
                 }
             }
 
@@ -916,16 +917,16 @@ namespace {
     // file's own facts
     void ViewApp::drawInfo() {
         const Entry& entry = *entries[current];
-        float g = gap * gUiScale;
+        float g = px(gap);
         float keyW = ImGui::CalcTextSize("Dimensions").x + g;
         bool ready = shown == Load::Ready && shownIndex == current;
 
         // every row one frame tall, text sitting where a frame's would;
         // ImGui's own blues for the menu and its list
-        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(g, 5.f * gUiScale));
-        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, rounding * gUiScale);
-        ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, rounding * gUiScale);
-        ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(6.f * gUiScale, 4.f * gUiScale));
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, px(gap, 5_d));
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, px(rounding));
+        ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, px(rounding));
+        ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, px(6_d, 4_d));
         ImGui::PushStyleColor(ImGuiCol_Separator, hairline);
 
         // a section's title: a row with an arrow, no bar; the hairlines
@@ -1178,8 +1179,7 @@ namespace {
         ImGui::Begin("##view", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoSavedSettings);
 
         float sideW = floorf(vp->Size.x * sideShare);
-        float g = gap * gUiScale;
-        float pad = padding * gUiScale;
+        float pad = px(padding);
         bool left = panel && !fullscreen;
         bool right = info && !fullscreen;
         ImDrawList* fg = ImGui::GetForegroundDrawList();
@@ -1203,7 +1203,7 @@ namespace {
             ImGui::PushStyleColor(ImGuiCol_ChildBg, panelBg);
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(pad, pad));
             ImGui::BeginChild("info", ImVec2(sideW, 0.f), ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoScrollbar);
-            ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(g, 6.f * gUiScale));
+            ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, px(gap, 6_d));
             drawInfo();
             ImGui::PopStyleVar();
             ImGui::EndChild();
@@ -1233,7 +1233,7 @@ namespace {
 
 int mainView(int argc, char** argv) {
     gTool = "view"_sv;
-    readUiScale();
+    initUiScale();
 
     if (argc < 2) {
         sysE << "usage: im view <file|dir>..."_sv << endL;
@@ -1320,12 +1320,12 @@ int mainView(int argc, char** argv) {
         plt::Platform& platform = *plt::Platform::create(*shot);
         ImGuiPlt& imgui = *ImGuiPlt::create(*shot);
 
-        int winW = (int)(1000.f * gUiScale);
-        int winH = (int)(700.f * gUiScale);
+        int winW = pxi(1000_d);
+        int winH = pxi(700_d);
 
         if (!errText.empty()) {
-            winW = (int)(480.f * gUiScale);
-            winH = (int)(180.f * gUiScale);
+            winW = pxi(480_d);
+            winH = pxi(180_d);
         }
 
         plt::WindowOptions options;
@@ -1339,6 +1339,10 @@ int mainView(int argc, char** argv) {
         options.frame = &driver;
 
         plt::Window& window = *platform.createWindow(*shot, options);
+
+        // the window knows its output's scale, the ui follows it
+        followContentScale(window.info().contentScale);
+
         int clampedW = winW;
         int clampedH = winH;
 
@@ -1357,15 +1361,7 @@ int mainView(int argc, char** argv) {
         plt::WindowInfo bootInfo = window.info();
 
         setupVulkanWindow(*shot, surface, (int)bootInfo.width, (int)bootInfo.height, false);
-
-        ImGuiStyle uiStyle;
-
-        if (gUiScale != 1.f) {
-            uiStyle.FontScaleMain = gUiScale;
-            uiStyle.ScaleAllSizes(gUiScale);
-        }
-
-        setupImGui(*shot, uiStyle, false);
+        setupImGui(*shot, false);
 
         // the workers; their pool is joined before anything they may still
         // write to goes

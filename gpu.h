@@ -30,9 +30,6 @@ struct ImGuiStyle;
 
 // the tool's name, as its trace lines and panels say it: `im <tool>`
 extern stl::StringView gTool;
-// ui scale handed down from the compositor via IM_SCALE (its clients
-// otherwise render at scale 1, so the panel/text would be tiny on hidpi)
-extern float gUiScale;
 // the fault seam, configured from the tool's environment in the test build
 extern ChaosMonkey* gChaos;
 
@@ -97,9 +94,6 @@ void vkcAt(stl::StringView site, VkResult e);
 void traceText(stl::StringView what);
 void traceSize(stl::StringView what, int w, int h);
 
-// gUiScale from IM_SCALE, where the compositor set one
-void readUiScale();
-
 // what the tool wants of the device: an HDR swapchain (the colour space
 // extension), a buffer shared by another process (imported on the device
 // its UUID names, with the dma-buf extensions), and how many textures it
@@ -122,9 +116,9 @@ void setupVulkanWindow(stl::ObjPool& pool, VkSurfaceKHR surface, int w, int h, b
 // the HDR scene: the render pass ImGui draws into, its FP16 target, the
 // output stage and the image pipeline drawImage runs
 void setupLinearHdr(stl::ObjPool& pool, u32 width, u32 height);
-// ImGui's context and its Vulkan backend on the presenter (in the HDR
-// scene, with the scene's fragment stage)
-void setupImGui(stl::ObjPool& pool, const ImGuiStyle& style, bool hdr);
+// ImGui's context, at the ui scale, and its Vulkan backend on the
+// presenter (in the HDR scene, with the scene's fragment stage)
+void setupImGui(stl::ObjPool& pool, bool hdr);
 
 u32 findMemoryType(u32 typeBits, VkMemoryPropertyFlags props);
 

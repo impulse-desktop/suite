@@ -1,5 +1,6 @@
 #include "gpu.h"
 
+#include "ui.h"
 #include "util.h"
 #include "pooled.h"
 #include "imgui_plt.h"
@@ -36,7 +37,6 @@ struct wl_surface;
 using namespace stl;
 
 StringView gTool = "im"_sv;
-float gUiScale = 1.f;
 ChaosMonkey* gChaos = nullptr;
 
 VkAllocationCallbacks* gAlloc = nullptr;
@@ -698,16 +698,6 @@ void vkcAt(StringView site, VkResult e) {
     }
 }
 
-void readUiScale() {
-    if (const char* s = getenv("IM_SCALE")) {
-        double v = parseFloat(StringView(s));
-
-        if (v > 0.0) {
-            gUiScale = (float)v;
-        }
-    }
-}
-
 void traceText(StringView what) {
 #ifdef IM_FOR_TESTS
     sysO << "im "_sv << gTool << ": "_sv << what << endL;
@@ -1033,14 +1023,14 @@ void setupLinearHdr(ObjPool& pool, u32 width, u32 height) {
     gLinearHdr = true;
 }
 
-void setupImGui(ObjPool& pool, const ImGuiStyle& style, bool hdr) {
+void setupImGui(ObjPool& pool, bool hdr) {
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     pooledGuard(pool, [] {
         ImGui::DestroyContext();
     });
     ImGui::GetIO().IniFilename = nullptr;
-    ImGui::GetStyle() = style;
+    applyUiStyle();
 
     ImGui_ImplVulkan_InitInfo ii = {};
 
@@ -1328,7 +1318,7 @@ int drawErrorPanel(StringView msg) {
     ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(28, 28, 32, 255));
 
     ImGui::Begin("##err", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
-    float pad = 24.f * gUiScale;
+    float pad = px(24_d);
 
     ImGui::SetCursorPos(ImVec2(pad, pad));
     ImGui::BeginGroup();
@@ -1343,7 +1333,7 @@ int drawErrorPanel(StringView msg) {
     ImGui::Spacing();
     ImGui::Spacing();
 
-    if (ImGui::Button("Exit", ImVec2(120.f * gUiScale, 0)) || ImGui::IsKeyPressed(ImGuiKey_Escape) || ImGui::IsKeyPressed(ImGuiKey_Enter)) {
+    if (ImGui::Button("Exit", px(120_d, 0_d)) || ImGui::IsKeyPressed(ImGuiKey_Escape) || ImGui::IsKeyPressed(ImGuiKey_Enter)) {
         result = -1;
     }
 
@@ -1358,6 +1348,12 @@ int drawErrorPanel(StringView msg) {
 bool FrameDriver::frame(const plt::WindowInfo& info) {
     int nw = (int)info.width;
     int nh = (int)info.height;
+
+    // the window moved to an output of another scale: the ui follows,
+    // ImGui's part through a fresh style before its frame
+    if (followContentScale(info.contentScale)) {
+        applyUiStyle();
+    }
 
     if (gRebuild || gPresent.width != nw || gPresent.height != nh) {
         createSwapchain((u32)nw, (u32)nh);
