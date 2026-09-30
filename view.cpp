@@ -29,10 +29,11 @@
 using namespace stl;
 
 // im view <file|dir>...: the list on the left, the image in the middle,
-// the file's properties on the right. Decoding is done here and now, on
-// the one thread, a fresh sandboxed ImageMagick for every file: a
-// thumbnail for each row in view and a few beyond, kept by its index
-// until many have scrolled by; the shown image when it is selected.
+// the file's properties on the right. The whole directory is read at the
+// start: every file's bytes, and a thumbnail decoded from each, kept by
+// the file's index; nothing touches the disk after. The shown image is
+// decoded from the bytes in memory when it is selected, on the one
+// thread, a fresh sandboxed ImageMagick every time.
 
 namespace {
     // each side panel takes this share of the window's width
@@ -52,12 +53,6 @@ namespace {
     constexpr u32 thumbTexelsStep = 64;
     constexpr u32 thumbTexelsMin = 128;
     constexpr u32 thumbTexelsMax = 512;
-    // decoded thumbnails kept at most; over that, the ones farther than
-    // this many rows from the rows in view go
-    constexpr size_t maxThumbs = 256;
-    constexpr size_t thumbKeep = 64;
-    // the rows beyond the ones in view whose thumbnails are decoded ahead
-    constexpr size_t thumbAhead = 2;
     constexpr float zoomMin = 0.02f;
     constexpr float zoomMax = 32.f;
     constexpr float zoomStep = 1.25f;
@@ -68,10 +63,13 @@ namespace {
         Failed
     };
 
-    // one file of the list, with its thumbnail
+    // one file of the list: its bytes, read at the start (or why they
+    // could not be), and its thumbnail
     struct Entry {
         Buffer path;
         size_t nameAt = 0;
+        Buffer file;
+        Buffer error;
         Load thumb = Load::None;
         Texture thumbTex;
         u32 thumbW = 0;
@@ -140,20 +138,35 @@ namespace {
         img.rgba.xchg(out);
     }
 
-    // a file read, decoded and shrunk to the side, here and now. The
+    // every file's bytes into memory, once; a file that cannot be read
+    // keeps the reason instead
+    void readAll(Vector<Entry*>& entries) {
+        for (Entry* entry : entries) {
+            Buffer path(sv(entry->path));
+
+            try {
+                readFileContent(path, entry->file);
+            } catch (...) {
+                entry->error = Buffer(Exception::current());
+            }
+        }
+    }
+
+    // the entry's bytes decoded and shrunk to the side, here and now. The
     // decoder and its pool live for the one file: a failure spends the
     // decoder, and a module grown to a large image's pixel cache never
-    // shrinks. A failure is thrown, the decoder's own words
-    void decodeFile(const Entry& entry, u32 side, DecodedImage& out) {
+    // shrinks. A failure is thrown, the decoder's own words, or the
+    // reader's
+    void decodeEntry(const Entry& entry, u32 side, DecodedImage& out) {
         u64 began = nowNs();
-        Buffer path(sv(entry.path));
-        Buffer file;
 
-        readFileContent(path, file);
+        if (!entry.error.empty()) {
+            fail(sv(entry.error));
+        }
 
         ObjPool::Ref pool = ObjPool::fromMemory();
 
-        Decoder::create(*pool)->decode(sv(file), entry.name(), out);
+        Decoder::create(*pool)->decode(sv(entry.file), entry.name(), out);
 
         u64 decoded = nowNs();
 
@@ -321,9 +334,6 @@ namespace {
         size_t current = 0;
         // what a Vulkan image may measure on this device
         u32 maxSide = 4096;
-        // the rows in view, from the last frame's list
-        size_t viewFirst = 0;
-        size_t viewLast = 0;
         // the shown image's texture, or why there is none
         Load shown = Load::None;
         size_t shownIndex = (size_t)-1;
@@ -341,7 +351,6 @@ namespace {
         bool panel = true;
         bool info = true;
         bool scrollToCurrent = true;
-        size_t readyThumbs = 0;
         int result = 0;
         // the shown file's own facts, for the properties panel: its size
         // (-1 when unknown) and modification time
@@ -354,7 +363,6 @@ namespace {
         void show(size_t index);
         void step(long delta);
         void retire(Texture& texture);
-        void evictThumbs();
         void setZoom(float value);
         void fitView();
         void statFile();
@@ -372,13 +380,14 @@ namespace {
         }
     }
 
-    // a row's thumbnail, decoded and uploaded now, kept by the row's index
+    // a row's thumbnail, decoded from the bytes in memory and uploaded
+    // now, kept by the row's index
     void ViewApp::loadThumb(size_t index, u32 side) {
         Entry& entry = *entries[index];
         DecodedImage image;
 
         try {
-            decodeFile(entry, side, image);
+            decodeEntry(entry, side, image);
         } catch (...) {
             Buffer error(Exception::current());
 
@@ -394,35 +403,7 @@ namespace {
         entry.thumbH = image.height;
         entry.thumbSide = side;
         entry.thumb = Load::Ready;
-        readyThumbs++;
         traceText(sv(StringBuilder() << "thumbnail "_sv << entry.name()));
-    }
-
-    // thumbnails far from the rows in view go when there are many; the
-    // ones around the view stay, so scrolling back a little decodes
-    // nothing again. The device is waited for once, for the batch
-    void ViewApp::evictThumbs() {
-        if (readyThumbs <= maxThumbs) {
-            return;
-        }
-
-        size_t before = readyThumbs;
-        size_t first = viewFirst;
-        size_t last = viewLast;
-
-        vkDeviceWaitIdle(gDevice);
-
-        for (size_t i = 0; i < entries.length(); i++) {
-            Entry& entry = *entries[i];
-
-            if (entry.thumb == Load::Ready && (i + thumbKeep < first || i > last + thumbKeep)) {
-                destroyTexture(entry.thumbTex);
-                entry.thumb = Load::None;
-                readyThumbs--;
-            }
-        }
-
-        traceText(sv(StringBuilder() << "evicted "_sv << (i64)(before - readyThumbs) << " thumbnails"_sv));
     }
 
     // the selected image, decoded and uploaded now
@@ -438,7 +419,7 @@ namespace {
         DecodedImage image;
 
         try {
-            decodeFile(entry, maxSide, image);
+            decodeEntry(entry, maxSide, image);
         } catch (...) {
             shown = Load::Failed;
             shownIndex = index;
@@ -569,7 +550,6 @@ namespace {
 
     // the list: thumbnails one under another, each as wide as the list
     // and as tall as its proportion asks, the selected one's row filled.
-    // The rows in view and a few beyond get their thumbnails decoded now.
     // The thumbnails bulge towards the pointer: each scales about its own
     // centre by how close the pointer is, the nearest most, so they are
     // drawn from the far ones to the nearest, without a sort: the rows
@@ -641,20 +621,10 @@ namespace {
                 lastBottom = bottom;
             }
 
-            // a row is worth an item when it is in view or about to be
-            bool near = bottom > scrollY - (float)thumbAhead * (innerW + g) && top < scrollY + viewH + (float)thumbAhead * (innerW + g);
-
-            if (near) {
-                // decoded at a size the list has since outgrown: again
-                if (entry.thumb == Load::Ready && entry.thumbSide * 4 < side * 3) {
-                    retire(entry.thumbTex);
-                    entry.thumb = Load::None;
-                    readyThumbs--;
-                }
-
-                if (entry.thumb == Load::None) {
-                    loadThumb(i, side);
-                }
+            // decoded at a size the list has since outgrown: again, from
+            // the bytes in memory
+            if (inView && entry.thumb == Load::Ready && entry.thumbSide * 4 < side * 3) {
+                loadThumb(i, side);
             }
 
             if (inView) {
@@ -760,9 +730,6 @@ namespace {
         }
 
         fg->PopClipRect();
-
-        viewFirst = first;
-        viewLast = last;
     }
 
     // the properties panel: sections that fold to their title. The image's
@@ -1039,7 +1006,6 @@ namespace {
         }
 
         ImGui::End();
-        evictThumbs();
 
         return result;
     }
@@ -1181,7 +1147,7 @@ int mainView(int argc, char** argv) {
 
         VulkanWants wants;
 
-        wants.textures = (u32)maxThumbs + 4;
+        wants.textures = (u32)app.entries.length() + 4;
         setupVulkan(*shot, wants);
 
         VkSurfaceKHR surface = createSurface(window);
@@ -1210,6 +1176,18 @@ int mainView(int argc, char** argv) {
 
         if (errText.empty()) {
             driver.ui = &app;
+
+            // the whole directory into memory before the first frame: the
+            // bytes, then a thumbnail of each at the list's width
+            readAll(app.entries);
+
+            float innerW = max(1.f, floorf((float)bootInfo.width * sideShare) - 2.f * px(gap));
+            u32 side = thumbSideFor((innerW + 2.f * px(gap)) * (1.f + bulge));
+
+            for (size_t i = 0; i < app.entries.length(); i++) {
+                app.loadThumb(i, side);
+            }
+
             app.show(app.current);
         } else {
             nothing.error = &errText;
