@@ -32,9 +32,18 @@ else
     # cairo and fontconfig are the vendored plt's own e2e clients' wants: its
     # graph names them when it is imported, whether they build or not
     # wabt's wasm2c turns the vendored image decoder into C
-    apt-get install --yes --no-install-recommends python3 pkg-config glslang-tools wabt \
+    apt-get install --yes --no-install-recommends python3 pkg-config glslang-tools wabt curl ca-certificates \
         libwayland-dev libwayland-bin wayland-protocols libxkbcommon-dev libcairo2-dev libfontconfig-dev \
         libvulkan-dev libpng-dev libjxl-dev
+    # the package leaves out the includes its wasm2c runtime is made of;
+    # they come from wabt's tree, at the packaged version
+    rt=/usr/share/wabt/wasm2c
+    version=$(wasm2c --version)
+    for inc in $(grep -ho '"wasm-rt[^"]*\.inc"' "$rt"/*.c | tr -d '"' | sort -u); do
+        if [ ! -f "$rt/$inc" ]; then
+            curl -fsSL "https://raw.githubusercontent.com/WebAssembly/wabt/$version/wasm2c/$inc" -o "$rt/$inc"
+        fi
+    done
     if [ "$toolchain" = gcc ]; then
         export CC=gcc CXX=g++
     else
