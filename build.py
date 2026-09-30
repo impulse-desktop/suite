@@ -280,14 +280,11 @@ for scenario in sorted(set(build.glob("$(S)/tst/*.py")) - set(harness)):
     if int(hashlib.sha1(name.encode()).hexdigest(), 16) % shard_count != shard_index:
         continue
     out = f"$(B)/test-results/{name}.json"
-    # the binary and the helpers by their directory, not by name: a program's
-    # output named in a command's line makes the runner build that program
-    # (and its libraries, the generated decoder above all) a second time as
-    # a host tool; the deps below order the scenario after them all the same
     cmd = [
         "python3", "$(S)/dev/run_test.py",
         "--scenario", scenario,
-        "--build-dir", "$(B)",
+        "--binary", "$(B)/im_test",
+        "--helpers", "$(B)/e2e",
         "--out", out,
     ]
     if flags.runtime:

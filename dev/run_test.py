@@ -71,8 +71,8 @@ def run(name, args):
     artifacts = tempfile.mkdtemp(prefix="im-")
     env = {
         **os.environ,
-        "IM_E2E_BINARY": os.path.join(os.path.abspath(args.build_dir), "im_test"),
-        "IM_E2E_HELPERS": os.path.join(os.path.abspath(args.build_dir), "e2e"),
+        "IM_E2E_BINARY": os.path.abspath(args.binary),
+        "IM_E2E_HELPERS": os.path.abspath(args.helpers),
         "IM_E2E_ARTIFACTS": artifacts,
         # the fixture, tst/session.py, next to the scenario
         "PYTHONPATH": os.path.dirname(os.path.abspath(args.scenario)),
@@ -122,7 +122,8 @@ def run(name, args):
 def main():
     parser = argparse.ArgumentParser(description="one scenario run -> JSON verdict")
     parser.add_argument("--scenario", required=True)
-    parser.add_argument("--build-dir", required=True, help="where the tools binary under test (im_test) and the scenarios' helpers (e2e/: devices, jxl_dump, device_uuid) are")
+    parser.add_argument("--binary", required=True, help="the tools binary under test (im_test)")
+    parser.add_argument("--helpers", required=True, help="the directory of the scenarios' helpers: devices, jxl_dump, device_uuid")
     parser.add_argument("--out", required=True)
     parser.add_argument("--evidence", default="", help="where a failed scenario's captures and logs are kept, under its name")
     parser.add_argument("--runtime", default="", help="where the scenario's runtime dir goes (short: it holds Wayland sockets)")
