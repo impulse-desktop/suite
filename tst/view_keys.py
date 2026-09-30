@@ -73,11 +73,12 @@ with Session("view_keys", tool="view") as s:
     s.drag(cx, cy, cx + 40, cy + 30)
     s.tap(KEY_ZERO)
     s.said("fit", 2)
-    # a window narrower than the gallery leaves the canvas nothing to draw in
+    # a window narrower than the gallery leaves the canvas nothing to draw
+    # in; the tool keeps drawing the rest (a resize back right after would
+    # race the compositor's own bookkeeping of the first one: sway drops it)
     node = s.window()
     s.ipc(f'[con_id={node["id"]}] resize set 200 px 150 px')
     s.said("presenting 200x150")
-    s.ipc(f'[con_id={node["id"]}] resize set {r["width"]} px {r["height"]} px')
-    s.said(f"presenting {r['width']}x{r['height']}", 2)
+    s.settled("tiny")
     s.close()
     print("OK: zoom, rotation, fullscreen, the toggles, a drag and a tiny window work")
