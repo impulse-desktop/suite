@@ -14,7 +14,7 @@ with Session("view_keys", tool="view") as s:
     s.focus()
     s.said("showing a.png 64x48")
     r = s.window()["rect"]
-    canvas = (250, 0, r["width"] - 250, r["height"] - 30)
+    canvas = (210, 0, r["width"] - 420, r["height"] - 30)
 
     def reddish(red, green, blue):
         return red >= 100 and green <= 80 and blue <= 80
@@ -60,8 +60,8 @@ with Session("view_keys", tool="view") as s:
     s.wait(lambda: s.size() == (r["width"], r["height"]), "the window back at its size")
     s.tap(KEY_TAB)
     s.said("panel off")
-    # the canvas grew by the gallery's width: the image sits 120 px further left
-    s.wait(lambda: (b := colour_box(s.capture("nopanel", region=canvas), reddish)) and before[0] - b[0] >= 100, "the image moved left")
+    # the canvas grew by the list's 200 px: the centred image sits 100 px further left
+    s.wait(lambda: (b := colour_box(s.capture("nopanel", region=canvas), reddish)) and before[0] - b[0] >= 95, "the image moved left")
     s.tap(KEY_TAB)
     s.said("panel on")
     s.tap(KEY_B)

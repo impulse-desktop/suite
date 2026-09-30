@@ -20,6 +20,7 @@
 #include <std/mem/obj_pool.h>
 
 #include <math.h>
+#include <time.h>
 #include <errno.h>
 #include <imgui.h>
 #include <string.h>
@@ -32,25 +33,34 @@
 
 using namespace stl;
 
-// im view <file|dir>...: the gallery on the left, the image on the right.
-// Decoding runs on a thread pool, a fresh sandboxed ImageMagick for every
-// file; the results come back to the platform thread through its loop's
-// doorbell, where the textures are made. Thumbnails are decoded for the rows in view
-// (and dropped again when many have scrolled by), the shown image and its
-// two neighbours are kept decoded.
+// im view <file|dir>...: the list on the left, the image in the middle,
+// the file's properties on the right. Decoding runs on a thread pool, a
+// fresh sandboxed ImageMagick for every file; the results come back to
+// the platform thread through its loop's doorbell, where the textures are
+// made. Thumbnails are decoded for the rows in view and a few beyond (and
+// dropped again when many have scrolled by), the shown image and its two
+// neighbours are kept decoded.
 
 namespace {
-    // the gallery's row: a thumbnail box and the name beside it, in
-    // logical px before the ui scale
-    constexpr float thumbBox = 96.f;
-    constexpr float rowPad = 4.f;
-    constexpr float panelWidth = 240.f;
-    // a thumbnail's long side in texels
-    constexpr u32 thumbTexels = 192;
+    // each side panel takes this share of the window's width
+    constexpr float sideShare = .2f;
+    // the gutter around thumbnails and the panels' padding, in logical px
+    // before the ui scale; the status line's own, tighter
+    constexpr float gap = 8.f;
+    constexpr float statusPad = 4.f;
+    // a thumbnail fills the list's width; until it is decoded its row is
+    // this tall for its width, a photo's proportion
+    constexpr float placeholderAspect = .75f;
+    // a thumbnail's long side in texels follows the list's width, in steps
+    constexpr u32 thumbTexelsStep = 64;
+    constexpr u32 thumbTexelsMin = 128;
+    constexpr u32 thumbTexelsMax = 512;
     // decoded thumbnails kept at most; the rows in view are re-requested
     constexpr size_t maxThumbs = 256;
     // the rows around the ones in view whose thumbnails are still wanted
     constexpr size_t thumbMargin = 8;
+    // the rows beyond the ones in view whose thumbnails are decoded ahead
+    constexpr size_t thumbAhead = 2;
     constexpr float zoomMin = 0.02f;
     constexpr float zoomMax = 32.f;
     constexpr float zoomStep = 1.25f;
@@ -70,6 +80,9 @@ namespace {
         Texture thumbTex;
         u32 thumbW = 0;
         u32 thumbH = 0;
+        // the long side the thumbnail was asked at: a list grown much
+        // wider since asks again
+        u32 thumbSide = 0;
         // the frame the thumbnail was last drawn in, for the eviction
         u64 drawnAt = 0;
         // the full image: decoded and cached, or failed with this reason
@@ -89,6 +102,8 @@ namespace {
     struct Job {
         size_t index = 0;
         bool thumbnail = false;
+        // a thumbnail's long side in texels
+        u32 side = 0;
         Buffer path;
         Buffer name;
         DecodedImage image;
@@ -190,7 +205,7 @@ namespace {
                 ObjPool::Ref pool = ObjPool::fromMemory();
 
                 Decoder::create(*pool)->decode(sv(file), sv(job.name), job.image);
-                shrinkToSide(job.image, job.thumbnail ? thumbTexels : shared.maxSide);
+                shrinkToSide(job.image, job.thumbnail ? job.side : shared.maxSide);
                 job.ok = true;
             } catch (...) {
                 job.error = Buffer(Exception::current());
@@ -307,6 +322,43 @@ namespace {
 
     // the viewer: its list, the shown image, the view on it, and the
     // exchange with the workers
+    // a thumbnail's long side in texels for a list this wide, in steps,
+    // so a list a few px wider asks nothing new
+    u32 thumbSideFor(float innerW) {
+        u32 side = (u32)ceilf(innerW / (float)thumbTexelsStep) * thumbTexelsStep;
+
+        return side < thumbTexelsMin ? thumbTexelsMin : side > thumbTexelsMax ? thumbTexelsMax : side;
+    }
+
+    // a row's height for the list's width: the thumbnail's proportion, or a
+    // photo's until it is decoded; whole px, so rows do not blur
+    float rowHeightFor(const Entry& entry, float innerW) {
+        float aspect = entry.thumb == Load::Ready && entry.thumbW ? (float)entry.thumbH / (float)entry.thumbW : placeholderAspect;
+
+        return max(1.f, floorf(innerW * aspect + .5f));
+    }
+
+    // "1.5 MB", or the bytes themselves under a KB
+    void appendBytes(StringBuilder& text, i64 bytes) {
+        static const StringView units[] = {"KB"_sv, "MB"_sv, "GB"_sv, "TB"_sv};
+
+        if (bytes < 1024) {
+            text << bytes << " bytes"_sv;
+
+            return;
+        }
+
+        i64 tenths = bytes * 10 / 1024;
+        size_t unit = 0;
+
+        while (tenths >= 10240 && unit + 1 < sizeof(units) / sizeof(units[0])) {
+            tenths /= 1024;
+            unit++;
+        }
+
+        text << tenths / 10 << "."_sv << tenths % 10 << " "_sv << units[unit];
+    }
+
     struct ViewApp final: Ui, plt::TimerCallback {
         ObjPool* pool = nullptr;
         plt::Window* window = nullptr;
@@ -333,11 +385,16 @@ namespace {
         int rotation = 0;
         bool fullscreen = false;
         bool panel = true;
+        bool info = true;
         bool statusBar = true;
         bool scrollToCurrent = true;
         u64 frames = 0;
         size_t readyThumbs = 0;
         int result = 0;
+        // the shown file's own facts, for the properties panel: its size
+        // (-1 when unknown) and modification time
+        i64 fileBytes = -1;
+        Buffer fileModified;
 
         int frame() override;
         void ready() override;
@@ -345,7 +402,7 @@ namespace {
         Job* takeJob();
         void recycle(Job* job);
         void submit(Job* job);
-        void requestThumb(size_t index);
+        void requestThumb(size_t index, u32 side);
         void requestFull(size_t index);
         void apply(Job& job);
         void adopt(Job& job);
@@ -357,9 +414,11 @@ namespace {
         void evictCache();
         void setZoom(float value);
         void fitView();
+        void statFile();
         void keys();
-        void drawGallery(float rowH);
+        void drawGallery();
         void drawCanvas();
+        void drawInfo();
         void drawStatus();
     };
 
@@ -399,15 +458,17 @@ namespace {
         });
     }
 
-    void ViewApp::requestThumb(size_t index) {
+    void ViewApp::requestThumb(size_t index, u32 side) {
         Entry& entry = *entries[index];
 
         entry.thumb = Load::Pending;
+        entry.thumbSide = side;
 
         Job* job = takeJob();
 
         job->index = index;
         job->thumbnail = true;
+        job->side = side;
         submit(job);
     }
 
@@ -591,6 +652,7 @@ namespace {
         Entry& entry = *entries[index];
 
         traceText(sv(StringBuilder() << "selected "_sv << entry.name()));
+        statFile();
 
         if (entry.full == Load::Ready) {
             for (Job* job : cache) {
@@ -702,74 +764,203 @@ namespace {
             traceText(panel ? "panel on"_sv : "panel off"_sv);
         }
 
+        if (ImGui::IsKeyPressed(ImGuiKey_I)) {
+            info = !info;
+            traceText(info ? "info on"_sv : "info off"_sv);
+        }
+
         if (ImGui::IsKeyPressed(ImGuiKey_B)) {
             statusBar = !statusBar;
             traceText(statusBar ? "status on"_sv : "status off"_sv);
         }
     }
 
-    void ViewApp::drawGallery(float rowH) {
-        float pad = rowPad * gUiScale;
-        float box = rowH - 2.f * pad;
+    // the shown file's facts, read once per selection
+    void ViewApp::statFile() {
+        struct stat st;
+
+        fileBytes = -1;
+        fileModified = Buffer();
+
+        if (stat(entries[current]->path.cStr(), &st) != 0) {
+            return;
+        }
+
+        fileBytes = (i64)st.st_size;
+
+        struct tm tm;
+        char stamp[32];
+
+        localtime_r(&st.st_mtime, &tm);
+
+        if (strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M", &tm)) {
+            fileModified = Buffer(StringView(stamp));
+        }
+    }
+
+    // the list: thumbnails one under another, each as wide as the list
+    // and as tall as its proportion asks, the selected one framed. The
+    // rows in view and a few beyond get their thumbnails decoded
+    void ViewApp::drawGallery() {
+        float g = gap * gUiScale;
+        float innerW = max(1.f, ImGui::GetWindowWidth() - 2.f * g);
+        u32 side = thumbSideFor(innerW);
+        float viewH = ImGui::GetWindowHeight();
+        size_t count = entries.length();
+        ImVec2 origin = ImGui::GetCursorScreenPos();
         ImDrawList* dl = ImGui::GetWindowDrawList();
-        ImU32 textColor = ImGui::GetColorU32(ImGuiCol_Text);
         ImU32 dimColor = ImGui::GetColorU32(ImGuiCol_TextDisabled);
-        float textH = ImGui::GetTextLineHeight();
+        float rounding = 3.f * gUiScale;
+        float total = g;
+        float currentTop = g;
+        float currentH = 0.f;
+
+        for (size_t i = 0; i < count; i++) {
+            float h = rowHeightFor(*entries[i], innerW);
+
+            if (i == current) {
+                currentTop = total;
+                currentH = h;
+            }
+
+            total += h + g;
+        }
+
+        // the list's extent, for the scrolling; the rows are placed by hand
+        ImGui::Dummy(ImVec2(innerW, total));
 
         if (scrollToCurrent) {
-            ImGui::SetScrollY((float)current * rowH - (ImGui::GetWindowHeight() - rowH) / 2.f);
+            ImGui::SetScrollY(currentTop - (viewH - currentH) / 2.f);
             scrollToCurrent = false;
         }
 
-        size_t first = entries.length();
+        float scrollY = clampf(ImGui::GetScrollY(), 0.f, max(0.f, total - viewH));
+        size_t first = count;
         size_t last = 0;
-        ImGuiListClipper clipper;
+        float top = g;
 
-        clipper.Begin((int)entries.length(), rowH);
+        for (size_t i = 0; i < count; i++) {
+            Entry& entry = *entries[i];
+            float h = rowHeightFor(entry, innerW);
+            float bottom = top + h;
+            bool inView = bottom > scrollY && top < scrollY + viewH;
 
-        while (clipper.Step()) {
-            for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; i++) {
-                Entry& entry = *entries[(size_t)i];
+            if (inView) {
+                first = min(first, i);
+                last = max(last, i);
+            }
 
-                first = min(first, (size_t)i);
-                last = max(last, (size_t)i);
-                ImGui::PushID(i);
+            // a row is worth an item when it is in view or about to be
+            bool near = bottom > scrollY - (float)thumbAhead * (innerW + g) && top < scrollY + viewH + (float)thumbAhead * (innerW + g);
 
-                ImVec2 pos = ImGui::GetCursorScreenPos();
-
-                if (ImGui::Selectable("##entry", (size_t)i == current, 0, ImVec2(0, rowH))) {
-                    show((size_t)i);
+            if (near) {
+                // decoded at a size the list has since outgrown: again
+                if (entry.thumb == Load::Ready && entry.thumbSide * 4 < side * 3) {
+                    retire(entry.thumbTex);
+                    entry.thumb = Load::None;
+                    readyThumbs--;
                 }
 
                 if (entry.thumb == Load::None) {
-                    requestThumb((size_t)i);
+                    requestThumb(i, side);
+                }
+            }
+
+            if (inView) {
+                ImVec2 p0(origin.x + g, origin.y + top);
+                ImVec2 p1(p0.x + innerW, p0.y + h);
+
+                ImGui::SetCursorScreenPos(p0);
+                ImGui::PushID((int)i);
+
+                if (ImGui::InvisibleButton("##row", ImVec2(innerW, h))) {
+                    show(i);
                 }
 
-                if (entry.thumb == Load::Ready) {
-                    float scale = min(box / (float)entry.thumbW, box / (float)entry.thumbH);
-                    float w = (float)entry.thumbW * scale;
-                    float h = (float)entry.thumbH * scale;
-                    ImVec2 p0(pos.x + pad + (box - w) / 2.f, pos.y + pad + (box - h) / 2.f);
+                bool hovered = ImGui::IsItemHovered();
 
-                    dl->AddImage((ImTextureID)entry.thumbTex.ds, p0, ImVec2(p0.x + w, p0.y + h));
+                ImGui::PopID();
+
+                if (entry.thumb == Load::Ready) {
+                    dl->AddImageRounded((ImTextureID)entry.thumbTex.ds, p0, p1, ImVec2(0, 0), ImVec2(1, 1), IM_COL32_WHITE, rounding);
                     entry.drawnAt = frames;
                 } else {
                     const char* mark = entry.thumb == Load::Failed ? "?" : "\xe2\x80\xa6";
+                    ImVec2 extent = ImGui::CalcTextSize(mark);
 
-                    dl->AddText(ImVec2(pos.x + pad + box / 2.f - 4.f, pos.y + pad + box / 2.f - textH / 2.f), dimColor, mark);
+                    dl->AddRectFilled(p0, p1, IM_COL32(255, 255, 255, 10), rounding);
+                    dl->AddText(ImVec2(p0.x + (innerW - extent.x) / 2.f, p0.y + (h - extent.y) / 2.f), dimColor, mark);
                 }
 
-                StringView name = entry.name();
+                if (i == current) {
+                    float inset = gUiScale;
 
-                dl->AddText(ImVec2(pos.x + 2.f * pad + box, pos.y + (rowH - textH) / 2.f), textColor, (const char*)name.begin(), (const char*)name.end());
-                ImGui::PopID();
+                    dl->AddRect(ImVec2(p0.x - inset, p0.y - inset), ImVec2(p1.x + inset, p1.y + inset), IM_COL32(120, 160, 230, 255), rounding + inset, 0, 2.f * gUiScale);
+                } else if (hovered) {
+                    dl->AddRect(p0, p1, IM_COL32(255, 255, 255, 48), rounding, 0, gUiScale);
+                }
             }
+
+            top = bottom + g;
         }
 
         LockGuard lock(shared.mutex);
 
         shared.wantFirst = first;
         shared.wantLast = last;
+    }
+
+    // the properties panel: sections that fold to their title, the file's
+    // own facts first; the image's come later
+    void ViewApp::drawInfo() {
+        const Entry& entry = *entries[current];
+        float g = gap * gUiScale;
+
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(g, 5.f * gUiScale));
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 3.f * gUiScale);
+        ImGui::PushStyleColor(ImGuiCol_Header, IM_COL32(255, 255, 255, 12));
+        ImGui::PushStyleColor(ImGuiCol_HeaderHovered, IM_COL32(255, 255, 255, 22));
+        ImGui::PushStyleColor(ImGuiCol_HeaderActive, IM_COL32(255, 255, 255, 32));
+
+        bool open = ImGui::CollapsingHeader("File", ImGuiTreeNodeFlags_DefaultOpen);
+
+        ImGui::PopStyleColor(3);
+        ImGui::PopStyleVar(2);
+
+        if (open && ImGui::BeginTable("file", 2, ImGuiTableFlags_SizingStretchProp)) {
+            ImGui::TableSetupColumn("key", ImGuiTableColumnFlags_WidthFixed, ImGui::CalcTextSize("Modified").x + g);
+            ImGui::TableSetupColumn("value", ImGuiTableColumnFlags_WidthStretch);
+
+            auto row = [&](const char* key, StringView value) {
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                ImGui::TextDisabled("%s", key);
+                ImGui::TableSetColumnIndex(1);
+                ImGui::PushTextWrapPos(0.f);
+                ImGui::TextUnformatted((const char*)value.begin(), (const char*)value.end());
+                ImGui::PopTextWrapPos();
+            };
+
+            StringView whole = sv(entry.path);
+
+            row("Name", entry.name());
+            // the path up to the name's slash; a bare name is of the working
+            // directory, a name under the root of "/"
+            row("Folder", entry.nameAt == 0 ? "."_sv : entry.nameAt == 1 ? "/"_sv : StringView(whole.begin(), whole.begin() + entry.nameAt - 1));
+
+            if (fileBytes >= 0) {
+                auto& text = sb();
+
+                appendBytes(text, fileBytes);
+                row("Size", sv(text));
+            }
+
+            if (!fileModified.empty()) {
+                row("Modified", sv(fileModified));
+            }
+
+            ImGui::EndTable();
+        }
     }
 
     void ViewApp::drawCanvas() {
@@ -849,7 +1040,7 @@ namespace {
         } else if (shown != Load::Ready || shownIndex != current) {
             text << "decoding "_sv << entry.name();
         } else {
-            text << entry.name() << "   "_sv << (i64)texW << "x"_sv << (i64)texH << "   "_sv << (i64)(zoom * 100.f + .5f) << "%"_sv;
+            text << (i64)texW << "x"_sv << (i64)texH << "   "_sv << (i64)(zoom * 100.f + .5f) << "%"_sv;
         }
 
         text << "   "_sv << (i64)(current + 1) << "/"_sv << (i64)entries.length();
@@ -872,26 +1063,52 @@ namespace {
         // frame, and drawing into a hidden one would only be wasted
         ImGui::Begin("##view", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoSavedSettings);
 
-        float statusH = statusBar ? ImGui::GetTextLineHeight() + 2.f * rowPad * gUiScale : 0.f;
-        float rowH = (thumbBox + 2.f * rowPad) * gUiScale;
+        float statusH = statusBar ? ImGui::GetTextLineHeight() + 2.f * statusPad * gUiScale : 0.f;
+        float sideW = floorf(vp->Size.x * sideShare);
+        float g = gap * gUiScale;
+        bool left = panel && !fullscreen;
+        bool right = info && !fullscreen;
+        // the panels sit a shade lighter than the canvas, a hairline
+        // between them and it; no frames
+        const ImU32 panelBg = IM_COL32(33, 34, 39, 255);
+        const ImU32 hairline = IM_COL32(255, 255, 255, 20);
+        ImDrawList* fg = ImGui::GetForegroundDrawList();
 
-        if (panel && !fullscreen) {
-            ImGui::BeginChild("gallery", ImVec2(panelWidth * gUiScale, -statusH), ImGuiChildFlags_Borders);
-            drawGallery(rowH);
+        if (left) {
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, panelBg);
+            ImGui::BeginChild("gallery", ImVec2(sideW, -statusH), 0, ImGuiWindowFlags_NoScrollbar);
+            drawGallery();
             ImGui::EndChild();
+            ImGui::PopStyleColor();
             ImGui::SameLine();
+            fg->AddLine(ImVec2(vp->Pos.x + sideW, vp->Pos.y), ImVec2(vp->Pos.x + sideW, vp->Pos.y + vp->Size.y - statusH), hairline);
         }
 
-        ImGui::BeginChild("canvas", ImVec2(0, -statusH), 0, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        ImGui::BeginChild("canvas", ImVec2(right ? -sideW : 0.f, -statusH), 0, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
         drawCanvas();
         ImGui::EndChild();
 
+        if (right) {
+            ImGui::SameLine();
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, panelBg);
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(g, g));
+            ImGui::BeginChild("info", ImVec2(sideW, -statusH), ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoScrollbar);
+            ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(g, 4.f * gUiScale));
+            drawInfo();
+            ImGui::PopStyleVar();
+            ImGui::EndChild();
+            ImGui::PopStyleVar();
+            ImGui::PopStyleColor();
+            fg->AddLine(ImVec2(vp->Pos.x + vp->Size.x - sideW, vp->Pos.y), ImVec2(vp->Pos.x + vp->Size.x - sideW, vp->Pos.y + vp->Size.y - statusH), hairline);
+        }
+
         if (statusBar) {
-            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(rowPad * gUiScale, rowPad * gUiScale));
-            ImGui::BeginChild("status", ImVec2(0, statusH), ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding);
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(g, statusPad * gUiScale));
+            ImGui::BeginChild("status", ImVec2(0, statusH), ImGuiChildFlags_AlwaysUseWindowPadding);
             drawStatus();
             ImGui::EndChild();
             ImGui::PopStyleVar();
+            fg->AddLine(ImVec2(vp->Pos.x, vp->Pos.y + vp->Size.y - statusH), ImVec2(vp->Pos.x + vp->Size.x, vp->Pos.y + vp->Size.y - statusH), hairline);
         }
 
         ImGui::End();

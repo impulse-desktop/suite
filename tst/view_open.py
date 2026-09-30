@@ -19,9 +19,10 @@ with Session("view_open", tool="view") as s:
     s.said("showing a.png 64x48")
     for name in ("a.png", "b.png", "c.png"):
         s.said(f"thumbnail {name}")
-    # the canvas is right of the 240 px gallery, above the status line
+    # the canvas sits between the list and the properties panel, a fifth
+    # of the width (200 px) each, above the status line
     r = s.window()["rect"]
-    canvas = (250, 0, r["width"] - 250, r["height"] - 30)
+    canvas = (210, 0, r["width"] - 420, r["height"] - 30)
 
     def shows(rgb, count, label):
         s.wait(lambda: near(s.capture(label, region=canvas), rgb) >= count, f"the canvas showing {label}")
@@ -46,8 +47,10 @@ with Session("view_open", tool="view") as s:
     s.tap(KEY_BACKSPACE)
     s.said("selected a.png", 4)
     s.tap(KEY_LEFT)  # already first: stays
-    # the gallery's rows are 104 px tall; the third row is c.png
-    s.click(120, 260)
+    # the list's rows are as wide as the list (184 px) and as tall as the
+    # image's proportion, 8 px apart: a.png and b.png 138 px, c.png 184 px;
+    # the third row starts 300 px down
+    s.click(100, 400)
     s.said("selected c.png", 2)
     shows((0, 0, 255), 900, "c-clicked")
     s.close()

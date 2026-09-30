@@ -1,6 +1,6 @@
 """IMGUI_SCALE=2, as a hidpi compositor hands it down: the window asks
-for twice the size and is held to 90% of the output, the gallery's rows
-are twice as tall."""
+for twice the size and is held to 90% of the output, the list's gaps are
+twice as wide."""
 
 from session import Session, write_png
 
@@ -20,7 +20,8 @@ with Session("view_scale", tool="view") as s:
     assert s.size() == (w, h), f"the window was not held to 90% of the output ({s.size()})"
     s.said("showing a.png 64x48")
     s.settled("scaled")
-    # rows are 208 px tall now: the second row's middle is c.png's neighbour b.png
+    # the list is 230 px wide, its rows 198x149 with 16 px gaps: the second
+    # row, b.png, spans 181..330 px
     s.click(120, 312)
     s.said("selected b.png")
     s.close()
