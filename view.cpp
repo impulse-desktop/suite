@@ -44,9 +44,18 @@ using namespace stl;
 namespace {
     // each side panel takes this share of the window's width
     constexpr float sideShare = .2f;
-    // the gutter around thumbnails and the panels' padding, in logical px
-    // before the ui scale
+    // the gutter around thumbnails, in logical px before the ui scale; the
+    // panels' padding and the corners' rounding
     constexpr float gap = 8.f;
+    constexpr float padding = 12.f;
+    constexpr float rounding = 4.f;
+    // the panels sit a shade lighter than the canvas, hairlines part them
+    // from it and the sections from each other; ImGui's own blue marks
+    // the selection, as it does the menus
+    constexpr ImU32 panelBg = IM_COL32(33, 34, 39, 255);
+    constexpr ImU32 hairline = IM_COL32(255, 255, 255, 20);
+    constexpr ImU32 accent = IM_COL32(66, 150, 250, 255);
+    constexpr ImU32 accentDim = IM_COL32(66, 150, 250, 96);
     // a thumbnail fills the list's width; until it is decoded its row is
     // this tall for its width, a photo's proportion
     constexpr float placeholderAspect = .75f;
@@ -802,7 +811,7 @@ namespace {
         ImVec2 origin = ImGui::GetCursorScreenPos();
         ImDrawList* dl = ImGui::GetWindowDrawList();
         ImU32 dimColor = ImGui::GetColorU32(ImGuiCol_TextDisabled);
-        float rounding = 3.f * gUiScale;
+        float corner = rounding * gUiScale;
         float total = g;
         float currentTop = g;
         float currentH = 0.f;
@@ -874,22 +883,22 @@ namespace {
                 ImGui::PopID();
 
                 if (entry.thumb == Load::Ready) {
-                    dl->AddImageRounded((ImTextureID)entry.thumbTex.ds, p0, p1, ImVec2(0, 0), ImVec2(1, 1), IM_COL32_WHITE, rounding);
+                    dl->AddImageRounded((ImTextureID)entry.thumbTex.ds, p0, p1, ImVec2(0, 0), ImVec2(1, 1), IM_COL32_WHITE, corner);
                     entry.drawnAt = frames;
                 } else {
                     const char* mark = entry.thumb == Load::Failed ? "?" : "\xe2\x80\xa6";
                     ImVec2 extent = ImGui::CalcTextSize(mark);
 
-                    dl->AddRectFilled(p0, p1, IM_COL32(255, 255, 255, 10), rounding);
+                    dl->AddRectFilled(p0, p1, IM_COL32(255, 255, 255, 10), corner);
                     dl->AddText(ImVec2(p0.x + (innerW - extent.x) / 2.f, p0.y + (h - extent.y) / 2.f), dimColor, mark);
                 }
 
                 if (i == current) {
                     float inset = gUiScale;
 
-                    dl->AddRect(ImVec2(p0.x - inset, p0.y - inset), ImVec2(p1.x + inset, p1.y + inset), IM_COL32(120, 160, 230, 255), rounding + inset, 0, 2.f * gUiScale);
+                    dl->AddRect(ImVec2(p0.x - inset, p0.y - inset), ImVec2(p1.x + inset, p1.y + inset), accent, corner + inset, 0, 2.f * gUiScale);
                 } else if (hovered) {
-                    dl->AddRect(p0, p1, IM_COL32(255, 255, 255, 48), rounding, 0, gUiScale);
+                    dl->AddRect(p0, p1, accentDim, corner, 0, gUiScale);
                 }
             }
 
@@ -911,45 +920,57 @@ namespace {
         float keyW = ImGui::CalcTextSize("Dimensions").x + g;
         bool ready = shown == Load::Ready && shownIndex == current;
 
-        // muted greys in place of ImGui's blues: the headers, the zoom menu
-        // and its list
+        // every row one frame tall, text sitting where a frame's would;
+        // ImGui's own blues for the menu and its list
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(g, 5.f * gUiScale));
-        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 3.f * gUiScale);
-        ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, 3.f * gUiScale);
-        ImGui::PushStyleColor(ImGuiCol_Header, IM_COL32(255, 255, 255, 12));
-        ImGui::PushStyleColor(ImGuiCol_HeaderHovered, IM_COL32(255, 255, 255, 22));
-        ImGui::PushStyleColor(ImGuiCol_HeaderActive, IM_COL32(255, 255, 255, 32));
-        ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(255, 255, 255, 12));
-        ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, IM_COL32(255, 255, 255, 22));
-        ImGui::PushStyleColor(ImGuiCol_FrameBgActive, IM_COL32(255, 255, 255, 32));
-        ImGui::PushStyleColor(ImGuiCol_PopupBg, IM_COL32(40, 41, 47, 255));
-        ImGui::PushStyleColor(ImGuiCol_Border, IM_COL32(255, 255, 255, 20));
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, rounding * gUiScale);
+        ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, rounding * gUiScale);
+        ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(6.f * gUiScale, 4.f * gUiScale));
+        ImGui::PushStyleColor(ImGuiCol_Separator, hairline);
 
+        // a section's title: a row with an arrow, no bar; the hairlines
+        // between the sections do the grouping
+        auto section = [&](const char* title) {
+            ImGui::PushStyleColor(ImGuiCol_Header, IM_COL32(0, 0, 0, 0));
+            ImGui::PushStyleColor(ImGuiCol_HeaderHovered, IM_COL32(255, 255, 255, 16));
+            ImGui::PushStyleColor(ImGuiCol_HeaderActive, IM_COL32(255, 255, 255, 28));
+
+            bool open = ImGui::CollapsingHeader(title, ImGuiTreeNodeFlags_DefaultOpen);
+
+            ImGui::PopStyleColor(3);
+
+            return open;
+        };
         // a key in the dim column, the value beside it
         auto key = [&](const char* name) {
             ImGui::TableNextRow();
             ImGui::TableSetColumnIndex(0);
+            ImGui::AlignTextToFramePadding();
             ImGui::TextDisabled("%s", name);
             ImGui::TableSetColumnIndex(1);
         };
         auto row = [&](const char* name, StringView value) {
             key(name);
+            ImGui::AlignTextToFramePadding();
             ImGui::PushTextWrapPos(0.f);
             ImGui::TextUnformatted((const char*)value.begin(), (const char*)value.end());
             ImGui::PopTextWrapPos();
         };
+        // the key column fixed, the value column the rest, its weight given:
+        // a weight derived from the contents is nothing on the first pass,
+        // and nothing over nothing is not a width
         auto table = [&](const char* id) {
-            if (!ImGui::BeginTable(id, 2, ImGuiTableFlags_SizingStretchProp)) {
+            if (!ImGui::BeginTable(id, 2, ImGuiTableFlags_SizingStretchSame)) {
                 return false;
             }
 
             ImGui::TableSetupColumn("key", ImGuiTableColumnFlags_WidthFixed, keyW);
-            ImGui::TableSetupColumn("value", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn("value", ImGuiTableColumnFlags_WidthStretch, 1.f);
 
             return true;
         };
 
-        if (ImGui::CollapsingHeader("Image", ImGuiTreeNodeFlags_DefaultOpen) && table("image")) {
+        if (section("Image") && table("image")) {
             if (shown == Load::Failed && shownIndex == current) {
                 row("Error", sv(shownError));
             } else if (!ready) {
@@ -1042,7 +1063,11 @@ namespace {
             ImGui::EndTable();
         }
 
-        if (ImGui::CollapsingHeader("File", ImGuiTreeNodeFlags_DefaultOpen) && table("file")) {
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        if (section("File") && table("file")) {
             StringView whole = sv(entry.path);
 
             row("Name", entry.name());
@@ -1064,8 +1089,8 @@ namespace {
             ImGui::EndTable();
         }
 
-        ImGui::PopStyleColor(8);
-        ImGui::PopStyleVar(3);
+        ImGui::PopStyleColor();
+        ImGui::PopStyleVar(4);
     }
 
     void ViewApp::drawCanvas() {
@@ -1154,12 +1179,9 @@ namespace {
 
         float sideW = floorf(vp->Size.x * sideShare);
         float g = gap * gUiScale;
+        float pad = padding * gUiScale;
         bool left = panel && !fullscreen;
         bool right = info && !fullscreen;
-        // the panels sit a shade lighter than the canvas, a hairline
-        // between them and it; no frames
-        const ImU32 panelBg = IM_COL32(33, 34, 39, 255);
-        const ImU32 hairline = IM_COL32(255, 255, 255, 20);
         ImDrawList* fg = ImGui::GetForegroundDrawList();
 
         if (left) {
@@ -1179,9 +1201,9 @@ namespace {
         if (right) {
             ImGui::SameLine();
             ImGui::PushStyleColor(ImGuiCol_ChildBg, panelBg);
-            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(g, g));
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(pad, pad));
             ImGui::BeginChild("info", ImVec2(sideW, 0.f), ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoScrollbar);
-            ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(g, 4.f * gUiScale));
+            ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(g, 6.f * gUiScale));
             drawInfo();
             ImGui::PopStyleVar();
             ImGui::EndChild();
