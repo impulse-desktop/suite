@@ -244,6 +244,24 @@ namespace {
         text << tenths / 10 << StringView(u8".") << tenths % 10 << StringView(u8" ") << units[unit];
     }
 
+    struct AcceptShow;
+
+    struct ShownImage {
+        ObjPool* owner;
+        Ui* ui;
+        const Entry* entry;
+        size_t index;
+        ImTextureRef texture;
+        u32 width = 0;
+        u32 height = 0;
+        i64 fileBytes;
+        Buffer fileModified;
+        Buffer error;
+
+        ShownImage(ObjPool* owner, AcceptShow& result);
+        ~ShownImage() noexcept;
+    };
+
     struct ViewApp {
         Ui* ui = nullptr;
         Channel* jobs = nullptr;
@@ -256,12 +274,7 @@ namespace {
         Vector<Entry*> entries;
         size_t current = 0;
         u32 maxSide = 0;
-        Load shown = Load::None;
-        size_t shownIndex = (size_t)-1;
-        ImTextureRef tex;
-        u32 texW = 0;
-        u32 texH = 0;
-        Buffer shownError;
+        const ShownImage* shown = nullptr;
         float zoom = 1.f;
         bool fit = true;
         float panX = 0.f;
@@ -272,15 +285,13 @@ namespace {
         bool info = true;
         bool scrollToCurrent = true;
         float tracedScrollY = 0.f;
-        i64 fileBytes = -1;
-        Buffer fileModified;
 
         void startWorkers(ObjPool& pool);
         void accept();
         void submit();
         void setThumb(size_t index, u32 side, Image& image);
         void show(size_t index);
-        void dropShown();
+        void replaceShown(const ShownImage* next);
         void step(long delta);
         void setZoom(float value);
         void fitView();
@@ -430,6 +441,29 @@ StringView Entry::name() const {
     return StringView(whole.begin() + nameAt, whole.end());
 }
 
+ShownImage::ShownImage(ObjPool* owner_, AcceptShow& result)
+    : owner(owner_)
+    , ui(result.app->ui)
+    , entry(result.app->entries[result.index])
+    , index(result.index)
+    , fileBytes(result.fileBytes)
+{
+    fileModified.xchg(result.fileModified);
+    error.xchg(result.error);
+
+    if (error.empty()) {
+        width = result.image->width();
+        height = result.image->height();
+        texture = ui->loadTexture(width, height, result.image->data());
+    }
+}
+
+ShownImage::~ShownImage() noexcept {
+    if (error.empty()) {
+        ui->releaseTexture(texture);
+    }
+}
+
 Worker::Worker(Channel* jobs_)
     : jobs(jobs_)
 {
@@ -499,27 +533,16 @@ void AcceptShow::run() {
         return;
     }
 
-    app->fileBytes = fileBytes;
-    app->fileModified.xchg(fileModified);
-    app->shownIndex = index;
+    ObjPool* storage = ObjPool::fromMemoryRaw();
+    const ShownImage* next = storage->make<ShownImage>(storage, *this);
 
-    if (!error.empty()) {
-        app->dropShown();
-        app->shown = Load::Failed;
-        app->shownError.xchg(error);
-        app->ui->trace(StringView(StringBuilder() << StringView(u8"cannot show ") << entry.name() << StringView(u8": ") << StringView(app->shownError)));
-        return;
+    app->replaceShown(next);
+
+    if (!next->error.empty()) {
+        app->ui->trace(StringView(StringBuilder() << StringView(u8"cannot show ") << entry.name() << StringView(u8": ") << StringView(next->error)));
+    } else {
+        app->ui->trace(StringView(StringBuilder() << StringView(u8"showing ") << entry.name() << StringView(u8" ") << (i64)next->width << StringView(u8"x") << (i64)next->height));
     }
-
-    ImTextureRef texture = app->ui->loadTexture(image->width(), image->height(), image->data());
-
-    app->dropShown();
-    app->tex = texture;
-    app->texW = image->width();
-    app->texH = image->height();
-    app->shown = Load::Ready;
-    app->shownError = Buffer();
-    app->ui->trace(StringView(StringBuilder() << StringView(u8"showing ") << entry.name() << StringView(u8" ") << (i64)app->texW << StringView(u8"x") << (i64)app->texH));
 }
 
 LoadThumb::LoadThumb(AcceptThumb* reply_)
@@ -665,24 +688,24 @@ void ViewApp::setThumb(size_t index, u32 side, Image& image) {
 }
 
 void ViewApp::show(size_t index) {
-    if (index == current && showRequest != 0 && shown != Load::Failed) {
+    if (index == current && showRequest != 0 && (!shown || shown->error.empty())) {
         return;
     }
     current = index;
     ++showRequest;
     showPending = true;
-    fileBytes = -1;
-    fileModified = Buffer();
     ui->requestFrame();
     ui->trace(StringView(StringBuilder() << StringView(u8"selected ") << entries[index]->name()));
 }
 
-void ViewApp::dropShown() {
-    if (shown == Load::Ready) {
-        ui->releaseTexture(tex);
-    }
+void ViewApp::replaceShown(const ShownImage* next) {
+    const ShownImage* previous = shown;
 
-    shown = Load::None;
+    shown = next;
+    if (previous) {
+        delete previous->owner;
+    }
+    ui->requestFrame();
 }
 
 void ViewApp::step(long delta) {
@@ -939,8 +962,11 @@ void ViewApp::drawGallery() {
 }
 
 void ViewApp::drawInfo() {
-    const Entry& entry = *entries[current];
-    bool ready = shown == Load::Ready && shownIndex == current;
+    if (!shown) {
+        return;
+    }
+    const Entry& entry = *shown->entry;
+    bool ready = shown->error.empty();
 
     auto key = [&](const char* name) {
         ImGui::TableNextRow();
@@ -968,15 +994,15 @@ void ViewApp::drawInfo() {
     };
 
     if (ImGui::CollapsingHeader("Image", ImGuiTreeNodeFlags_DefaultOpen) && table("image")) {
-        if (shown == Load::Failed && shownIndex == current) {
-            row("Error", StringView(shownError));
+        if (!ready) {
+            row("Error", StringView(shown->error));
         }
 
         if (ready) {
             StringBuilder text;
-            i64 tenths = ((i64)texW * (i64)texH + 50000) / 100000;
+            i64 tenths = ((i64)shown->width * (i64)shown->height + 50000) / 100000;
 
-            text << (i64)texW << StringView(u8" \xc3\x97 ") << (i64)texH << StringView(u8"   ") << tenths / 10 << StringView(u8".") << tenths % 10 << StringView(u8" MP");
+            text << (i64)shown->width << StringView(u8" \xc3\x97 ") << (i64)shown->height << StringView(u8"   ") << tenths / 10 << StringView(u8".") << tenths % 10 << StringView(u8" MP");
             row("Dimensions", StringView(text));
         }
 
@@ -1048,7 +1074,7 @@ void ViewApp::drawInfo() {
         {
             StringBuilder text;
 
-            text << (i64)(current + 1) << StringView(u8" / ") << (i64)entries.length();
+            text << (i64)(shown->index + 1) << StringView(u8" / ") << (i64)entries.length();
             row("Position", StringView(text));
         }
 
@@ -1065,15 +1091,15 @@ void ViewApp::drawInfo() {
         row("Name", entry.name());
         row("Folder", entry.nameAt == 0 ? StringView(u8".") : entry.nameAt == 1 ? StringView(u8"/") : StringView(whole.begin(), whole.begin() + entry.nameAt - 1));
 
-        if (fileBytes >= 0) {
+        if (shown->fileBytes >= 0) {
             StringBuilder text;
 
-            appendBytes(text, fileBytes);
+            appendBytes(text, shown->fileBytes);
             row("Size", StringView(text));
         }
 
-        if (!fileModified.empty()) {
-            row("Modified", StringView(fileModified));
+        if (!shown->fileModified.empty()) {
+            row("Modified", StringView(shown->fileModified));
         }
 
         ImGui::EndTable();
@@ -1093,8 +1119,8 @@ void ViewApp::drawCanvas() {
     bool hovered = ImGui::IsItemHovered();
     ImDrawList* dl = ImGui::GetWindowDrawList();
 
-    if (shown != Load::Ready) {
-        const char* text = shown == Load::Failed ? "cannot show this image" : "decoding";
+    if (!shown || !shown->error.empty()) {
+        const char* text = shown ? "cannot show this image" : "decoding";
         ImVec2 extent = ImGui::CalcTextSize(text);
 
         dl->AddText(ImVec2(origin.x + (size.x - extent.x) / 2.f, origin.y + (size.y - extent.y) / 2.f), ImGui::GetColorU32(ImGuiCol_TextDisabled), text);
@@ -1102,8 +1128,8 @@ void ViewApp::drawCanvas() {
         return;
     }
 
-    float rw = (float)(rotation & 1 ? texH : texW);
-    float rh = (float)(rotation & 1 ? texW : texH);
+    float rw = (float)(rotation & 1 ? shown->height : shown->width);
+    float rh = (float)(rotation & 1 ? shown->width : shown->height);
 
     if (fit) {
         zoom = min(1.f, min(size.x / rw, size.y / rh));
@@ -1143,7 +1169,7 @@ void ViewApp::drawCanvas() {
     const ImVec2 uv[4] = {ImVec2(0, 0), ImVec2(1, 0), ImVec2(1, 1), ImVec2(0, 1)};
     int r = rotation;
 
-    dl->AddImageQuad(tex, p0, ImVec2(p1.x, p0.y), p1, ImVec2(p0.x, p1.y), uv[(4 - r) & 3], uv[(5 - r) & 3], uv[(6 - r) & 3], uv[(7 - r) & 3]);
+    dl->AddImageQuad(shown->texture, p0, ImVec2(p1.x, p0.y), p1, ImVec2(p0.x, p1.y), uv[(4 - r) & 3], uv[(5 - r) & 3], uv[(6 - r) & 3], uv[(7 - r) & 3]);
 }
 
 void ViewApp::draw() {

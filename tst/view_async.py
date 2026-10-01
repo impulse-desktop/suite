@@ -5,7 +5,7 @@ import errno
 import os
 from pathlib import Path
 
-from session import KEY_END, KEY_HOME, KEY_LEFT, KEY_RIGHT, Session, near, png, write_png
+from session import KEY_HOME, KEY_LEFT, KEY_RIGHT, Session, near, png, write_png
 
 
 with Session("view_async", tool="view") as s:
@@ -20,6 +20,8 @@ with Session("view_async", tool="view") as s:
         s.said(f"thumbnail {name}.png")
     r = s.window()["rect"]
     canvas = (220, 0, r["width"] - 420, r["height"])
+    panel = (r["width"] - 200, 0, 200, r["height"])
+    first_panel = s.settled("first-panel", region=panel)
 
     def shows(rgb, label):
         s.wait(lambda: near(s.capture(label, region=canvas), rgb) >= 2900, f"canvas {label}")
@@ -28,12 +30,15 @@ with Session("view_async", tool="view") as s:
     blocked = pics / "b.png"
     blocked.unlink()
     os.mkfifo(blocked)
-    s.tap(KEY_RIGHT)
+    s.click(100, 220)
     s.said("loading image b.png")
     shows((255, 0, 0), "old-image-during-load")
+    s.same(first_panel, "old-panel-during-load", region=panel)
     s.tap(KEY_RIGHT)
     s.said("showing c.png")
     shows((0, 0, 255), "newer-selection")
+    s.changed(first_panel, "newer-panel", region=panel, threshold=20)
+    newer_panel = s.settled("newer-panel", region=panel)
 
     def release(data):
         def writer():
@@ -53,11 +58,13 @@ with Session("view_async", tool="view") as s:
     s.said("discarded image b.png")
     assert "im view: showing b.png" not in s.client_log(), "late image replaced the selection"
     shows((0, 0, 255), "late-success-ignored")
+    s.same(newer_panel, "late-success-panel-ignored", region=panel)
 
     # A stale error must also leave the newer selection alone.
     s.tap(KEY_LEFT)
     s.said("loading image b.png", 2)
     shows((0, 0, 255), "old-image-during-second-load")
+    s.same(newer_panel, "old-panel-during-second-load", region=panel)
     s.tap(KEY_HOME)
     s.said("showing a.png", 2)
     release(b"not an image")
@@ -70,4 +77,4 @@ with Session("view_async", tool="view") as s:
     s.said("loading image b.png", 3)
     s.close()
 
-print("OK: previous image retained, stale success and error ignored, exit without joining")
+print("OK: image and properties retained together, stale success and error ignored, exit without joining")
