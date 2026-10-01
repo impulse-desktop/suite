@@ -99,260 +99,264 @@ namespace {
         void tendTextures();
         void dropTextures();
     };
+}
 
-    float UiImpl::px(Design d) {
-        return scaledPx(d, scale);
+ImVec2 Ui::px(Design w, Design h) {
+    return ImVec2(px(w), px(h));
+}
+
+float UiImpl::px(Design d) {
+    return scaledPx(d, scale);
+}
+
+void UiImpl::open(const UiOptions& options) {
+    if (platform->scheduler()->current() == nullptr) {
+        fail("a window opens from the tool's own fiber"_sv);
     }
 
-    void UiImpl::open(const UiOptions& options) {
-        if (platform->scheduler()->current() == nullptr) {
-            fail("a window opens from the tool's own fiber"_sv);
-        }
-
-        if (window) {
-            fail("one window per tool"_sv);
-        }
-
-        ImGuiPlt& imgui = *ImGuiPlt::create(*pool, scale, traceFrames);
-        int width = (int)px(options.width);
-        int height = (int)px(options.height);
-
-        appId << "im-"_sv << name;
-        title << "im "_sv << name;
-
-        plt::WindowOptions made;
-
-        made.appId = sv(appId);
-        made.title = sv(title);
-        made.width = (u32)width;
-        made.height = (u32)height;
-        made.input = imgui.sink();
-        made.events = this;
-        made.frame = &driver;
-
-        plt::Window& shown = *platform->createWindow(*pool, made);
-        // asked for in the platform's logical units, it says what pixels it
-        // made of them: not the design's on an output that scales logical
-        // units by itself, or over the screen; a resize is in pixels
-        plt::WindowInfo info = shown.info();
-
-        clampWindowSize(info, width, height);
-
-        if (width != (int)info.width || height != (int)info.height) {
-            shown.requestResize((u32)width, (u32)height);
-        }
-
-        GpuOptions wants;
-
-        wants.tool = name;
-        wants.scale = scale;
-        wants.chaos = chaos;
-        wants.traceFrames = traceFrames;
-        wants.textures = maxTextures;
-        // the textures are ImGui's objects and the tool's: they go after
-        // ImGui and its renderer, which tear their device side down
-        pooledGuard(*pool, [this] {
-            dropTextures();
-        });
-        gpu = Gpu::createFor(*pool, shown, wants);
-
-        driver.platform = platform;
-        driver.window = &shown;
-        driver.imgui = &imgui;
-        driver.gpu = gpu;
-        driver.ui = this;
-        window = &shown;
-        shown.requestShow();
-        shown.requestFrame();
+    if (window) {
+        fail("one window per tool"_sv);
     }
 
-    bool UiImpl::next(UiEvent& event) {
-        if (!window) {
-            fail("no window to take events from: open it first"_sv);
-        }
+    ImGuiPlt& imgui = *ImGuiPlt::create(*pool, scale, traceFrames);
+    int width = (int)px(options.width);
+    int height = (int)px(options.height);
 
-        // the frame the tool held, if any, is done: the driver renders it
-        // once the tool sleeps
-        for (;;) {
-            if (closePending) {
-                closePending = false;
-                gone = true;
-                event.kind = UiEvent::Kind::Close;
+    appId << "im-"_sv << name;
+    title << "im "_sv << name;
 
-                return true;
-            }
+    plt::WindowOptions made;
 
-            if (gone) {
-                return false;
-            }
+    made.appId = sv(appId);
+    made.title = sv(title);
+    made.width = (u32)width;
+    made.height = (u32)height;
+    made.input = imgui.sink();
+    made.events = this;
+    made.frame = &driver;
 
-            if (framePending) {
-                framePending = false;
-                event.kind = UiEvent::Kind::Frame;
+    plt::Window& shown = *platform->createWindow(*pool, made);
+    // asked for in the platform's logical units, it says what pixels it
+    // made of them: not the design's on an output that scales logical
+    // units by itself, or over the screen; a resize is in pixels
+    plt::WindowInfo info = shown.info();
 
-                return true;
-            }
+    clampWindowSize(info, width, height);
 
-            parked = true;
-            platform->scheduler()->current()->park();
-            parked = false;
-        }
+    if (width != (int)info.width || height != (int)info.height) {
+        shown.requestResize((u32)width, (u32)height);
     }
 
-    void UiImpl::requestFullscreen(bool on) {
-        window->requestFullscreen(on);
+    GpuOptions wants;
+
+    wants.tool = name;
+    wants.scale = scale;
+    wants.chaos = chaos;
+    wants.traceFrames = traceFrames;
+    wants.textures = maxTextures;
+    // the textures are ImGui's objects and the tool's: they go after
+    // ImGui and its renderer, which tear their device side down
+    pooledGuard(*pool, [this] {
+        dropTextures();
+    });
+    gpu = Gpu::createFor(*pool, shown, wants);
+
+    driver.platform = platform;
+    driver.window = &shown;
+    driver.imgui = &imgui;
+    driver.gpu = gpu;
+    driver.ui = this;
+    window = &shown;
+    shown.requestShow();
+    shown.requestFrame();
+}
+
+bool UiImpl::next(UiEvent& event) {
+    if (!window) {
+        fail("no window to take events from: open it first"_sv);
     }
 
-    // registered with ImGui, the renderer makes it on the next render
-    ImTextureRef UiImpl::loadTexture(u32 width, u32 height, const void* rgba) {
-        if (textures.length() >= maxTextures) {
-            fail(sv(StringBuilder() << "more than "_sv << (i64)maxTextures << " textures at once"_sv));
+    // the frame the tool held, if any, is done: the driver renders it
+    // once the tool sleeps
+    for (;;) {
+        if (closePending) {
+            closePending = false;
+            gone = true;
+            event.kind = UiEvent::Kind::Close;
+
+            return true;
         }
 
-        ImTextureData* texture = IM_NEW(ImTextureData)();
+        if (gone) {
+            return false;
+        }
 
-        texture->Create(ImTextureFormat_RGBA32, (int)width, (int)height);
-        memcpy(texture->GetPixels(), rgba, (size_t)width * height * 4);
-        ImGui::RegisterUserTexture(texture);
-        textures.pushBack(texture);
+        if (framePending) {
+            framePending = false;
+            event.kind = UiEvent::Kind::Frame;
 
-        return texture->GetTexRef();
+            return true;
+        }
+
+        parked = true;
+        platform->scheduler()->current()->park();
+        parked = false;
+    }
+}
+
+void UiImpl::requestFullscreen(bool on) {
+    window->requestFullscreen(on);
+}
+
+// registered with ImGui, the renderer makes it on the next render
+ImTextureRef UiImpl::loadTexture(u32 width, u32 height, const void* rgba) {
+    if (textures.length() >= maxTextures) {
+        fail(sv(StringBuilder() << "more than "_sv << (i64)maxTextures << " textures at once"_sv));
     }
 
-    // told to go: the renderer tears it down once it has gone unused for
-    // as many frames as there are in flight, counted from here
-    void UiImpl::releaseTexture(ImTextureRef ref) {
-        ImTextureData* texture = ref._TexData;
+    ImTextureData* texture = IM_NEW(ImTextureData)();
 
-        if (!texture || texture->WantDestroyNextFrame) {
-            return;
-        }
+    texture->Create(ImTextureFormat_RGBA32, (int)width, (int)height);
+    memcpy(texture->GetPixels(), rgba, (size_t)width * height * 4);
+    ImGui::RegisterUserTexture(texture);
+    textures.pushBack(texture);
 
-        texture->WantDestroyNextFrame = true;
-        texture->SetStatus(ImTextureStatus_WantDestroy);
-        texture->UnusedFrames = 0;
+    return texture->GetTexRef();
+}
+
+// told to go: the renderer tears it down once it has gone unused for
+// as many frames as there are in flight, counted from here
+void UiImpl::releaseTexture(ImTextureRef ref) {
+    ImTextureData* texture = ref._TexData;
+
+    if (!texture || texture->WantDestroyNextFrame) {
+        return;
     }
 
-    u32 UiImpl::maxTextureSide() {
-        ImGuiPlatformIO& pio = ImGui::GetPlatformIO();
+    texture->WantDestroyNextFrame = true;
+    texture->SetStatus(ImTextureStatus_WantDestroy);
+    texture->UnusedFrames = 0;
+}
 
-        if (pio.Renderer_TextureMaxWidth > 0 && pio.Renderer_TextureMaxHeight > 0) {
-            return (u32)min(pio.Renderer_TextureMaxWidth, pio.Renderer_TextureMaxHeight);
-        }
+u32 UiImpl::maxTextureSide() {
+    ImGuiPlatformIO& pio = ImGui::GetPlatformIO();
 
-        return defaultTextureSide;
+    if (pio.Renderer_TextureMaxWidth > 0 && pio.Renderer_TextureMaxHeight > 0) {
+        return (u32)min(pio.Renderer_TextureMaxWidth, pio.Renderer_TextureMaxHeight);
     }
 
-    bool UiImpl::drawErrorPanel(StringView message) {
-        return ::drawErrorPanel(name, scale, message) != 0;
+    return defaultTextureSide;
+}
+
+bool UiImpl::drawErrorPanel(StringView message) {
+    return ::drawErrorPanel(name, scale, message) != 0;
+}
+
+void UiImpl::trace(StringView what) {
+    traceTool(name, what);
+}
+
+void UiImpl::timing(StringView line) {
+    if (traceFrames) {
+        sysE << line << endL;
+    }
+}
+
+void UiImpl::run() {
+    try {
+        result = main(*pool, *this, argc, argv);
+    } catch (...) {
+        sysE << "im "_sv << name << ": "_sv << Exception::current() << endL;
+        result = 1;
     }
 
-    void UiImpl::trace(StringView what) {
-        traceTool(name, what);
-    }
+    finished = true;
+    platform->stop();
+}
 
-    void UiImpl::timing(StringView line) {
-        if (traceFrames) {
-            sysE << line << endL;
-        }
-    }
-
-    void UiImpl::run() {
-        try {
-            result = main(*pool, *this, argc, argv);
-        } catch (...) {
-            sysE << "im "_sv << name << ": "_sv << Exception::current() << endL;
-            result = 1;
-        }
-
-        finished = true;
-        platform->stop();
-    }
-
-    // the tool's turn. A tool that is not asleep in next() (a platform
-    // call of its own that drew) gets none, a tool that is done neither
-    int UiImpl::frame() {
-        if (finished) {
-            return -1;
-        }
-
-        if (!parked || gone) {
-            return 0;
-        }
-
-        ImGuiErrorRecoveryState state;
-
-        tendTextures();
-        ImGui::ErrorRecoveryStoreState(&state);
-        framePending = true;
-        fiber->wake();
-        framePending = false;
-
-        if (!finished) {
-            return 0;
-        }
-
-        // a tool that ended inside its frame, by a return or an exception,
-        // may have left its windows open: closed for it, the frame its last
-        ImGuiIO& io = ImGui::GetIO();
-        bool asserting = io.ConfigErrorRecoveryEnableAssert;
-
-        io.ConfigErrorRecoveryEnableAssert = false;
-        ImGui::ErrorRecoveryTryToRecoverState(&state);
-        io.ConfigErrorRecoveryEnableAssert = asserting;
-
+// the tool's turn. A tool that is not asleep in next() (a platform
+// call of its own that drew) gets none, a tool that is done neither
+int UiImpl::frame() {
+    if (finished) {
         return -1;
     }
 
-    void UiImpl::close() {
-        trace("closed"_sv);
-
-        if (gone) {
-            return;
-        }
-
-        closePending = true;
-
-        if (parked) {
-            fiber->wake();
-        }
+    if (!parked || gone) {
+        return 0;
     }
 
-    // once a frame, before the tool's turn: a copy of the pixels the
-    // renderer has taken goes, a texture it has torn down goes, the rest
-    // of the released count one more unused frame
-    void UiImpl::tendTextures() {
-        Vector<ImTextureData*> kept;
+    ImGuiErrorRecoveryState state;
 
-        for (ImTextureData* texture : textures) {
-            if (texture->WantDestroyNextFrame && texture->Status == ImTextureStatus_Destroyed) {
-                ImGui::UnregisterUserTexture(texture);
-                IM_DELETE(texture);
+    tendTextures();
+    ImGui::ErrorRecoveryStoreState(&state);
+    framePending = true;
+    fiber->wake();
+    framePending = false;
 
-                continue;
-            }
-
-            if (texture->Status == ImTextureStatus_WantDestroy) {
-                texture->UnusedFrames++;
-            } else if (texture->Status == ImTextureStatus_OK && texture->Pixels) {
-                texture->DestroyPixels();
-            }
-
-            kept.pushBack(texture);
-        }
-
-        textures.xchg(kept);
+    if (!finished) {
+        return 0;
     }
 
-    // at the end, once ImGui and its renderer are gone and the device
-    // side of every texture with them: the objects themselves
-    void UiImpl::dropTextures() {
-        for (ImTextureData* texture : textures) {
+    // a tool that ended inside its frame, by a return or an exception,
+    // may have left its windows open: closed for it, the frame its last
+    ImGuiIO& io = ImGui::GetIO();
+    bool asserting = io.ConfigErrorRecoveryEnableAssert;
+
+    io.ConfigErrorRecoveryEnableAssert = false;
+    ImGui::ErrorRecoveryTryToRecoverState(&state);
+    io.ConfigErrorRecoveryEnableAssert = asserting;
+
+    return -1;
+}
+
+void UiImpl::close() {
+    trace("closed"_sv);
+
+    if (gone) {
+        return;
+    }
+
+    closePending = true;
+
+    if (parked) {
+        fiber->wake();
+    }
+}
+
+// once a frame, before the tool's turn: a copy of the pixels the
+// renderer has taken goes, a texture it has torn down goes, the rest
+// of the released count one more unused frame
+void UiImpl::tendTextures() {
+    Vector<ImTextureData*> kept;
+
+    for (ImTextureData* texture : textures) {
+        if (texture->WantDestroyNextFrame && texture->Status == ImTextureStatus_Destroyed) {
+            ImGui::UnregisterUserTexture(texture);
             IM_DELETE(texture);
+
+            continue;
         }
 
-        textures.clear();
+        if (texture->Status == ImTextureStatus_WantDestroy) {
+            texture->UnusedFrames++;
+        } else if (texture->Status == ImTextureStatus_OK && texture->Pixels) {
+            texture->DestroyPixels();
+        }
+
+        kept.pushBack(texture);
     }
+
+    textures.xchg(kept);
+}
+
+// at the end, once ImGui and its renderer are gone and the device
+// side of every texture with them: the objects themselves
+void UiImpl::dropTextures() {
+    for (ImTextureData* texture : textures) {
+        IM_DELETE(texture);
+    }
+
+    textures.clear();
 }
 
 int runTool(StringView name, int (*main)(ObjPool& pool, Ui& ui, int argc, char** argv), int argc, char** argv) {

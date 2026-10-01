@@ -256,127 +256,127 @@ namespace {
         (void)y;
 #endif
     }
+}
 
-    plt::InputSink* ImGuiPltImpl::sink() {
-        return this;
+plt::InputSink* ImGuiPltImpl::sink() {
+    return this;
+}
+
+void ImGuiPltImpl::newFrame(plt::Window& window) {
+    ImGuiIO& io = ImGui::GetIO();
+    plt::WindowInfo info = window.info();
+
+    io.BackendPlatformName = "imgui_plt";
+    io.DisplaySize = ImVec2((float)info.width, (float)info.height);
+
+    struct timespec ts;
+
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+
+    u64 now = (u64)ts.tv_sec * 1000000000ull + (u64)ts.tv_nsec;
+
+    io.DeltaTime = frameNs && now > frameNs ? (float)(now - frameNs) / 1e9f : 1.f / 60.f;
+    frameNs = now;
+
+    plt::PointerIcon wanted = pointerIcon(ImGui::GetMouseCursor());
+
+    if (wanted != icon) {
+        icon = wanted;
+        window.requestPointerIcon(icon);
+    }
+}
+
+void ImGuiPltImpl::key(const plt::KeyInput& input) {
+    ImGuiIO& io = ImGui::GetIO();
+
+    io.AddKeyEvent(ImGuiMod_Ctrl, (input.modifiers & plt::InputControl) != 0);
+    io.AddKeyEvent(ImGuiMod_Shift, (input.modifiers & plt::InputShift) != 0);
+    io.AddKeyEvent(ImGuiMod_Alt, (input.modifiers & plt::InputAlt) != 0);
+    io.AddKeyEvent(ImGuiMod_Super, (input.modifiers & plt::InputSuper) != 0);
+
+    // ImGui synthesizes repeats from held keys on its own
+    if (input.action == plt::InputAction::Repeat) {
+        return;
     }
 
-    void ImGuiPltImpl::newFrame(plt::Window& window) {
-        ImGuiIO& io = ImGui::GetIO();
-        plt::WindowInfo info = window.info();
+    ImGuiKey key = input.key == plt::InputKey::Printable ? printableKey(input.baseCodepoint) : namedKeys[(int)input.key];
 
-        io.BackendPlatformName = "imgui_plt";
-        io.DisplaySize = ImVec2((float)info.width, (float)info.height);
+    if (key != ImGuiKey_None) {
+        io.AddKeyEvent(key, input.action == plt::InputAction::Press);
+    }
+}
 
-        struct timespec ts;
+void ImGuiPltImpl::text(const plt::TextInput& input) {
+    ImGui::GetIO().AddInputCharacter(input.codepoint);
+}
 
-        clock_gettime(CLOCK_MONOTONIC, &ts);
+void ImGuiPltImpl::preedit(StringView, i32, i32) {
+    // no composition preview: ImGui widgets have no preedit rendering
+}
 
-        u64 now = (u64)ts.tv_sec * 1000000000ull + (u64)ts.tv_nsec;
+void ImGuiPltImpl::pointerMotion(const plt::PointerMotionInput& input) {
+    traceInput("pointer"_sv, input.pixelX, input.pixelY);
 
-        io.DeltaTime = frameNs && now > frameNs ? (float)(now - frameNs) / 1e9f : 1.f / 60.f;
-        frameNs = now;
-
-        plt::PointerIcon wanted = pointerIcon(ImGui::GetMouseCursor());
-
-        if (wanted != icon) {
-            icon = wanted;
-            window.requestPointerIcon(icon);
-        }
+    if (traceFrames) {
+        sysE << "im pointer: "_sv << (i64)input.pixelX << " "_sv << (i64)input.pixelY << endL;
     }
 
-    void ImGuiPltImpl::key(const plt::KeyInput& input) {
-        ImGuiIO& io = ImGui::GetIO();
+    ImGui::GetIO().AddMousePosEvent((float)input.pixelX, (float)input.pixelY);
+}
 
-        io.AddKeyEvent(ImGuiMod_Ctrl, (input.modifiers & plt::InputControl) != 0);
-        io.AddKeyEvent(ImGuiMod_Shift, (input.modifiers & plt::InputShift) != 0);
-        io.AddKeyEvent(ImGuiMod_Alt, (input.modifiers & plt::InputAlt) != 0);
-        io.AddKeyEvent(ImGuiMod_Super, (input.modifiers & plt::InputSuper) != 0);
+void ImGuiPltImpl::pointerButton(const plt::PointerButtonInput& input) {
+    int button = mouseButtonIndex(input.button);
 
-        // ImGui synthesizes repeats from held keys on its own
-        if (input.action == plt::InputAction::Repeat) {
-            return;
-        }
-
-        ImGuiKey key = input.key == plt::InputKey::Printable ? printableKey(input.baseCodepoint) : namedKeys[(int)input.key];
-
-        if (key != ImGuiKey_None) {
-            io.AddKeyEvent(key, input.action == plt::InputAction::Press);
-        }
+    if (button < 0) {
+        return;
     }
 
-    void ImGuiPltImpl::text(const plt::TextInput& input) {
-        ImGui::GetIO().AddInputCharacter(input.codepoint);
+    ImGuiIO& io = ImGui::GetIO();
+
+    io.AddMousePosEvent((float)input.pixelX, (float)input.pixelY);
+    io.AddMouseButtonEvent(button, input.pressed);
+}
+
+void ImGuiPltImpl::scroll(const plt::ScrollInput& input) {
+    // the frame trace: every wheel event as plt hands it over, between
+    // the frames' lines
+    if (traceFrames) {
+        sysE << "im wheel: y/100 "_sv << (i64)(input.y * 100.0) << " precise "_sv << (i64)input.precise << " momentum "_sv << (i64)input.momentum << " phase "_sv << (i64)input.phase << endL;
     }
 
-    void ImGuiPltImpl::preedit(StringView, i32, i32) {
-        // no composition preview: ImGui widgets have no preedit rendering
+    // plt's precise scroll is tenths of a logical pixel (a finger on a
+    // trackpad, points on Cocoa), its notched one is wheel steps. ImGui
+    // moves a window by five lines per wheel unit, so a finger's point
+    // is turned into the units that make it one design pixel of
+    // content, as the platform's own scrolling does; a notch stays
+    // ImGui's five lines
+    float x = (float)input.x;
+    float y = (float)input.y;
+
+    if (input.precise && ImGui::GetFontSize() > 0.f) {
+        float unit = 10.f * scale / (5.f * ImGui::GetFontSize());
+
+        x *= unit;
+        y *= unit;
     }
 
-    void ImGuiPltImpl::pointerMotion(const plt::PointerMotionInput& input) {
-        traceInput("pointer"_sv, input.pixelX, input.pixelY);
+    ImGui::GetIO().AddMouseWheelEvent(x, y);
+}
 
-        if (traceFrames) {
-            sysE << "im pointer: "_sv << (i64)input.pixelX << " "_sv << (i64)input.pixelY << endL;
-        }
+void ImGuiPltImpl::focus(bool focused) {
+    ImGui::GetIO().AddFocusEvent(focused);
+}
 
-        ImGui::GetIO().AddMousePosEvent((float)input.pixelX, (float)input.pixelY);
+void ImGuiPltImpl::pointerPresence(bool present) {
+    traceInput(present ? "pointer present"_sv : "pointer absent"_sv, 0, 0);
+
+    if (!present) {
+        ImGui::GetIO().AddMousePosEvent(-FLT_MAX, -FLT_MAX);
     }
+}
 
-    void ImGuiPltImpl::pointerButton(const plt::PointerButtonInput& input) {
-        int button = mouseButtonIndex(input.button);
-
-        if (button < 0) {
-            return;
-        }
-
-        ImGuiIO& io = ImGui::GetIO();
-
-        io.AddMousePosEvent((float)input.pixelX, (float)input.pixelY);
-        io.AddMouseButtonEvent(button, input.pressed);
-    }
-
-    void ImGuiPltImpl::scroll(const plt::ScrollInput& input) {
-        // the frame trace: every wheel event as plt hands it over, between
-        // the frames' lines
-        if (traceFrames) {
-            sysE << "im wheel: y/100 "_sv << (i64)(input.y * 100.0) << " precise "_sv << (i64)input.precise << " momentum "_sv << (i64)input.momentum << " phase "_sv << (i64)input.phase << endL;
-        }
-
-        // plt's precise scroll is tenths of a logical pixel (a finger on a
-        // trackpad, points on Cocoa), its notched one is wheel steps. ImGui
-        // moves a window by five lines per wheel unit, so a finger's point
-        // is turned into the units that make it one design pixel of
-        // content, as the platform's own scrolling does; a notch stays
-        // ImGui's five lines
-        float x = (float)input.x;
-        float y = (float)input.y;
-
-        if (input.precise && ImGui::GetFontSize() > 0.f) {
-            float unit = 10.f * scale / (5.f * ImGui::GetFontSize());
-
-            x *= unit;
-            y *= unit;
-        }
-
-        ImGui::GetIO().AddMouseWheelEvent(x, y);
-    }
-
-    void ImGuiPltImpl::focus(bool focused) {
-        ImGui::GetIO().AddFocusEvent(focused);
-    }
-
-    void ImGuiPltImpl::pointerPresence(bool present) {
-        traceInput(present ? "pointer present"_sv : "pointer absent"_sv, 0, 0);
-
-        if (!present) {
-            ImGui::GetIO().AddMousePosEvent(-FLT_MAX, -FLT_MAX);
-        }
-    }
-
-    void ImGuiPltImpl::flush() {
-        // plt batches per pointer frame; ImGui consumes its queue in NewFrame
-    }
+void ImGuiPltImpl::flush() {
+    // plt batches per pointer frame; ImGui consumes its queue in NewFrame
 }
 
 ImGuiPlt* ImGuiPlt::create(ObjPool& pool, float scale, bool traceFrames) {

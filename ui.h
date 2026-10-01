@@ -54,10 +54,7 @@ struct Ui {
     // one for a positive length; positions are sums of these, so they stay
     // whole too
     virtual float px(Design d) = 0;
-
-    ImVec2 px(Design w, Design h) {
-        return ImVec2(px(w), px(h));
-    }
+    ImVec2 px(Design w, Design h);
 
     // the window, shown; once. Throws where the window or its device
     // cannot be had

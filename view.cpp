@@ -81,12 +81,6 @@ namespace {
         StringView name() const;
     };
 
-    StringView Entry::name() const {
-        StringView whole = sv(path);
-
-        return StringView(whole.begin() + nameAt, whole.end());
-    }
-
     // area-averaged to fit the side: what a thumbnail is, and what an image
     // wider than the renderer's textures becomes
     void shrinkToSide(DecodedImage& img, u32 side) {
@@ -369,651 +363,6 @@ namespace {
         void drawInfo();
     };
 
-    // a row's thumbnail, decoded from the bytes in memory and loaded now,
-    // kept by the row's index
-    void ViewApp::loadThumb(size_t index, u32 side) {
-        Entry& entry = *entries[index];
-        DecodedImage image;
-
-        try {
-            decodeEntry(*ui, entry, side, image);
-        } catch (...) {
-            Buffer error(Exception::current());
-
-            entry.thumb = Load::Failed;
-            ui->trace(sv(StringBuilder() << "no thumbnail "_sv << entry.name() << ": "_sv << sv(error)));
-
-            return;
-        }
-
-        if (entry.thumb == Load::Ready) {
-            ui->releaseTexture(entry.thumbTex);
-        }
-
-        entry.thumbTex = ui->loadTexture(image.width, image.height, image.rgba.data());
-        entry.thumbW = image.width;
-        entry.thumbH = image.height;
-        entry.thumbSide = side;
-        entry.thumb = Load::Ready;
-        ui->trace(sv(StringBuilder() << "thumbnail "_sv << entry.name()));
-    }
-
-    // the selected image, decoded and loaded now
-    void ViewApp::show(size_t index) {
-        current = index;
-        scrollToCurrent = true;
-
-        Entry& entry = *entries[index];
-
-        ui->trace(sv(StringBuilder() << "selected "_sv << entry.name()));
-        statFile();
-
-        DecodedImage image;
-
-        try {
-            decodeEntry(*ui, entry, maxSide, image);
-        } catch (...) {
-            dropShown();
-            shown = Load::Failed;
-            shownIndex = index;
-            shownError = Buffer(Exception::current());
-            ui->trace(sv(StringBuilder() << "cannot show "_sv << entry.name() << ": "_sv << sv(shownError)));
-
-            return;
-        }
-
-        dropShown();
-        tex = ui->loadTexture(image.width, image.height, image.rgba.data());
-        texW = image.width;
-        texH = image.height;
-        shown = Load::Ready;
-        shownIndex = index;
-        ui->trace(sv(StringBuilder() << "showing "_sv << entry.name() << " "_sv << (i64)texW << "x"_sv << (i64)texH));
-    }
-
-    // the image shown so far goes, whatever comes instead
-    void ViewApp::dropShown() {
-        if (shown == Load::Ready) {
-            ui->releaseTexture(tex);
-        }
-
-        shown = Load::None;
-    }
-
-    void ViewApp::step(long delta) {
-        long last = (long)entries.length() - 1;
-        long next = (long)current + delta;
-
-        next = next < 0 ? 0 : next > last ? last : next;
-
-        if ((size_t)next != current) {
-            show((size_t)next);
-        }
-    }
-
-    void ViewApp::setZoom(float value) {
-        zoom = clampf(value, zoomMin, zoomMax);
-        fit = false;
-        ui->trace(sv(StringBuilder() << "zoom "_sv << (i64)(zoom * 100.f + .5f)));
-    }
-
-    void ViewApp::fitView() {
-        fit = true;
-        panX = 0.f;
-        panY = 0.f;
-        ui->trace("fit"_sv);
-    }
-
-    void ViewApp::keys() {
-        ImGuiIO& io = ImGui::GetIO();
-
-        if (ImGui::IsKeyPressed(ImGuiKey_RightArrow) || ImGui::IsKeyPressed(ImGuiKey_DownArrow) || ImGui::IsKeyPressed(ImGuiKey_Space) || ImGui::IsKeyPressed(ImGuiKey_PageDown) || ImGui::IsKeyPressed(ImGuiKey_J) || ImGui::IsKeyPressed(ImGuiKey_N)) {
-            step(1);
-        }
-
-        if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow) || ImGui::IsKeyPressed(ImGuiKey_UpArrow) || ImGui::IsKeyPressed(ImGuiKey_Backspace) || ImGui::IsKeyPressed(ImGuiKey_PageUp) || ImGui::IsKeyPressed(ImGuiKey_K) || ImGui::IsKeyPressed(ImGuiKey_P)) {
-            step(-1);
-        }
-
-        if (ImGui::IsKeyPressed(ImGuiKey_Home) || (ImGui::IsKeyPressed(ImGuiKey_G) && !io.KeyShift)) {
-            step(-(long)entries.length());
-        }
-
-        if (ImGui::IsKeyPressed(ImGuiKey_End) || (ImGui::IsKeyPressed(ImGuiKey_G) && io.KeyShift)) {
-            step((long)entries.length());
-        }
-
-        if (ImGui::IsKeyPressed(ImGuiKey_W) || ImGui::IsKeyPressed(ImGuiKey_0) || ImGui::IsKeyPressed(ImGuiKey_Keypad0)) {
-            fitView();
-        }
-
-        if (ImGui::IsKeyPressed(ImGuiKey_1) || ImGui::IsKeyPressed(ImGuiKey_Keypad1)) {
-            panX = 0.f;
-            panY = 0.f;
-            setZoom(1.f);
-        }
-
-        if (ImGui::IsKeyPressed(ImGuiKey_Equal) || ImGui::IsKeyPressed(ImGuiKey_KeypadAdd)) {
-            setZoom(zoom * zoomStep);
-        }
-
-        if (ImGui::IsKeyPressed(ImGuiKey_Minus) || ImGui::IsKeyPressed(ImGuiKey_KeypadSubtract)) {
-            setZoom(zoom / zoomStep);
-        }
-
-        if (ImGui::IsKeyPressed(ImGuiKey_F) || ImGui::IsKeyPressed(ImGuiKey_F11)) {
-            fullscreen = !fullscreen;
-            ui->requestFullscreen(fullscreen);
-            ui->trace(fullscreen ? "fullscreen on"_sv : "fullscreen off"_sv);
-        }
-
-        if (ImGui::IsKeyPressed(ImGuiKey_R)) {
-            rotation = (rotation + (io.KeyShift ? 3 : 1)) % 4;
-            ui->trace(sv(StringBuilder() << "rotated "_sv << (i64)(rotation * 90)));
-        }
-
-        if (ImGui::IsKeyPressed(ImGuiKey_Tab)) {
-            panel = !panel;
-            ui->trace(panel ? "panel on"_sv : "panel off"_sv);
-        }
-
-        if (ImGui::IsKeyPressed(ImGuiKey_I)) {
-            info = !info;
-            ui->trace(info ? "info on"_sv : "info off"_sv);
-        }
-    }
-
-    // the shown file's facts, read once per selection
-    void ViewApp::statFile() {
-        struct stat st;
-
-        fileBytes = -1;
-        fileModified = Buffer();
-
-        if (stat(entries[current]->path.cStr(), &st) != 0) {
-            return;
-        }
-
-        fileBytes = (i64)st.st_size;
-
-        struct tm tm;
-        char stamp[32];
-
-        localtime_r(&st.st_mtime, &tm);
-
-        if (strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M", &tm)) {
-            fileModified = Buffer(StringView(stamp));
-        }
-    }
-
-    // the list: thumbnails one under another, each as wide as the list
-    // and as tall as its proportion asks, the selected one's row filled.
-    // The thumbnails bulge towards the pointer: each scales about its own
-    // centre by how close the pointer is, the nearest most, so they are
-    // drawn from the far ones to the nearest, without a sort: the rows
-    // above it top down, the rows below it bottom up (their centres share
-    // an x, so the nearest in height is the nearest)
-    void ViewApp::drawGallery() {
-        float g = ui->px(gap);
-        float innerW = max(1.f, ImGui::GetWindowWidth() - 2.f * g);
-        // the texels for a bulged thumbnail's width: what it is drawn at
-        // is then a reduction at every scale
-        u32 side = thumbSideFor((innerW + 2.f * g) * (1.f + bulge));
-        float viewH = ImGui::GetWindowHeight();
-        size_t count = entries.length();
-        ImVec2 origin = ImGui::GetCursorScreenPos();
-        ImVec2 windowPos = ImGui::GetWindowPos();
-        ImDrawList* dl = ImGui::GetWindowDrawList();
-        ImU32 dimColor = ImGui::GetColorU32(ImGuiCol_TextDisabled);
-        ImVec2 mouse = ImGui::GetIO().MousePos;
-        ImGuiViewport* vp = ImGui::GetMainViewport();
-        // the pointer anywhere over the window counts
-        bool pointed = mouse.x >= vp->Pos.x && mouse.x < vp->Pos.x + vp->Size.x && mouse.y >= vp->Pos.y && mouse.y < vp->Pos.y + vp->Size.y;
-        float reach = ui->px(bulgeReach);
-        float total = g;
-        float currentTop = g;
-        float currentH = 0.f;
-
-        for (size_t i = 0; i < count; i++) {
-            float h = rowHeightFor(*entries[i], innerW);
-
-            if (i == current) {
-                currentTop = total;
-                currentH = h;
-            }
-
-            total += h + g;
-        }
-
-        // the list's extent, for the scrolling; the rows are placed by hand
-        ImGui::Dummy(ImVec2(innerW, total));
-
-        if (scrollToCurrent) {
-            ImGui::SetScrollY(currentTop - (viewH - currentH) / 2.f);
-            scrollToCurrent = false;
-        }
-
-        float scrollY = clampf(ImGui::GetScrollY(), 0.f, max(0.f, total - viewH));
-
-        // the frame trace: how far the list moved this frame, and what the
-        // wheel said
-        if (scrollY != tracedScrollY) {
-            StringBuilder text;
-
-            text << "im scroll: y "_sv << (i64)scrollY << " dy "_sv << (i64)(scrollY - tracedScrollY) << " wheel/100 "_sv << (i64)(ImGui::GetIO().MouseWheel * 100.f);
-            ui->timing(sv(text));
-            tracedScrollY = scrollY;
-        }
-        size_t first = count;
-        size_t last = 0;
-        float firstTop = 0.f;
-        float lastBottom = 0.f;
-        // the row nearest the pointer in height, and its distance
-        size_t nearest = count;
-        float nearestD = 0.f;
-        float top = g;
-
-        for (size_t i = 0; i < count; i++) {
-            Entry& entry = *entries[i];
-            float h = rowHeightFor(entry, innerW);
-            float bottom = top + h;
-            bool inView = bottom > scrollY && top < scrollY + viewH;
-
-            if (inView) {
-                if (first == count) {
-                    first = i;
-                    firstTop = top;
-                }
-
-                last = i;
-                lastBottom = bottom;
-            }
-
-            // decoded at a size the list has since outgrown: again, from
-            // the bytes in memory
-            if (inView && entry.thumb == Load::Ready && entry.thumbSide * 4 < side * 3) {
-                loadThumb(i, side);
-            }
-
-            if (inView) {
-                ImVec2 p0(origin.x + g, origin.y + top);
-                ImVec2 p1(p0.x + innerW, p0.y + h);
-
-                ImGui::SetCursorScreenPos(p0);
-                ImGui::PushID((int)i);
-
-                if (ImGui::InvisibleButton("##row", ImVec2(innerW, h))) {
-                    show(i);
-                }
-
-                ImGui::PopID();
-
-                // the row is the thumbnail with its whole gutter, so two rows
-                // meet in the gap; the selection fills its row, under every
-                // thumbnail
-                if (i == current) {
-                    dl->AddRectFilled(ImVec2(p0.x - g, p0.y - g), ImVec2(p1.x + g, p1.y + g), ImGui::GetColorU32(ImGuiCol_Header));
-                }
-
-                if (pointed) {
-                    float d = distance(mouse, ImVec2((p0.x + p1.x) / 2.f, (p0.y + p1.y) / 2.f));
-
-                    if (nearest == count || d < nearestD) {
-                        nearest = i;
-                        nearestD = d;
-                    }
-                }
-            }
-
-            top = bottom + g;
-        }
-
-        ImDrawList* fg = ImGui::GetForegroundDrawList();
-
-        // a row's thumbnail, scaled about its centre by the pointer's
-        // distance from that centre: the full bulge at none, nothing at
-        // the reach
-        auto draw = [&](size_t i, float rowTop, float h) {
-            Entry& entry = *entries[i];
-            ImVec2 p0(origin.x + g, origin.y + rowTop);
-            ImVec2 p1(p0.x + innerW, p0.y + h);
-
-            if (entry.thumb != Load::Ready) {
-                const char* mark = entry.thumb == Load::Failed ? "?" : "\xe2\x80\xa6";
-                ImVec2 extent = ImGui::CalcTextSize(mark);
-
-                dl->AddText(ImVec2(p0.x + (innerW - extent.x) / 2.f, p0.y + (h - extent.y) / 2.f), dimColor, mark);
-
-                return;
-            }
-
-            float scale = 1.f;
-
-            if (pointed) {
-                float t = distance(mouse, ImVec2((p0.x + p1.x) / 2.f, (p0.y + p1.y) / 2.f)) / reach;
-
-                if (t < 1.f) {
-                    scale += bulge * .5f * (1.f + cosf(pi * t));
-                }
-            }
-
-            ImVec2 centre((p0.x + p1.x) / 2.f, (p0.y + p1.y) / 2.f);
-            ImVec2 half((p1.x - p0.x) / 2.f * scale, (p1.y - p0.y) / 2.f * scale);
-
-            fg->AddImage(entry.thumbTex, ImVec2(centre.x - half.x, centre.y - half.y), ImVec2(centre.x + half.x, centre.y + half.y));
-        };
-
-        // a bulged thumbnail spills over the list's edge onto the canvas:
-        // the thumbnails go on the foreground, over every window, clipped
-        // to the list's height and the window's right edge
-        ImVec2 viewportEnd(vp->Pos.x + vp->Size.x, windowPos.y + viewH);
-
-        fg->PushClipRect(windowPos, viewportEnd, false);
-
-        if (first < count) {
-            size_t stop = nearest == count ? last + 1 : nearest;
-            float y = firstTop;
-
-            // top down to the nearest row
-            for (size_t i = first; i < stop; i++) {
-                float h = rowHeightFor(*entries[i], innerW);
-
-                draw(i, y, h);
-                y += h + g;
-            }
-
-            if (nearest != count) {
-                // bottom up to it, then the nearest itself, over all
-                float bottom = lastBottom;
-
-                for (size_t i = last; i > nearest; i--) {
-                    float h = rowHeightFor(*entries[i], innerW);
-
-                    draw(i, bottom - h, h);
-                    bottom -= h + g;
-                }
-
-                draw(nearest, bottom - rowHeightFor(*entries[nearest], innerW), rowHeightFor(*entries[nearest], innerW));
-            }
-        }
-
-        fg->PopClipRect();
-    }
-
-    // the properties panel: sections that fold to their title. The image's
-    // first (what is shown, at what zoom: a menu picks one), then the
-    // file's own facts
-    void ViewApp::drawInfo() {
-        const Entry& entry = *entries[current];
-        bool ready = shown == Load::Ready && shownIndex == current;
-
-        // ImGui's own spacing, frames and colours; every row one frame
-        // tall, text sitting where a frame's would
-        // a key in the dim column, the value beside it
-        auto key = [&](const char* name) {
-            ImGui::TableNextRow();
-            ImGui::TableSetColumnIndex(0);
-            ImGui::AlignTextToFramePadding();
-            ImGui::TextDisabled("%s", name);
-            ImGui::TableSetColumnIndex(1);
-        };
-        auto row = [&](const char* name, StringView value) {
-            key(name);
-            ImGui::AlignTextToFramePadding();
-            ImGui::PushTextWrapPos(0.f);
-            ImGui::TextUnformatted((const char*)value.begin(), (const char*)value.end());
-            ImGui::PopTextWrapPos();
-        };
-        // the key column as wide as its keys, the value column the rest,
-        // its weight given: a weight derived from the contents is nothing
-        // on the first pass, and nothing over nothing is not a width
-        auto table = [&](const char* id) {
-            if (!ImGui::BeginTable(id, 2, ImGuiTableFlags_SizingStretchSame)) {
-                return false;
-            }
-
-            ImGui::TableSetupColumn("key", ImGuiTableColumnFlags_WidthFixed);
-            ImGui::TableSetupColumn("value", ImGuiTableColumnFlags_WidthStretch, 1.f);
-
-            return true;
-        };
-
-        if (ImGui::CollapsingHeader("Image", ImGuiTreeNodeFlags_DefaultOpen) && table("image")) {
-            if (shown == Load::Failed && shownIndex == current) {
-                row("Error", sv(shownError));
-            }
-
-            if (ready) {
-                StringBuilder text;
-                // megapixels to a tenth
-                i64 tenths = ((i64)texW * (i64)texH + 50000) / 100000;
-
-                text << (i64)texW << " \xc3\x97 "_sv << (i64)texH << "   "_sv << tenths / 10 << "."_sv << tenths % 10 << " MP"_sv;
-                row("Dimensions", sv(text));
-            }
-
-            {
-                // the name's extension, upper-cased; the decoder's word on
-                // the format comes later
-                StringView name = entry.name();
-                const u8* dot = name.end();
-
-                for (const u8* p = name.begin(); p != name.end(); ++p) {
-                    if (*p == '.') {
-                        dot = p;
-                    }
-                }
-
-                char ext[16];
-                size_t n = 0;
-
-                for (const u8* p = dot == name.end() ? dot : dot + 1; p != name.end() && n < sizeof(ext); ++p) {
-                    ext[n++] = (char)(*p >= 'a' && *p <= 'z' ? *p - 32 : *p);
-                }
-
-                row("Type", n ? StringView((const u8*)ext, (const u8*)ext + n) : "?"_sv);
-            }
-
-            if (ready) {
-                key("Zoom");
-
-                {
-                    StringBuilder text;
-
-                    text << (i64)(zoom * 100.f + .5f) << "%"_sv;
-
-                    if (fit) {
-                        text << " (fit)"_sv;
-                    }
-
-                    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
-
-                    if (ImGui::BeginCombo("##zoom", text.cStr())) {
-                        if (ImGui::Selectable("Fit", fit)) {
-                            fitView();
-                        }
-
-                        static const int presets[] = {25, 50, 100, 200, 400, 800};
-
-                        for (int preset : presets) {
-                            StringBuilder label;
-
-                            label << (i64)preset << "%"_sv;
-
-                            if (ImGui::Selectable(label.cStr(), !fit && (i64)(zoom * 100.f + .5f) == preset)) {
-                                panX = 0.f;
-                                panY = 0.f;
-                                setZoom((float)preset / 100.f);
-                            }
-                        }
-
-                        ImGui::EndCombo();
-                    }
-                }
-
-                {
-                    StringBuilder text;
-
-                    text << (i64)(rotation * 90) << "\xc2\xb0"_sv;
-                    row("Rotation", sv(text));
-                }
-            }
-
-            {
-                StringBuilder text;
-
-                text << (i64)(current + 1) << " / "_sv << (i64)entries.length();
-                row("Position", sv(text));
-            }
-
-            ImGui::EndTable();
-        }
-
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::Spacing();
-
-        if (ImGui::CollapsingHeader("File", ImGuiTreeNodeFlags_DefaultOpen) && table("file")) {
-            StringView whole = sv(entry.path);
-
-            row("Name", entry.name());
-            // the path up to the name's slash; a bare name is of the working
-            // directory, a name under the root of "/"
-            row("Folder", entry.nameAt == 0 ? "."_sv : entry.nameAt == 1 ? "/"_sv : StringView(whole.begin(), whole.begin() + entry.nameAt - 1));
-
-            if (fileBytes >= 0) {
-                StringBuilder text;
-
-                appendBytes(text, fileBytes);
-                row("Size", sv(text));
-            }
-
-            if (!fileModified.empty()) {
-                row("Modified", sv(fileModified));
-            }
-
-            ImGui::EndTable();
-        }
-    }
-
-    void ViewApp::drawCanvas() {
-        ImVec2 origin = ImGui::GetCursorScreenPos();
-        ImVec2 size = ImGui::GetContentRegionAvail();
-
-        if (size.x < 1.f || size.y < 1.f) {
-            return;
-        }
-
-        ImGui::InvisibleButton("view", size, ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonMiddle);
-
-        bool hovered = ImGui::IsItemHovered();
-        ImDrawList* dl = ImGui::GetWindowDrawList();
-
-        if (shown != Load::Ready) {
-            const char* text = shown == Load::Failed ? "cannot show this image" : "decoding";
-            ImVec2 extent = ImGui::CalcTextSize(text);
-
-            dl->AddText(ImVec2(origin.x + (size.x - extent.x) / 2.f, origin.y + (size.y - extent.y) / 2.f), ImGui::GetColorU32(ImGuiCol_TextDisabled), text);
-
-            return;
-        }
-
-        float rw = (float)(rotation & 1 ? texH : texW);
-        float rh = (float)(rotation & 1 ? texW : texH);
-
-        if (fit) {
-            // fit shrinks: a small image stays at its own size
-            zoom = min(1.f, min(size.x / rw, size.y / rh));
-        }
-
-        float dw = rw * zoom;
-        float dh = rh * zoom;
-
-        // an image within the canvas sits centred; a larger one pans, never
-        // past its edges
-        panX = dw <= size.x ? 0.f : clampf(panX, (size.x - dw) / 2.f, (dw - size.x) / 2.f);
-        panY = dh <= size.y ? 0.f : clampf(panY, (size.y - dh) / 2.f, (dh - size.y) / 2.f);
-
-        ImVec2 centre(origin.x + size.x / 2.f + panX, origin.y + size.y / 2.f + panY);
-        ImVec2 p0(centre.x - dw / 2.f, centre.y - dh / 2.f);
-        ImVec2 p1(centre.x + dw / 2.f, centre.y + dh / 2.f);
-        // the texture's corners, top-left first clockwise; a quarter turn
-        // clockwise puts the texture's top-left at the screen's top-right
-        const ImVec2 uv[4] = {ImVec2(0, 0), ImVec2(1, 0), ImVec2(1, 1), ImVec2(0, 1)};
-        int r = rotation;
-
-        dl->AddImageQuad(tex, p0, ImVec2(p1.x, p0.y), p1, ImVec2(p0.x, p1.y), uv[(4 - r) & 3], uv[(5 - r) & 3], uv[(6 - r) & 3], uv[(7 - r) & 3]);
-
-        ImGuiIO& io = ImGui::GetIO();
-
-        // the wheel zooms about the pointer: what is under it stays put
-        if (hovered && io.MouseWheel != 0.f) {
-            float before = zoom;
-            float after = clampf(zoom * powf(zoomStep, io.MouseWheel), zoomMin, zoomMax);
-            float tx = (io.MousePos.x - centre.x) / before;
-            float ty = (io.MousePos.y - centre.y) / before;
-
-            panX = io.MousePos.x - tx * after - (origin.x + size.x / 2.f);
-            panY = io.MousePos.y - ty * after - (origin.y + size.y / 2.f);
-            setZoom(after);
-        }
-
-        if (ImGui::IsItemActive() && (ImGui::IsMouseDragging(ImGuiMouseButton_Left) || ImGui::IsMouseDragging(ImGuiMouseButton_Middle))) {
-            panX += io.MouseDelta.x;
-            panY += io.MouseDelta.y;
-        }
-    }
-
-    // the window: the list, the canvas, the properties
-    void ViewApp::draw() {
-        ImGuiViewport* vp = ImGui::GetMainViewport();
-
-        ImGui::SetNextWindowPos(vp->Pos);
-        ImGui::SetNextWindowSize(vp->Size);
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0, 0));
-        // Begin's and BeginChild's results go unread here and below: a
-        // window that cannot collapse, and a child of one, is shown every
-        // frame, and drawing into a hidden one would only be wasted
-        // as an ImGui application lays out: the panels are windows, in the
-        // window colour, the canvas between them is the application's own
-        // background, the presenter's clear colour
-        ImGui::Begin("##view", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBackground);
-
-        float sideW = floorf(vp->Size.x * sideShare);
-        bool left = panel && !fullscreen;
-        bool right = info && !fullscreen;
-
-        if (left) {
-            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImGui::GetStyleColorVec4(ImGuiCol_WindowBg));
-            ImGui::BeginChild("gallery", ImVec2(sideW, 0.f), 0, ImGuiWindowFlags_NoScrollbar);
-            drawGallery();
-            ImGui::EndChild();
-            ImGui::PopStyleColor();
-            ImGui::SameLine();
-        }
-
-        ImGui::BeginChild("canvas", ImVec2(right ? -sideW : 0.f, 0.f), 0, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-        drawCanvas();
-        ImGui::EndChild();
-
-        if (right) {
-            ImGui::SameLine();
-            // the zeros placed the children; inside the panel ImGui's own
-            // padding and spacing
-            ImGui::PopStyleVar(2);
-            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImGui::GetStyleColorVec4(ImGuiCol_WindowBg));
-            ImGui::BeginChild("info", ImVec2(sideW, 0.f), ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoScrollbar);
-            drawInfo();
-            ImGui::EndChild();
-            ImGui::PopStyleColor();
-        } else {
-            ImGui::PopStyleVar(2);
-        }
-
-        ImGui::End();
-    }
-
     // the error panel in place of the viewer, when there is nothing to show
     int showError(Ui& ui, StringView message) {
         UiEvent event;
@@ -1028,6 +377,657 @@ namespace {
 
         return 0;
     }
+}
+
+StringView Entry::name() const {
+    StringView whole = sv(path);
+
+    return StringView(whole.begin() + nameAt, whole.end());
+}
+
+// a row's thumbnail, decoded from the bytes in memory and loaded now,
+// kept by the row's index
+void ViewApp::loadThumb(size_t index, u32 side) {
+    Entry& entry = *entries[index];
+    DecodedImage image;
+
+    try {
+        decodeEntry(*ui, entry, side, image);
+    } catch (...) {
+        Buffer error(Exception::current());
+
+        entry.thumb = Load::Failed;
+        ui->trace(sv(StringBuilder() << "no thumbnail "_sv << entry.name() << ": "_sv << sv(error)));
+
+        return;
+    }
+
+    if (entry.thumb == Load::Ready) {
+        ui->releaseTexture(entry.thumbTex);
+    }
+
+    entry.thumbTex = ui->loadTexture(image.width, image.height, image.rgba.data());
+    entry.thumbW = image.width;
+    entry.thumbH = image.height;
+    entry.thumbSide = side;
+    entry.thumb = Load::Ready;
+    ui->trace(sv(StringBuilder() << "thumbnail "_sv << entry.name()));
+}
+
+// the selected image, decoded and loaded now
+void ViewApp::show(size_t index) {
+    current = index;
+    scrollToCurrent = true;
+
+    Entry& entry = *entries[index];
+
+    ui->trace(sv(StringBuilder() << "selected "_sv << entry.name()));
+    statFile();
+
+    DecodedImage image;
+
+    try {
+        decodeEntry(*ui, entry, maxSide, image);
+    } catch (...) {
+        dropShown();
+        shown = Load::Failed;
+        shownIndex = index;
+        shownError = Buffer(Exception::current());
+        ui->trace(sv(StringBuilder() << "cannot show "_sv << entry.name() << ": "_sv << sv(shownError)));
+
+        return;
+    }
+
+    dropShown();
+    tex = ui->loadTexture(image.width, image.height, image.rgba.data());
+    texW = image.width;
+    texH = image.height;
+    shown = Load::Ready;
+    shownIndex = index;
+    ui->trace(sv(StringBuilder() << "showing "_sv << entry.name() << " "_sv << (i64)texW << "x"_sv << (i64)texH));
+}
+
+// the image shown so far goes, whatever comes instead
+void ViewApp::dropShown() {
+    if (shown == Load::Ready) {
+        ui->releaseTexture(tex);
+    }
+
+    shown = Load::None;
+}
+
+void ViewApp::step(long delta) {
+    long last = (long)entries.length() - 1;
+    long next = (long)current + delta;
+
+    next = next < 0 ? 0 : next > last ? last : next;
+
+    if ((size_t)next != current) {
+        show((size_t)next);
+    }
+}
+
+void ViewApp::setZoom(float value) {
+    zoom = clampf(value, zoomMin, zoomMax);
+    fit = false;
+    ui->trace(sv(StringBuilder() << "zoom "_sv << (i64)(zoom * 100.f + .5f)));
+}
+
+void ViewApp::fitView() {
+    fit = true;
+    panX = 0.f;
+    panY = 0.f;
+    ui->trace("fit"_sv);
+}
+
+void ViewApp::keys() {
+    ImGuiIO& io = ImGui::GetIO();
+
+    if (ImGui::IsKeyPressed(ImGuiKey_RightArrow) || ImGui::IsKeyPressed(ImGuiKey_DownArrow) || ImGui::IsKeyPressed(ImGuiKey_Space) || ImGui::IsKeyPressed(ImGuiKey_PageDown) || ImGui::IsKeyPressed(ImGuiKey_J) || ImGui::IsKeyPressed(ImGuiKey_N)) {
+        step(1);
+    }
+
+    if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow) || ImGui::IsKeyPressed(ImGuiKey_UpArrow) || ImGui::IsKeyPressed(ImGuiKey_Backspace) || ImGui::IsKeyPressed(ImGuiKey_PageUp) || ImGui::IsKeyPressed(ImGuiKey_K) || ImGui::IsKeyPressed(ImGuiKey_P)) {
+        step(-1);
+    }
+
+    if (ImGui::IsKeyPressed(ImGuiKey_Home) || (ImGui::IsKeyPressed(ImGuiKey_G) && !io.KeyShift)) {
+        step(-(long)entries.length());
+    }
+
+    if (ImGui::IsKeyPressed(ImGuiKey_End) || (ImGui::IsKeyPressed(ImGuiKey_G) && io.KeyShift)) {
+        step((long)entries.length());
+    }
+
+    if (ImGui::IsKeyPressed(ImGuiKey_W) || ImGui::IsKeyPressed(ImGuiKey_0) || ImGui::IsKeyPressed(ImGuiKey_Keypad0)) {
+        fitView();
+    }
+
+    if (ImGui::IsKeyPressed(ImGuiKey_1) || ImGui::IsKeyPressed(ImGuiKey_Keypad1)) {
+        panX = 0.f;
+        panY = 0.f;
+        setZoom(1.f);
+    }
+
+    if (ImGui::IsKeyPressed(ImGuiKey_Equal) || ImGui::IsKeyPressed(ImGuiKey_KeypadAdd)) {
+        setZoom(zoom * zoomStep);
+    }
+
+    if (ImGui::IsKeyPressed(ImGuiKey_Minus) || ImGui::IsKeyPressed(ImGuiKey_KeypadSubtract)) {
+        setZoom(zoom / zoomStep);
+    }
+
+    if (ImGui::IsKeyPressed(ImGuiKey_F) || ImGui::IsKeyPressed(ImGuiKey_F11)) {
+        fullscreen = !fullscreen;
+        ui->requestFullscreen(fullscreen);
+        ui->trace(fullscreen ? "fullscreen on"_sv : "fullscreen off"_sv);
+    }
+
+    if (ImGui::IsKeyPressed(ImGuiKey_R)) {
+        rotation = (rotation + (io.KeyShift ? 3 : 1)) % 4;
+        ui->trace(sv(StringBuilder() << "rotated "_sv << (i64)(rotation * 90)));
+    }
+
+    if (ImGui::IsKeyPressed(ImGuiKey_Tab)) {
+        panel = !panel;
+        ui->trace(panel ? "panel on"_sv : "panel off"_sv);
+    }
+
+    if (ImGui::IsKeyPressed(ImGuiKey_I)) {
+        info = !info;
+        ui->trace(info ? "info on"_sv : "info off"_sv);
+    }
+}
+
+// the shown file's facts, read once per selection
+void ViewApp::statFile() {
+    struct stat st;
+
+    fileBytes = -1;
+    fileModified = Buffer();
+
+    if (stat(entries[current]->path.cStr(), &st) != 0) {
+        return;
+    }
+
+    fileBytes = (i64)st.st_size;
+
+    struct tm tm;
+    char stamp[32];
+
+    localtime_r(&st.st_mtime, &tm);
+
+    if (strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M", &tm)) {
+        fileModified = Buffer(StringView(stamp));
+    }
+}
+
+// the list: thumbnails one under another, each as wide as the list
+// and as tall as its proportion asks, the selected one's row filled.
+// The thumbnails bulge towards the pointer: each scales about its own
+// centre by how close the pointer is, the nearest most, so they are
+// drawn from the far ones to the nearest, without a sort: the rows
+// above it top down, the rows below it bottom up (their centres share
+// an x, so the nearest in height is the nearest)
+void ViewApp::drawGallery() {
+    float g = ui->px(gap);
+    float innerW = max(1.f, ImGui::GetWindowWidth() - 2.f * g);
+    // the texels for a bulged thumbnail's width: what it is drawn at
+    // is then a reduction at every scale
+    u32 side = thumbSideFor((innerW + 2.f * g) * (1.f + bulge));
+    float viewH = ImGui::GetWindowHeight();
+    size_t count = entries.length();
+    ImVec2 origin = ImGui::GetCursorScreenPos();
+    ImVec2 windowPos = ImGui::GetWindowPos();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImU32 dimColor = ImGui::GetColorU32(ImGuiCol_TextDisabled);
+    ImVec2 mouse = ImGui::GetIO().MousePos;
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+    // the pointer anywhere over the window counts
+    bool pointed = mouse.x >= vp->Pos.x && mouse.x < vp->Pos.x + vp->Size.x && mouse.y >= vp->Pos.y && mouse.y < vp->Pos.y + vp->Size.y;
+    float reach = ui->px(bulgeReach);
+    float total = g;
+    float currentTop = g;
+    float currentH = 0.f;
+
+    for (size_t i = 0; i < count; i++) {
+        float h = rowHeightFor(*entries[i], innerW);
+
+        if (i == current) {
+            currentTop = total;
+            currentH = h;
+        }
+
+        total += h + g;
+    }
+
+    // the list's extent, for the scrolling; the rows are placed by hand
+    ImGui::Dummy(ImVec2(innerW, total));
+
+    if (scrollToCurrent) {
+        ImGui::SetScrollY(currentTop - (viewH - currentH) / 2.f);
+        scrollToCurrent = false;
+    }
+
+    float scrollY = clampf(ImGui::GetScrollY(), 0.f, max(0.f, total - viewH));
+
+    // the frame trace: how far the list moved this frame, and what the
+    // wheel said
+    if (scrollY != tracedScrollY) {
+        StringBuilder text;
+
+        text << "im scroll: y "_sv << (i64)scrollY << " dy "_sv << (i64)(scrollY - tracedScrollY) << " wheel/100 "_sv << (i64)(ImGui::GetIO().MouseWheel * 100.f);
+        ui->timing(sv(text));
+        tracedScrollY = scrollY;
+    }
+    size_t first = count;
+    size_t last = 0;
+    float firstTop = 0.f;
+    float lastBottom = 0.f;
+    // the row nearest the pointer in height, and its distance
+    size_t nearest = count;
+    float nearestD = 0.f;
+    float top = g;
+
+    for (size_t i = 0; i < count; i++) {
+        Entry& entry = *entries[i];
+        float h = rowHeightFor(entry, innerW);
+        float bottom = top + h;
+        bool inView = bottom > scrollY && top < scrollY + viewH;
+
+        if (inView) {
+            if (first == count) {
+                first = i;
+                firstTop = top;
+            }
+
+            last = i;
+            lastBottom = bottom;
+        }
+
+        // decoded at a size the list has since outgrown: again, from
+        // the bytes in memory
+        if (inView && entry.thumb == Load::Ready && entry.thumbSide * 4 < side * 3) {
+            loadThumb(i, side);
+        }
+
+        if (inView) {
+            ImVec2 p0(origin.x + g, origin.y + top);
+            ImVec2 p1(p0.x + innerW, p0.y + h);
+
+            ImGui::SetCursorScreenPos(p0);
+            ImGui::PushID((int)i);
+
+            if (ImGui::InvisibleButton("##row", ImVec2(innerW, h))) {
+                show(i);
+            }
+
+            ImGui::PopID();
+
+            // the row is the thumbnail with its whole gutter, so two rows
+            // meet in the gap; the selection fills its row, under every
+            // thumbnail
+            if (i == current) {
+                dl->AddRectFilled(ImVec2(p0.x - g, p0.y - g), ImVec2(p1.x + g, p1.y + g), ImGui::GetColorU32(ImGuiCol_Header));
+            }
+
+            if (pointed) {
+                float d = distance(mouse, ImVec2((p0.x + p1.x) / 2.f, (p0.y + p1.y) / 2.f));
+
+                if (nearest == count || d < nearestD) {
+                    nearest = i;
+                    nearestD = d;
+                }
+            }
+        }
+
+        top = bottom + g;
+    }
+
+    ImDrawList* fg = ImGui::GetForegroundDrawList();
+
+    // a row's thumbnail, scaled about its centre by the pointer's
+    // distance from that centre: the full bulge at none, nothing at
+    // the reach
+    auto draw = [&](size_t i, float rowTop, float h) {
+        Entry& entry = *entries[i];
+        ImVec2 p0(origin.x + g, origin.y + rowTop);
+        ImVec2 p1(p0.x + innerW, p0.y + h);
+
+        if (entry.thumb != Load::Ready) {
+            const char* mark = entry.thumb == Load::Failed ? "?" : "\xe2\x80\xa6";
+            ImVec2 extent = ImGui::CalcTextSize(mark);
+
+            dl->AddText(ImVec2(p0.x + (innerW - extent.x) / 2.f, p0.y + (h - extent.y) / 2.f), dimColor, mark);
+
+            return;
+        }
+
+        float scale = 1.f;
+
+        if (pointed) {
+            float t = distance(mouse, ImVec2((p0.x + p1.x) / 2.f, (p0.y + p1.y) / 2.f)) / reach;
+
+            if (t < 1.f) {
+                scale += bulge * .5f * (1.f + cosf(pi * t));
+            }
+        }
+
+        ImVec2 centre((p0.x + p1.x) / 2.f, (p0.y + p1.y) / 2.f);
+        ImVec2 half((p1.x - p0.x) / 2.f * scale, (p1.y - p0.y) / 2.f * scale);
+
+        fg->AddImage(entry.thumbTex, ImVec2(centre.x - half.x, centre.y - half.y), ImVec2(centre.x + half.x, centre.y + half.y));
+    };
+
+    // a bulged thumbnail spills over the list's edge onto the canvas:
+    // the thumbnails go on the foreground, over every window, clipped
+    // to the list's height and the window's right edge
+    ImVec2 viewportEnd(vp->Pos.x + vp->Size.x, windowPos.y + viewH);
+
+    fg->PushClipRect(windowPos, viewportEnd, false);
+
+    if (first < count) {
+        size_t stop = nearest == count ? last + 1 : nearest;
+        float y = firstTop;
+
+        // top down to the nearest row
+        for (size_t i = first; i < stop; i++) {
+            float h = rowHeightFor(*entries[i], innerW);
+
+            draw(i, y, h);
+            y += h + g;
+        }
+
+        if (nearest != count) {
+            // bottom up to it, then the nearest itself, over all
+            float bottom = lastBottom;
+
+            for (size_t i = last; i > nearest; i--) {
+                float h = rowHeightFor(*entries[i], innerW);
+
+                draw(i, bottom - h, h);
+                bottom -= h + g;
+            }
+
+            draw(nearest, bottom - rowHeightFor(*entries[nearest], innerW), rowHeightFor(*entries[nearest], innerW));
+        }
+    }
+
+    fg->PopClipRect();
+}
+
+// the properties panel: sections that fold to their title. The image's
+// first (what is shown, at what zoom: a menu picks one), then the
+// file's own facts
+void ViewApp::drawInfo() {
+    const Entry& entry = *entries[current];
+    bool ready = shown == Load::Ready && shownIndex == current;
+
+    // ImGui's own spacing, frames and colours; every row one frame
+    // tall, text sitting where a frame's would
+    // a key in the dim column, the value beside it
+    auto key = [&](const char* name) {
+        ImGui::TableNextRow();
+        ImGui::TableSetColumnIndex(0);
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextDisabled("%s", name);
+        ImGui::TableSetColumnIndex(1);
+    };
+    auto row = [&](const char* name, StringView value) {
+        key(name);
+        ImGui::AlignTextToFramePadding();
+        ImGui::PushTextWrapPos(0.f);
+        ImGui::TextUnformatted((const char*)value.begin(), (const char*)value.end());
+        ImGui::PopTextWrapPos();
+    };
+    // the key column as wide as its keys, the value column the rest,
+    // its weight given: a weight derived from the contents is nothing
+    // on the first pass, and nothing over nothing is not a width
+    auto table = [&](const char* id) {
+        if (!ImGui::BeginTable(id, 2, ImGuiTableFlags_SizingStretchSame)) {
+            return false;
+        }
+
+        ImGui::TableSetupColumn("key", ImGuiTableColumnFlags_WidthFixed);
+        ImGui::TableSetupColumn("value", ImGuiTableColumnFlags_WidthStretch, 1.f);
+
+        return true;
+    };
+
+    if (ImGui::CollapsingHeader("Image", ImGuiTreeNodeFlags_DefaultOpen) && table("image")) {
+        if (shown == Load::Failed && shownIndex == current) {
+            row("Error", sv(shownError));
+        }
+
+        if (ready) {
+            StringBuilder text;
+            // megapixels to a tenth
+            i64 tenths = ((i64)texW * (i64)texH + 50000) / 100000;
+
+            text << (i64)texW << " \xc3\x97 "_sv << (i64)texH << "   "_sv << tenths / 10 << "."_sv << tenths % 10 << " MP"_sv;
+            row("Dimensions", sv(text));
+        }
+
+        {
+            // the name's extension, upper-cased; the decoder's word on
+            // the format comes later
+            StringView name = entry.name();
+            const u8* dot = name.end();
+
+            for (const u8* p = name.begin(); p != name.end(); ++p) {
+                if (*p == '.') {
+                    dot = p;
+                }
+            }
+
+            char ext[16];
+            size_t n = 0;
+
+            for (const u8* p = dot == name.end() ? dot : dot + 1; p != name.end() && n < sizeof(ext); ++p) {
+                ext[n++] = (char)(*p >= 'a' && *p <= 'z' ? *p - 32 : *p);
+            }
+
+            row("Type", n ? StringView((const u8*)ext, (const u8*)ext + n) : "?"_sv);
+        }
+
+        if (ready) {
+            key("Zoom");
+
+            {
+                StringBuilder text;
+
+                text << (i64)(zoom * 100.f + .5f) << "%"_sv;
+
+                if (fit) {
+                    text << " (fit)"_sv;
+                }
+
+                ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+
+                if (ImGui::BeginCombo("##zoom", text.cStr())) {
+                    if (ImGui::Selectable("Fit", fit)) {
+                        fitView();
+                    }
+
+                    static const int presets[] = {25, 50, 100, 200, 400, 800};
+
+                    for (int preset : presets) {
+                        StringBuilder label;
+
+                        label << (i64)preset << "%"_sv;
+
+                        if (ImGui::Selectable(label.cStr(), !fit && (i64)(zoom * 100.f + .5f) == preset)) {
+                            panX = 0.f;
+                            panY = 0.f;
+                            setZoom((float)preset / 100.f);
+                        }
+                    }
+
+                    ImGui::EndCombo();
+                }
+            }
+
+            {
+                StringBuilder text;
+
+                text << (i64)(rotation * 90) << "\xc2\xb0"_sv;
+                row("Rotation", sv(text));
+            }
+        }
+
+        {
+            StringBuilder text;
+
+            text << (i64)(current + 1) << " / "_sv << (i64)entries.length();
+            row("Position", sv(text));
+        }
+
+        ImGui::EndTable();
+    }
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    if (ImGui::CollapsingHeader("File", ImGuiTreeNodeFlags_DefaultOpen) && table("file")) {
+        StringView whole = sv(entry.path);
+
+        row("Name", entry.name());
+        // the path up to the name's slash; a bare name is of the working
+        // directory, a name under the root of "/"
+        row("Folder", entry.nameAt == 0 ? "."_sv : entry.nameAt == 1 ? "/"_sv : StringView(whole.begin(), whole.begin() + entry.nameAt - 1));
+
+        if (fileBytes >= 0) {
+            StringBuilder text;
+
+            appendBytes(text, fileBytes);
+            row("Size", sv(text));
+        }
+
+        if (!fileModified.empty()) {
+            row("Modified", sv(fileModified));
+        }
+
+        ImGui::EndTable();
+    }
+}
+
+void ViewApp::drawCanvas() {
+    ImVec2 origin = ImGui::GetCursorScreenPos();
+    ImVec2 size = ImGui::GetContentRegionAvail();
+
+    if (size.x < 1.f || size.y < 1.f) {
+        return;
+    }
+
+    ImGui::InvisibleButton("view", size, ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonMiddle);
+
+    bool hovered = ImGui::IsItemHovered();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+
+    if (shown != Load::Ready) {
+        const char* text = shown == Load::Failed ? "cannot show this image" : "decoding";
+        ImVec2 extent = ImGui::CalcTextSize(text);
+
+        dl->AddText(ImVec2(origin.x + (size.x - extent.x) / 2.f, origin.y + (size.y - extent.y) / 2.f), ImGui::GetColorU32(ImGuiCol_TextDisabled), text);
+
+        return;
+    }
+
+    float rw = (float)(rotation & 1 ? texH : texW);
+    float rh = (float)(rotation & 1 ? texW : texH);
+
+    if (fit) {
+        // fit shrinks: a small image stays at its own size
+        zoom = min(1.f, min(size.x / rw, size.y / rh));
+    }
+
+    float dw = rw * zoom;
+    float dh = rh * zoom;
+
+    // an image within the canvas sits centred; a larger one pans, never
+    // past its edges
+    panX = dw <= size.x ? 0.f : clampf(panX, (size.x - dw) / 2.f, (dw - size.x) / 2.f);
+    panY = dh <= size.y ? 0.f : clampf(panY, (size.y - dh) / 2.f, (dh - size.y) / 2.f);
+
+    ImVec2 centre(origin.x + size.x / 2.f + panX, origin.y + size.y / 2.f + panY);
+    ImVec2 p0(centre.x - dw / 2.f, centre.y - dh / 2.f);
+    ImVec2 p1(centre.x + dw / 2.f, centre.y + dh / 2.f);
+    // the texture's corners, top-left first clockwise; a quarter turn
+    // clockwise puts the texture's top-left at the screen's top-right
+    const ImVec2 uv[4] = {ImVec2(0, 0), ImVec2(1, 0), ImVec2(1, 1), ImVec2(0, 1)};
+    int r = rotation;
+
+    dl->AddImageQuad(tex, p0, ImVec2(p1.x, p0.y), p1, ImVec2(p0.x, p1.y), uv[(4 - r) & 3], uv[(5 - r) & 3], uv[(6 - r) & 3], uv[(7 - r) & 3]);
+
+    ImGuiIO& io = ImGui::GetIO();
+
+    // the wheel zooms about the pointer: what is under it stays put
+    if (hovered && io.MouseWheel != 0.f) {
+        float before = zoom;
+        float after = clampf(zoom * powf(zoomStep, io.MouseWheel), zoomMin, zoomMax);
+        float tx = (io.MousePos.x - centre.x) / before;
+        float ty = (io.MousePos.y - centre.y) / before;
+
+        panX = io.MousePos.x - tx * after - (origin.x + size.x / 2.f);
+        panY = io.MousePos.y - ty * after - (origin.y + size.y / 2.f);
+        setZoom(after);
+    }
+
+    if (ImGui::IsItemActive() && (ImGui::IsMouseDragging(ImGuiMouseButton_Left) || ImGui::IsMouseDragging(ImGuiMouseButton_Middle))) {
+        panX += io.MouseDelta.x;
+        panY += io.MouseDelta.y;
+    }
+}
+
+// the window: the list, the canvas, the properties
+void ViewApp::draw() {
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+
+    ImGui::SetNextWindowPos(vp->Pos);
+    ImGui::SetNextWindowSize(vp->Size);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0, 0));
+    // Begin's and BeginChild's results go unread here and below: a
+    // window that cannot collapse, and a child of one, is shown every
+    // frame, and drawing into a hidden one would only be wasted
+    // as an ImGui application lays out: the panels are windows, in the
+    // window colour, the canvas between them is the application's own
+    // background, the presenter's clear colour
+    ImGui::Begin("##view", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBackground);
+
+    float sideW = floorf(vp->Size.x * sideShare);
+    bool left = panel && !fullscreen;
+    bool right = info && !fullscreen;
+
+    if (left) {
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImGui::GetStyleColorVec4(ImGuiCol_WindowBg));
+        ImGui::BeginChild("gallery", ImVec2(sideW, 0.f), 0, ImGuiWindowFlags_NoScrollbar);
+        drawGallery();
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
+        ImGui::SameLine();
+    }
+
+    ImGui::BeginChild("canvas", ImVec2(right ? -sideW : 0.f, 0.f), 0, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    drawCanvas();
+    ImGui::EndChild();
+
+    if (right) {
+        ImGui::SameLine();
+        // the zeros placed the children; inside the panel ImGui's own
+        // padding and spacing
+        ImGui::PopStyleVar(2);
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImGui::GetStyleColorVec4(ImGuiCol_WindowBg));
+        ImGui::BeginChild("info", ImVec2(sideW, 0.f), ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoScrollbar);
+        drawInfo();
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
+    } else {
+        ImGui::PopStyleVar(2);
+    }
+
+    ImGui::End();
 }
 
 int mainView(ObjPool& pool, Ui& ui, int argc, char** argv) {

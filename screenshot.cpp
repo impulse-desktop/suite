@@ -68,10 +68,6 @@ namespace {
 
     constexpr u32 kMagic = 0x31574d49u; // 'IMW1' little-endian
 
-    bool Image::shared() const {
-        return dmabuf;
-    }
-
     // W:H:FORMAT:OFFSET:STRIDE:MODIFIER:SIZE:UUID, seven decimal fields and
     // the exporting GPU's deviceUUID as 32 hex digits
     bool parseShared(StringView spec, Image& img) {
@@ -731,14 +727,8 @@ namespace {
         bool dragging = false;
         float dragOx = 0, dragOy = 0;
 
-        bool empty() const {
-            return x1 - x0 < 1 || y1 - y0 < 1;
-        }
-
-        void clear() {
-            x0 = y0 = x1 = y1 = 0;
-            dragging = false;
-        }
+        bool empty() const;
+        void clear();
     };
 
     // view state: the on-screen zoom (percent, view-only — save/copy always use
@@ -1011,10 +1001,6 @@ namespace {
         int frame() override;
     };
 
-    int ScreenshotUi::frame() {
-        return error->empty() ? drawUi(*gpu, *window, *img, *tex, *view) : drawErrorPanel("screenshot"_sv, gpu->scale, sv(*error));
-    }
-
     // the crop rect in image px, with the empty-selection-is-whole-frame rule
     void cropRegion(const Image& img, const Crop& c, int& x0, int& y0, int& x1, int& y1) {
         x0 = (int)(clampf(c.x0, 0, (float)img.w) + 0.5f);
@@ -1029,6 +1015,23 @@ namespace {
             y1 = (int)img.h;
         }
     }
+}
+
+bool Crop::empty() const {
+    return x1 - x0 < 1 || y1 - y0 < 1;
+}
+
+void Crop::clear() {
+    x0 = y0 = x1 = y1 = 0;
+    dragging = false;
+}
+
+bool Image::shared() const {
+    return dmabuf;
+}
+
+int ScreenshotUi::frame() {
+    return error->empty() ? drawUi(*gpu, *window, *img, *tex, *view) : drawErrorPanel("screenshot"_sv, gpu->scale, sv(*error));
 }
 
 int mainScreenshot(StringView path) {
