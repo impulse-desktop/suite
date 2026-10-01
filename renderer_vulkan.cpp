@@ -1,6 +1,5 @@
-#include "frame.h"
-
 #include "gpu.h"
+#include "frame.h"
 #include "chaos_monkey.h"
 
 #include <std/mem/obj_pool.h>

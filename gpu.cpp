@@ -6,14 +6,10 @@
 
 #include <string.h>
 
-#if defined(__APPLE__)
-    #include <vulkan/vulkan_metal.h>
-#else
 struct wl_display;
 struct wl_surface;
 
-    #include <vulkan/vulkan_wayland.h>
-#endif
+#include <vulkan/vulkan_wayland.h>
 
 #include <imgui.h>
 #include <imgui_impl_vulkan.h>
@@ -668,11 +664,7 @@ void Gpu::setupVulkan(ObjPool& pool, const GpuOptions& wants) {
     Vector<const char*> instanceExts;
 
     instanceExts.pushBack(VK_KHR_SURFACE_EXTENSION_NAME);
-#if defined(__APPLE__)
-    instanceExts.pushBack(VK_EXT_METAL_SURFACE_EXTENSION_NAME);
-#else
     instanceExts.pushBack(VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME);
-#endif
 
     if (wants.hdr) {
         instanceExts.pushBack(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME);
@@ -738,13 +730,6 @@ void Gpu::setupVulkan(ObjPool& pool, const GpuOptions& wants) {
         devExts.pushBack(wantedExts[i]);
     }
 
-#if defined(__APPLE__)
-    const char* portability = "VK_KHR_portability_subset";
-
-    if (hasDeviceExtension(phys, portability)) {
-        devExts.pushBack(portability);
-    }
-#endif
     float prio = 1.0f;
     VkDeviceQueueCreateInfo qi = {};
 
@@ -784,18 +769,11 @@ VkSurfaceKHR Gpu::createSurface(plt::Window& window) {
     plt::RenderContext render = window.renderContext();
     VkSurfaceKHR surface = VK_NULL_HANDLE;
 
-#if defined(__APPLE__)
-    VkMetalSurfaceCreateInfoEXT sci{VK_STRUCTURE_TYPE_METAL_SURFACE_CREATE_INFO_EXT};
-
-    sci.pLayer = (const CAMetalLayer*)render.connection;
-    vkc(vkCreateMetalSurfaceEXT(instance, &sci, alloc, &surface));
-#else
     VkWaylandSurfaceCreateInfoKHR sci{VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR};
 
     sci.display = (wl_display*)render.connection;
     sci.surface = (wl_surface*)render.window;
     vkc(vkCreateWaylandSurfaceKHR(instance, &sci, alloc, &surface));
-#endif
 
     return surface;
 }

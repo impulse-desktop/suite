@@ -2,7 +2,10 @@
 #include "util.h"
 #include "view.h"
 #include "ui_demo.h"
-#include "screenshot.h"
+
+#if !defined(__APPLE__)
+    #include "screenshot.h"
+#endif
 
 #include <std/ios/sys.h>
 #include <std/str/view.h>
@@ -22,6 +25,7 @@ namespace {
         int (*run)(int argc, char** argv);
     };
 
+#if !defined(__APPLE__)
     int runScreenshot(int argc, char** argv) {
         if (argc < 2) {
             sysE << "usage: im screenshot <path|fd:N>"_sv << endL;
@@ -31,6 +35,7 @@ namespace {
 
         return mainScreenshot(StringView(argv[1]));
     }
+#endif
 
     int runView(int argc, char** argv) {
         return runTool("view"_sv, mainView, argc, argv);
@@ -41,7 +46,9 @@ namespace {
     }
 
     constexpr Tool tools[] = {
+#if !defined(__APPLE__)
         {"screenshot", runScreenshot},
+#endif
         {"view", runView},
         {"ui", runUiDemo},
     };

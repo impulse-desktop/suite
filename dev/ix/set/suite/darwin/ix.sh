@@ -8,12 +8,7 @@
 
 {% block run_deps %}
 bin/wabt
-bin/glslang
 bin/pkg/config
 bin/python
-lib/molten/vk(target=darwin-aarch64,kind=lib)
-lib/png(target=darwin-aarch64,kind=lib)
-lib/jxl(target=darwin-aarch64,kind=lib)
-lib/vulkan/headers(target=darwin-aarch64,kind=lib)
 lib/c++(target=darwin-aarch64,kind=lib)
 {% endblock %}

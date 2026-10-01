@@ -63,15 +63,13 @@ every memory access checked, with no interpreter or JIT behind it.
 
 ## macOS
 
-The tools build for macOS as well, on plt's Cocoa backend with MoltenVK
-in place of a Vulkan loader: `build.py` takes the target from the runner
-(`--target aarch64-apple-darwin11`, the triple an ix darwin realm names),
-links MoltenVK and the frameworks it and Cocoa need, and leaves the
-Wayland-only parts out: the compositor's devices and the scenarios. The
-viewer is what runs there; the screenshot tool builds but serves a
-compositor that is not there. On a Mac, an ix realm with `lib/molten/vk`,
-`lib/png`, `lib/jxl`, `lib/vulkan/headers` and the host tools (`bin/wabt`,
-`bin/glslang`, `bin/pkg/config`) is enough:
+The viewer and `im ui` build for macOS as well, on plt's Cocoa backend,
+drawing with Metal through ImGui's own Metal backend: `build.py` takes the
+target from the runner (`--target aarch64-apple-darwin11`, the triple an ix
+darwin realm names), links the frameworks Metal and Cocoa need, and leaves
+out what is Linux's: Vulkan, the screenshot tool with its encoders, the
+compositor's devices and the scenarios. On a Mac, the host tools
+(`bin/wabt`, `bin/pkg/config`) are enough:
 
 ```
 ./build --target aarch64-apple-darwin11

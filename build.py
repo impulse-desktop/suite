@@ -31,16 +31,21 @@ flags.allow({
 
 
 # ---- the platform ----------------------------------------------------------
-# Linux draws through Wayland, plt's backend there, and runs the scenarios
-# under a compositor; macOS draws through Cocoa and MoltenVK and only builds:
-# the compositor the screenshot tool serves is not there, the viewer is
+# Linux draws through Wayland, plt's backend there, with Vulkan, and runs the
+# scenarios under a compositor; macOS draws through Cocoa and Metal and only
+# builds the viewer and im ui: the compositor the screenshot tool serves is
+# not there, and neither are its Vulkan, its encoders and its fault seam
 darwin = "apple-darwin" in build.target
 
 if darwin:
-    # MoltenVK by name, with the frameworks it and plt's Cocoa backend stand
+    # the SDK's frameworks, as system headers so -Werror leaves them alone,
+    # and to the linker; the frameworks Metal and plt's Cocoa backend stand
     # on: the imported plt graph brings its archive, not its link flags
+    sdk_frameworks = os.path.join(os.environ["OSX_SDK"], "System", "Library", "Frameworks") if "OSX_SDK" in os.environ else None
+    if sdk_frameworks:
+        build.cppflags += [f"-iframework{sdk_frameworks}"]
     platform_deps = [dependency(ldflags=[
-        "-lMoltenVK",
+        *([f"-F{sdk_frameworks}"] if sdk_frameworks else []),
         "-Wl,-framework,AppKit",
         "-Wl,-framework,Carbon",
         "-Wl,-framework,CoreFoundation",
@@ -58,8 +63,12 @@ else:
     vulkan = pkg_config("vulkan")
     platform_deps = [wayland_client, xkb, vulkan]
 
-png = pkg_config("libpng")
-jxl = pkg_config("libjxl")
+# the screenshot tool's encoders, Linux's alone; the scenarios read JPEG XL too
+if darwin:
+    encoders = []
+else:
+    jxl = pkg_config("libjxl")
+    encoders = [pkg_config("libpng"), jxl]
 
 libstd = import_build(std_build, "libstd.a", extra_cflags=["-Wno-error"])
 plt = import_build(
@@ -78,7 +87,7 @@ warning_flags = ["-Wall", "-Wextra", "-Werror", "-Wno-missing-field-initializers
 # shaders are named after the .cpp that creates their pipeline;
 # fullscreen.vert is the shared fullscreen-triangle vertex stage
 shader_rules = []
-for shader, stage in [
+for shader, stage in [] if darwin else [
     ("fullscreen", "vert"),
     ("gpu_scene", "frag"),
     ("gpu_image", "vert"),
@@ -97,9 +106,13 @@ for shader, stage in [
     ))
 
 
+# ImGui's core and the platform's renderer backend: Vulkan's, or Metal's,
+# under ARC as upstream builds it
+imgui_core = [path for path in build.glob("$(S)/ext/imgui/*.cpp") if not path.endswith("imgui_impl_vulkan.cpp")]
 imgui = library(
     name="imgui",
-    srcs=build.glob("$(S)/ext/imgui/*.cpp"),
+    srcs=[*imgui_core, "$(S)/ext/imgui/imgui_impl_metal.mm"] if darwin else [*imgui_core, "$(S)/ext/imgui/imgui_impl_vulkan.cpp"],
+    cflags=["-fobjc-arc", "-fobjc-weak"] if darwin else [],
     deps=platform_deps,
 )
 
@@ -188,12 +201,17 @@ decode = library(
 )
 
 
-im_sources = build.glob("$(S)/*.cpp")
+# Linux builds every tool over Vulkan; macOS the runtime's tools over Metal
+wayland_only = ["gpu.cpp", "renderer_vulkan.cpp", "screenshot.cpp", "color.cpp", "chaos_monkey.cpp"]
+im_sources = [path for path in build.glob("$(S)/*.cpp") if not (darwin and os.path.basename(path) in wayland_only)]
+if darwin:
+    im_sources.append("$(S)/renderer_metal.mm")
+    warning_flags = [*warning_flags, "-fobjc-arc", "-fblocks"]
 # the vendored libraries' own dependencies come along by name: an imported
 # graph hands over its archive, not what the archive wants linked
 im_deps = [
     *shader_rules, imgui, decode, plt, libstd,
-    *platform_deps, png, jxl, system,
+    *platform_deps, *encoders, system,
 ]
 
 # one binary, every tool: `im screenshot ...`, and a link named after the
@@ -217,7 +235,7 @@ im_test = program(
     deps=im_deps,
 )
 
-tools = ["screenshot", "view", "ui"]
+tools = ["view", "ui"] if darwin else ["screenshot", "view", "ui"]
 
 links = command(
     name="links",
