@@ -1,3 +1,5 @@
+#include "renderer_vulkan.h"
+
 #include "util.h"
 #include "pooled.h"
 #include "renderer.h"
@@ -1734,7 +1736,7 @@ namespace {
     }
 }
 
-SharedImage* SharedImage::create(ObjPool& pool, StringView description, intptr_t handle) {
+SharedImage* createVulkanSharedImage(ObjPool& pool, StringView description, intptr_t handle) {
     DmaImage* image = pool.make<DmaImage>();
     if (!parseShared(description, *image)) {
         fail("bad shared screenshot metadata"_sv);
@@ -2017,10 +2019,7 @@ RenderImage* VulkanRenderer::upload(ObjPool& pool, u32 width, u32 height, const 
     return image;
 }
 
-Renderer* Renderer::create(ObjPool& pool, plt::Window& window, const RendererOptions& options) {
-    if (!(options.sdrWhiteNits > 0.f) || options.sdrWhiteNits > 10000.f) {
-        fail("invalid SDR white level"_sv);
-    }
+Renderer* createVulkanRenderer(ObjPool& pool, plt::Window& window, const RendererOptions& options) {
     GpuOptions wants;
     wants.chaos = VulkanChaos::create(pool);
     wants.textures = maxTextureCount;

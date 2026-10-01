@@ -4,6 +4,12 @@
 
 #include <string.h>
 
+#if defined(__APPLE__)
+    #include "renderer_metal.h"
+#else
+    #include "renderer_vulkan.h"
+#endif
+
 void checkImageSize(u32 width, u32 height, u32 limit) {
     if (!width || !height || width > limit || height > limit || (u64)width * height > (1u << 28)) {
         fail("invalid renderer image size"_sv);
@@ -42,4 +48,23 @@ void unpackPixels(const void* data, u32 width, u32 height, size_t stride, PixelL
             rgba[at * 4 + 3] = packed ? (u8)((pixel >> 30) * 85) : (u8)(pixel >> 24);
         }
     }
+}
+
+Renderer* Renderer::create(stl::ObjPool& pool, plt::Window& window, const RendererOptions& options) {
+    if (!(options.sdrWhiteNits > 0.f) || options.sdrWhiteNits > 10000.f) {
+        fail("invalid SDR white level"_sv);
+    }
+#if defined(__APPLE__)
+    return createMetalRenderer(pool, window, options);
+#else
+    return createVulkanRenderer(pool, window, options);
+#endif
+}
+
+SharedImage* SharedImage::create(stl::ObjPool& pool, stl::StringView description, intptr_t handle) {
+#if defined(__APPLE__)
+    return createMetalSharedImage(pool, description, handle);
+#else
+    return createVulkanSharedImage(pool, description, handle);
+#endif
 }

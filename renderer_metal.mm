@@ -1,3 +1,5 @@
+#include "renderer_metal.h"
+
 #include "util.h"
 #include "pooled.h"
 #include "renderer.h"
@@ -132,7 +134,7 @@ SurfaceImage::~SurfaceImage() noexcept {
     }
 }
 
-SharedImage* SharedImage::create(ObjPool& pool, StringView description, intptr_t handle) {
+SharedImage* createMetalSharedImage(ObjPool& pool, StringView description, intptr_t handle) {
     if (!description.empty() || !handle) {
         fail("a shared Metal image needs an IOSurface handle"_sv);
     }
@@ -416,10 +418,7 @@ u32 MetalRenderer::maxTextures() {
     return 0xffffffffu;
 }
 
-Renderer* Renderer::create(ObjPool& pool, plt::Window& window, const RendererOptions& options) {
-    if (!(options.sdrWhiteNits > 0.f) || options.sdrWhiteNits > 10000.f) {
-        fail("invalid SDR white level"_sv);
-    }
+Renderer* createMetalRenderer(ObjPool& pool, plt::Window& window, const RendererOptions& options) {
     plt::RenderContext context = window.renderContext();
     MetalRenderer* renderer = pool.make<MetalRenderer>();
     renderer->layer = (__bridge CAMetalLayer*)context.connection;

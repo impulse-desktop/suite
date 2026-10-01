@@ -8,11 +8,11 @@
 
 #include <string.h>
 
-using namespace stl;
-
 #if defined(__APPLE__)
-void checkMetalShared(ObjPool& pool, Ui& ui, bool hdr);
+    #include "renderer_metal.h"
 #endif
+
+using namespace stl;
 
 namespace {
     static void verify(bool condition) {
