@@ -26,7 +26,7 @@ SKIPPED = 77
 SCREENSHOT = "imscreenshot"
 VIEW = "imview"
 UI = "imui"
-TOOLS = {"screenshot": SCREENSHOT, "view": VIEW, "ui": UI}
+TOOLS = {"screenshot": SCREENSHOT, "view": VIEW, "play": "implay", "ui": UI}
 
 # the evdev codes the scenarios press
 KEY_ESC = 1
@@ -741,3 +741,43 @@ def png_size(path):
 def is_jxl(path):
     data = Path(path).read_bytes()
     return data[:2] == b"\xff\x0a" or data[:12] == b"\x00\x00\x00\x0cJXL \r\n\x87\n"
+
+
+def write_video(path, seconds=12, audio=True):
+    """Indexed raw AVI with changing RGB frames and optional PCM audio.
+
+    No encoder dependency: this exercises demux, decode, clocks and seeking
+    with known frame times, including builds without external FFmpeg tools.
+    """
+    def chunk(kind, data):
+        return kind + struct.pack("<I", len(data)) + data + b"\0" * (len(data) % 2)
+
+    def group(kind, data):
+        return chunk(b"LIST", kind + data)
+
+    width, height, fps, rate = 64, 48, 25, 48000
+    count = seconds * fps
+    frame_size = width * height * 3
+    main = struct.pack("<14I", 1000000 // fps, frame_size * fps, 0, 0x10, count, 0,
+                       2 if audio else 1, frame_size, width, height, 0, 0, 0, 0)
+    video_header = struct.pack("<4s4sIHHIIIIIIIIhhhh", b"vids", b"DIB ", 0, 0, 0, 0,
+                               1, fps, 0, count, frame_size, 0xffffffff, 0, 0, 0, width, height)
+    video_format = struct.pack("<IiiHHIIiiII", 40, width, height, 1, 24, 0, frame_size, 0, 0, 0, 0)
+    headers = chunk(b"avih", main) + group(b"strl", chunk(b"strh", video_header) + chunk(b"strf", video_format))
+    pcm = b""
+    if audio:
+        audio_header = struct.pack("<4s4sIHHIIIIIIIIhhhh", b"auds", b"\0" * 4, 0, 0, 0, 0,
+                                   2, rate * 2, 0, seconds * rate, rate // fps * 2, 0xffffffff, 2, 0, 0, 0, 0)
+        audio_format = struct.pack("<HHIIHH", 1, 1, rate, rate * 2, 2, 16)
+        headers += group(b"strl", chunk(b"strh", audio_header) + chunk(b"strf", audio_format))
+        pcm = b"".join(struct.pack("<h", round(2000 * math.sin(i * 2 * math.pi * 400 / rate))) for i in range(rate // fps))
+    data, index = bytearray(), bytearray()
+    for i in range(count):
+        # The changing red channel catches stale texture contents.
+        samples = [(b"00db", bytes((32, 96, i % 256)) * (width * height))]
+        if audio:
+            samples.append((b"01wb", pcm))
+        for kind, payload in samples:
+            index.extend(struct.pack("<4sIII", kind, 0x10, len(data) + 4, len(payload)))
+            data.extend(chunk(kind, payload))
+    path.write_bytes(chunk(b"RIFF", b"AVI " + group(b"hdrl", headers) + group(b"movi", data) + chunk(b"idx1", index)))

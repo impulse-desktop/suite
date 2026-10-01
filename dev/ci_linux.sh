@@ -11,7 +11,7 @@ if [ -f /etc/alpine-release ]; then
     # they live under the version's own prefix
     apk add --no-cache bash binutils clang compiler-rt llvm g++ linux-headers lld python3 pkgconf glslang \
         wayland-dev wayland-protocols libxkbcommon-dev cairo-dev fontconfig-dev \
-        vulkan-headers vulkan-loader-dev libpng-dev libjxl-dev cmake samurai xz
+        vulkan-headers vulkan-loader-dev libpng-dev libjxl-dev ffmpeg-dev openal-soft-dev ffmpeg cmake samurai xz
     export CC=clang CXX=clang++
     export LDFLAGS="${LDFLAGS:-} -fuse-ld=lld"
     export PATH="/usr/lib/llvm$(clang -dumpversion | cut -d. -f1)/bin:$PATH"
@@ -34,7 +34,7 @@ else
     # wabt's wasm2c turns the vendored image decoder into C
     apt-get install --yes --no-install-recommends python3 pkg-config glslang-tools wabt curl ca-certificates \
         libwayland-dev libwayland-bin wayland-protocols libxkbcommon-dev libcairo2-dev libfontconfig-dev \
-        libvulkan-dev libpng-dev libjxl-dev
+        libvulkan-dev libpng-dev libjxl-dev libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libswresample-dev libopenal-dev ffmpeg
     # the package leaves out the includes its wasm2c runtime is made of;
     # they come from wabt's tree, at the packaged version
     rt=/usr/share/wabt/wasm2c

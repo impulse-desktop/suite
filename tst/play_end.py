@@ -1,0 +1,43 @@
+"""EOF, replay, audio-only seek and CLI failures."""
+import time
+import wave
+from session import KEY_HOME, KEY_RIGHT, KEY_SPACE, Session, write_video
+
+for mode in ("av", "video", "audio"):
+    with Session("play_end_" + mode, tool="play") as s:
+        path = s.artifacts / ("sound.wav" if mode == "audio" else "short.avi")
+        if mode == "audio":
+            with wave.open(str(path), "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(48000)
+                w.writeframes(b"\0" * 48000 * 2 * 2)
+        else:
+            write_video(path, seconds=2, audio=mode == "av")
+        s.launch(str(path), ALSOFT_DRIVERS="null", IM_TRACE_FRAMES="1")
+        s.focus()
+        s.said("ended generation=1")
+        time.sleep(0.5)
+        before = s.client_log().count("im frame ")
+        time.sleep(0.7)
+        assert before == s.client_log().count("im frame "), "EOF keeps rendering"
+        s.tap(KEY_SPACE)
+        s.said("seek generation=2 position_ms=0")
+        s.said("ended generation=2")
+        s.tap(KEY_HOME)
+        s.said("seek generation=3 position_ms=0")
+        s.tap(KEY_RIGHT)
+        s.said("seek generation=4")
+        s.tap(KEY_SPACE)
+        s.said("ended generation=4")
+        s.close()
+
+with Session("play_cli", tool="play") as s:
+    code, log = s.run()
+    assert code == 2 and "usage: im play <file>" in log, (code, log)
+    s.launch(str(s.artifacts / "missing.avi"), ALSOFT_DRIVERS="null")
+    s.focus()
+    s.logged("No such file or directory")
+    s.close()
+
+print("OK: A/V, silent and audio-only EOF, replay, seek and CLI errors")

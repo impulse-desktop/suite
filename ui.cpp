@@ -344,7 +344,7 @@ namespace {
 
     struct UiImpl final: Ui, plt::InputSink, plt::FrameCallback, plt::WindowEvents, Runable {
         ObjPool* pool = nullptr;
-        plt::Platform* platform = nullptr;
+        plt::Platform* platform_ = nullptr;
         StringView name;
         Runable* body = nullptr;
         plt::Fiber* fiber = nullptr;
@@ -376,11 +376,13 @@ namespace {
         void init(const UiOptions& options);
         int run(Runable& body) override;
         bool next(UiEvent& event) override;
+        plt::Platform* platform() override;
         void requestFrame() override;
         void requestFullscreen(bool on) override;
         void requestResize(u32 width, u32 height) override;
         RenderImage* uploadImage(ObjPool& pool, u32 width, u32 height, const void* rgba, bool hdr) override;
         RenderImage* importImage(ObjPool& pool, SharedImage& source, bool hdr) override;
+        RenderImage* bindImage(ObjPool& pool, u32 width, u32 height, const void* data, size_t size, size_t stride, Runable& retired) override;
         ImTextureRef loadTexture(u32 width, u32 height, const void* rgba) override;
         void releaseTexture(ImTextureRef texture) override;
         u32 maxTextureSide() override;
@@ -429,11 +431,11 @@ void CallFrame::schedule(float seconds) {
     u64 delay = (u64)ceil((double)seconds * 1e6);
     u64 elapsed = monotonicNowUs() - ui->frameUs;
 
-    ui->platform->poller()->timeout(delay > elapsed ? delay - elapsed : 0, *this);
+    ui->platform_->poller()->timeout(delay > elapsed ? delay - elapsed : 0, *this);
 }
 
 void CallFrame::cancel() {
-    ui->platform->poller()->cancel(*this);
+    ui->platform_->poller()->cancel(*this);
 }
 
 void UiImpl::beginInputFrame() {
@@ -556,7 +558,7 @@ void UiImpl::init(const UiOptions& options) {
     made.events = this;
     made.frame = this;
 
-    plt::Window& shown = *platform->createWindow(*pool, made);
+    plt::Window& shown = *platform_->createWindow(*pool, made);
     plt::WindowInfo info = shown.info();
 
     clampWindowSize(info, width, height);
@@ -569,10 +571,10 @@ void UiImpl::init(const UiOptions& options) {
         dropTextures();
     });
     setupImGuiContext(*pool, scale);
-    renderer = Renderer::create(*pool, shown, options.renderer);
+    renderer = Renderer::create(*pool, *platform_, shown, options.renderer);
 
     window = &shown;
-    wake = platform->createLoopWake(*pool, *pool->make<CallFrame>(this));
+    wake = platform_->createLoopWake(*pool, *pool->make<CallFrame>(this));
     ImGui::GetIO().BackendPlatformUserData = this;
     ImGuiPlatformIO& pio = ImGui::GetPlatformIO();
 
@@ -605,6 +607,14 @@ void UiImpl::requestFrame() {
     wake->signal();
 }
 
+plt::Platform* UiImpl::platform() {
+    return platform_;
+}
+
+RenderImage* UiImpl::bindImage(ObjPool& owner, u32 width, u32 height, const void* data, size_t size, size_t stride, Runable& retired) {
+    return renderer->bind(owner, width, height, data, size, stride, retired);
+}
+
 bool UiImpl::next(UiEvent& event) {
     if (!shown) {
         shown = true;
@@ -633,7 +643,7 @@ bool UiImpl::next(UiEvent& event) {
         }
 
         parked = true;
-        platform->scheduler()->current()->park();
+        platform_->scheduler()->current()->park();
         parked = false;
     }
 }
@@ -718,7 +728,7 @@ void UiImpl::run() {
     }
 
     finished = true;
-    platform->stop();
+    platform_->stop();
 }
 
 bool UiImpl::frame(const plt::WindowInfo& info) {
@@ -730,7 +740,9 @@ bool UiImpl::frame(const plt::WindowInfo& info) {
     u64 gap = frameBegan ? began - frameBegan : 0;
 
     frameBegan = began;
-    renderer->beginFrame(info.width, info.height);
+    if (!renderer->beginFrame(info.width, info.height)) {
+        return false;
+    }
 
     if (info.width != presentedWidth || info.height != presentedHeight) {
         presentedWidth = info.width;
@@ -770,7 +782,7 @@ bool UiImpl::frame(const plt::WindowInfo& info) {
     }
 
     if (action != 0) {
-        platform->stop();
+        platform_->stop();
     }
 
     return presented;
@@ -860,17 +872,17 @@ Ui* Ui::create(ObjPool& pool, StringView name, const UiOptions& options) {
     ui.name = pool.intern(name);
     ui.scale = scaleFromEnv();
     ui.traceFrames = getenv("IM_TRACE_FRAMES") != nullptr;
-    ui.platform = plt::Platform::create(pool);
+    ui.platform_ = plt::Platform::create(pool);
     ui.init(options);
     return &ui;
 }
 
 int UiImpl::run(Runable& body_) {
     body = &body_;
-    fiber = platform->scheduler()->create(*pool, *this, toolStack);
+    fiber = platform_->scheduler()->create(*pool, *this, toolStack);
 
     if (!finished) {
-        platform->run();
+        platform_->run();
     }
 
     if (!finished && window) {

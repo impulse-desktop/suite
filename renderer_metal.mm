@@ -4,18 +4,29 @@
 #include "pooled.h"
 #include "renderer.h"
 
+#include <std/lib/vector.h>
 #include <std/str/builder.h>
+#include <std/thr/runable.h>
 #include <std/mem/obj_pool.h>
 
 #include <math.h>
 #include <string.h>
+#include <unistd.h>
+#include <plt/poller.h>
 #include <plt/window.h>
+#include <plt/platform.h>
+#include <plt/loop_wake.h>
 #include <imgui_impl_metal.h>
 
 #import <Metal/Metal.h>
 #import <AppKit/AppKit.h>
 #import <IOSurface/IOSurface.h>
 #import <QuartzCore/CAMetalLayer.h>
+#import <QuartzCore/CAMetalDisplayLink.h>
+
+@interface ImMetalDisplayTarget: NSObject <CAMetalDisplayLinkDelegate>
+@property(nonatomic, assign) void* owner;
+@end
 
 using namespace stl;
 
@@ -24,6 +35,12 @@ namespace {
     constexpr u32 maxTextureSize = 16384;
 
     struct MetalRenderer;
+
+    struct PollMetal final: public plt::TimerCallback {
+        MetalRenderer* renderer;
+        explicit PollMetal(MetalRenderer* renderer);
+        void ready() override;
+    };
 
     struct SurfaceImage final: SharedImage {
         IOSurfaceRef surface = nullptr;
@@ -37,8 +54,19 @@ namespace {
         id<MTLTexture> texture = nil;
         PixelLayout layout = PixelLayout::Rgba8;
         bool hdr = false;
+        const void* source = nullptr;
+        size_t sourceStride = 0;
+        size_t bufferStride = 0;
+        id<MTLBuffer> buffer = nil;
+        id<MTLCommandBuffer> lastUse = nil;
+        Runable* retired = nullptr;
+        bool hostImported = false;
+        bool dirty = false;
+        bool queued = false;
+        bool watching = false;
 
         ~MetalImage() noexcept;
+        void prepare() override;
         void draw(ImDrawList& list, ImVec2 lo, ImVec2 hi) override;
         void read(int x0, int y0, int x1, int y1, ImagePixels& out) override;
     };
@@ -51,6 +79,12 @@ namespace {
 
     struct MetalRenderer final: Renderer {
         plt::Window* host = nullptr;
+        plt::LoopWake* wake = nullptr;
+        CAMetalDisplayLink* displayLink = nil;
+        ImMetalDisplayTarget* target = nil;
+        Vector<MetalImage*> drawn;
+        Vector<MetalImage*> inFlight;
+        bool waiting = false;
         CAMetalLayer* layer = nil;
         NSWindow* window = nil;
         id<MTLDevice> device = nil;
@@ -65,13 +99,16 @@ namespace {
         float sdrWhiteNits = 203.f;
         ImDrawData* drawing = nullptr;
 
-        void beginFrame(u32 width, u32 height) override;
+        bool beginFrame(u32 width, u32 height) override;
+        void drawableReady(id<CAMetalDrawable> value);
+        void poll();
         bool endFrame(ImDrawData* draw) override;
         u32 maxTextureSide() override;
         u32 maxTextures() override;
         RenderImage* upload(ObjPool& pool, u32 width, u32 height, const void* rgba, bool hdr) override;
         RenderImage* import(ObjPool& pool, SharedImage& source, bool hdr) override;
 
+        RenderImage* bind(ObjPool& pool, u32 width, u32 height, const void* data, size_t size, size_t stride, Runable& retired) override;
         void setupHdr();
         void drawHdr(ImDrawData& draw);
         bool clip(const ImDrawCmd& command);
@@ -175,10 +212,25 @@ SharedImage* createMetalSharedImage(ObjPool& pool, StringView description, intpt
 }
 
 MetalImage::~MetalImage() noexcept {
-    [renderer->last waitUntilCompleted];
+    [lastUse waitUntilCompleted];
+}
+
+void MetalImage::prepare() {
+    if (source) {
+        if (!hostImported) {
+            for (size_t y = 0; y < texture.height; y++) {
+                memcpy((u8*)buffer.contents + y * bufferStride, (const u8*)source + y * sourceStride, texture.width * 4);
+            }
+        }
+        dirty = true;
+    }
 }
 
 void MetalImage::draw(ImDrawList& list, ImVec2 lo, ImVec2 hi) {
+    if (!queued) {
+        queued = true;
+        renderer->drawn.pushBack(this);
+    }
     if (hdr) {
         ImageDraw draw{this, lo, hi};
         list.AddCallback(drawImage, &draw, sizeof(draw));
@@ -364,33 +416,98 @@ void MetalRenderer::drawHdr(ImDrawData& draw) {
     drawing = nullptr;
 }
 
-void MetalRenderer::beginFrame(u32 width, u32 height) {
+@implementation ImMetalDisplayTarget
+
+- (void)metalDisplayLink:(CAMetalDisplayLink*)link needsUpdate:(CAMetalDisplayLinkUpdate*)update {
+    (void)link;
+    ((MetalRenderer*)self.owner)->drawableReady(update.drawable);
+}
+
+@end
+
+PollMetal::PollMetal(MetalRenderer* value)
+    : renderer(value)
+{
+}
+
+void PollMetal::ready() {
+    renderer->poll();
+}
+
+void MetalRenderer::poll() {
+    for (size_t i = 0; i < inFlight.length();) {
+        MetalImage* image = inFlight[i];
+        if (image->queued || image->lastUse.status < MTLCommandBufferStatusCompleted) {
+            i++;
+            continue;
+        }
+        checkCommand(image->lastUse);
+        inFlight.mut(i) = inFlight.back();
+        inFlight.popBack();
+        image->watching = false;
+        image->lastUse = nil;
+        image->retired->run();
+    }
+}
+
+void MetalRenderer::drawableReady(id<CAMetalDrawable> value) {
+    if (waiting) {
+        drawable = value;
+        waiting = false;
+        displayLink.paused = YES;
+        host->requestFrame();
+    }
+}
+
+bool MetalRenderer::beginFrame(u32 width, u32 height) {
     @autoreleasepool {
+        poll();
         checkCommand(last);
         layer.drawableSize = CGSizeMake(width, height);
-        layer.presentsWithTransaction = window.inLiveResize;
-        drawable = [layer nextDrawable];
+        if (drawable && (drawable.texture.width != width || drawable.texture.height != height)) {
+            drawable = nil;
+        }
+        if (!drawable) {
+            waiting = true;
+            displayLink.paused = NO;
+            return false;
+        }
         pass = [MTLRenderPassDescriptor renderPassDescriptor];
         pass.colorAttachments[0].texture = drawable.texture;
         pass.colorAttachments[0].loadAction = MTLLoadActionClear;
         pass.colorAttachments[0].storeAction = MTLStoreActionStore;
         pass.colorAttachments[0].clearColor = MTLClearColorMake(0.1, 0.1, 0.1, 1.0);
         ImGui_ImplMetal_NewFrame(pass);
+        return true;
     }
 }
 
 bool MetalRenderer::endFrame(ImDrawData* draw) {
     @autoreleasepool {
-        if (!drawable) {
-            pass = nil;
-            if (window.isVisible && !window.isMiniaturized && (window.occlusionState & NSWindowOcclusionStateVisible)) {
-                host->requestFrame();
-            }
-            return false;
-        }
         id<MTLCommandBuffer> command = [queue commandBuffer];
+        if (!command) {
+            fail(StringView(u8"cannot begin Metal command buffer"));
+        }
+        for (MetalImage* image : drawn) {
+            if (image->dirty) {
+                id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
+                if (!blit) {
+                    fail(StringView(u8"cannot begin Metal image upload"));
+                }
+                [blit copyFromBuffer:image->buffer sourceOffset:0 sourceBytesPerRow:image->bufferStride sourceBytesPerImage:image->bufferStride * image->texture.height sourceSize:MTLSizeMake(image->texture.width, image->texture.height, 1) toTexture:image->texture destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+                [blit endEncoding];
+                image->dirty = false;
+            }
+            image->lastUse = command;
+            image->queued = false;
+            if (image->retired && !image->watching) {
+                image->watching = true;
+                inFlight.pushBack(image);
+            }
+        }
+        drawn.clear();
         encoder = [command renderCommandEncoderWithDescriptor:pass];
-        if (!command || !encoder) {
+        if (!encoder) {
             fail(StringView(u8"cannot begin Metal frame"));
         }
         if (hdr) {
@@ -400,19 +517,48 @@ bool MetalRenderer::endFrame(ImDrawData* draw) {
         }
         [encoder endEncoding];
         encoder = nil;
-        if (layer.presentsWithTransaction) {
-            [command commit];
-            [command waitUntilScheduled];
-            [drawable present];
-        } else {
-            [command presentDrawable:drawable];
-            [command commit];
-        }
+        plt::LoopWake* completed = wake;
+        [command addCompletedHandler:^(id<MTLCommandBuffer>) {
+          completed->signal();
+        }];
+        [command presentDrawable:drawable];
+        [command commit];
         last = command;
         drawable = nil;
         pass = nil;
     }
     return true;
+}
+
+RenderImage* MetalRenderer::bind(ObjPool& pool, u32 width, u32 height, const void* data, size_t size, size_t stride, Runable& retired) {
+    checkImageSize(width, height, maxTextureSide());
+    if (!data || stride < (size_t)width * 4 || stride > size / height) {
+        fail(StringView(u8"invalid bound image buffer"));
+    }
+    @autoreleasepool {
+        MetalImage* image = pool.make<MetalImage>();
+        image->renderer = this;
+        image->source = data;
+        image->sourceStride = stride;
+        image->retired = &retired;
+        size_t page = (size_t)getpagesize();
+        if ((uintptr_t)data % page == 0 && size % page == 0 && stride % 256 == 0) {
+            image->buffer = [device newBufferWithBytesNoCopy:const_cast<void*>(data) length:size options:MTLResourceStorageModeShared deallocator:nil];
+            image->hostImported = image->buffer != nil;
+        }
+        image->bufferStride = image->hostImported ? stride : ((size_t)width * 4 + 255) & ~(size_t)255;
+        if (!image->hostImported) {
+            image->buffer = [device newBufferWithLength:image->bufferStride * height options:MTLResourceStorageModeShared];
+        }
+        MTLTextureDescriptor* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:width height:height mipmapped:NO];
+        descriptor.storageMode = MTLStorageModePrivate;
+        descriptor.usage = MTLTextureUsageShaderRead;
+        image->texture = [device newTextureWithDescriptor:descriptor];
+        if (!image->buffer || !image->texture) {
+            fail(StringView(u8"cannot allocate bound Metal image"));
+        }
+        return image;
+    }
 }
 
 u32 MetalRenderer::maxTextureSide() {
@@ -423,7 +569,7 @@ u32 MetalRenderer::maxTextures() {
     return 0xffffffffu;
 }
 
-Renderer* createMetalRenderer(ObjPool& pool, plt::Window& window, const RendererOptions& options) {
+Renderer* createMetalRenderer(ObjPool& pool, plt::Platform& platform, plt::Window& window, const RendererOptions& options) {
     plt::RenderContext context = window.renderContext();
     MetalRenderer* renderer = pool.make<MetalRenderer>();
     renderer->host = &window;
@@ -444,9 +590,18 @@ Renderer* createMetalRenderer(ObjPool& pool, plt::Window& window, const Renderer
     layer.pixelFormat = options.hdr ? MTLPixelFormatRGBA16Float : MTLPixelFormatBGRA8Unorm;
     layer.framebufferOnly = YES;
     layer.maximumDrawableCount = drawables;
-    layer.allowsNextDrawableTimeout = NO;
     layer.presentsWithTransaction = NO;
     layer.wantsExtendedDynamicRangeContent = options.hdr;
+    renderer->wake = platform.createLoopWake(pool, *pool.make<PollMetal>(renderer));
+    renderer->target = [ImMetalDisplayTarget new];
+    renderer->target.owner = renderer;
+    renderer->displayLink = [[CAMetalDisplayLink alloc] initWithMetalLayer:layer];
+    renderer->displayLink.delegate = renderer->target;
+    renderer->displayLink.paused = YES;
+    [renderer->displayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+    pooledGuard(pool, [renderer] {
+        [renderer->displayLink invalidate];
+    });
     CGColorSpaceRef color = CGColorSpaceCreateWithName(options.hdr ? kCGColorSpaceExtendedLinearITUR_2020 : kCGColorSpaceSRGB);
     if (!color) {
         fail(StringView(u8"cannot create Metal color space"));

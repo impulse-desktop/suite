@@ -41,6 +41,68 @@ namespace {
         verify(!memcmp(pixels.rgb16.data(), reversed, sizeof(reversed)));
     }
 
+    struct Retired final: public Runable {
+        Ui* ui = nullptr;
+        bool pending = false;
+        void run() override;
+    };
+
+    static void checkBound(ObjPool& pool, Ui& ui) {
+        // Aligned storage permits direct import; the second source forces
+        // the producer-copy fallback. Refill only after automatic retirement.
+        void* memory = pool.allocateOverAligned(65536, 65536);
+        unsigned char fallback[33]{};
+        unsigned char* sources[] = {(unsigned char*)memory, fallback + 1};
+        size_t strides[] = {256, 16};
+        Retired callbacks[2];
+        RenderImage* images[2];
+        for (int i = 0; i < 2; i++) {
+            callbacks[i].ui = &ui;
+            images[i] = ui.bindImage(pool, 3, 2, sources[i], i == 0 ? 65536 : 32, strides[i], callbacks[i]);
+        }
+        int iteration = 0;
+        bool submitted = false;
+        UiEvent event;
+        ui.requestFrame();
+        while (ui.next(event)) {
+            verify(event.kind == UiEvent::Kind::Frame);
+            if (callbacks[0].pending || callbacks[1].pending) {
+                continue;
+            }
+            if (submitted) {
+                for (int i = 0; i < 2; i++) {
+                    ImagePixels pixels;
+                    images[i]->read(0, 0, 3, 2, pixels);
+                    for (int y = 0; y < 2; y++) {
+                        verify(!memcmp((const unsigned char*)pixels.rgba.data() + y * 12, sources[i] + y * strides[i], 12));
+                    }
+                }
+                if (++iteration == 12) {
+                    break;
+                }
+            }
+            for (int i = 0; i < 2; i++) {
+                for (int y = 0; y < 2; y++) {
+                    for (int x = 0; x < 3; x++) {
+                        unsigned char* pixel = sources[i] + y * strides[i] + x * 4;
+                        pixel[0] = (unsigned char)(iteration * 17 + x);
+                        pixel[1] = (unsigned char)(i * 100 + y);
+                        pixel[2] = 32;
+                        pixel[3] = 255;
+                    }
+                }
+                images[i]->prepare();
+                callbacks[i].pending = true;
+                ImDrawList& list = *ImGui::GetBackgroundDrawList();
+                images[i]->draw(list, ImVec2(0, 0), ImVec2(16, 16));
+                images[i]->draw(list, ImVec2(16, 0), ImVec2(32, 16));
+            }
+            submitted = true;
+        }
+        verify(iteration == 12);
+        sysO << StringView(u8"OK: bound images, automatic retirement, reuse and pixel readback") << endL;
+    }
+
     static void checkRenderer(ObjPool& pool, Ui& ui, bool hdr) {
         const unsigned char source[] = {
             1,
@@ -106,7 +168,14 @@ namespace {
         verify(!memcmp(pixels.rgba.data(), source, sizeof(source)));
         verify(frames == 3);
         sysO << StringView(u8"OK: renderer upload, crop readback, precision, bounds and drawing") << endL;
+        checkBound(pool, ui);
     }
+}
+
+void Retired::run() {
+    verify(pending);
+    pending = false;
+    ui->requestFrame();
 }
 
 int main(int argc, char** argv) {

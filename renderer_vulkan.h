@@ -9,11 +9,12 @@ namespace stl {
 
 namespace plt {
     struct Window;
+    struct Platform;
 }
 
 struct Renderer;
 struct RendererOptions;
 struct SharedImage;
 
-Renderer* createVulkanRenderer(stl::ObjPool& pool, plt::Window& window, const RendererOptions& options);
+Renderer* createVulkanRenderer(stl::ObjPool& pool, plt::Platform& platform, plt::Window& window, const RendererOptions& options);
 SharedImage* createVulkanSharedImage(stl::ObjPool& pool, stl::StringView description, intptr_t handle);

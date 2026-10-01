@@ -11,4 +11,6 @@ bin/wabt
 bin/pkg/config
 bin/python
 lib/c++(target=darwin-aarch64,kind=lib)
+lib/suite/ffmpeg(target=darwin-aarch64,kind=lib)
+lib/suite/openal(target=darwin-aarch64,kind=lib)
 {% endblock %}

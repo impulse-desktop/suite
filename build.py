@@ -38,6 +38,8 @@ flags.allow({
 darwin = "apple-darwin" in build.target
 
 if darwin:
+    build.cflags += ["-mmacosx-version-min=14.0"]
+    build.ldflags += ["-mmacosx-version-min=14.0"]
     # the SDK's frameworks, as system headers so -Werror leaves them alone,
     # and to the linker; the frameworks Metal and plt's Cocoa backend stand
     # on: the imported plt graph brings its archive, not its link flags
@@ -78,6 +80,7 @@ plt = import_build(
     extra_cppflags=["-Dno_vendored_std", "-I$(S)/../libstd"],
 )
 system = dependency(ldflags=["-lm"])
+media = [pkg_config(name) for name in ("libavformat", "libavcodec", "libavutil", "libswscale", "libswresample", "openal")]
 # Vulkan's canonical `VkFoo info{VK_STRUCTURE_TYPE_FOO}` initialization zeros
 # the remaining aggregate fields by design; Clang otherwise diagnoses every
 # such declaration under -Wextra.
@@ -211,7 +214,7 @@ if darwin:
 # graph hands over its archive, not what the archive wants linked
 im_deps = [
     *shader_rules, imgui, decode, plt, libstd,
-    *platform_deps, *encoders, system,
+    *platform_deps, *encoders, *media, system,
 ]
 
 # one binary, every tool: `im screenshot ...`, and a link named after the
@@ -252,7 +255,7 @@ imgui_frames_test = program(
 )
 
 
-tools = ["view", "ui"] if darwin else ["screenshot", "view", "ui"]
+tools = ["view", "play", "ui"] if darwin else ["screenshot", "view", "play", "ui"]
 
 links = command(
     name="links",

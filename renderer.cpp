@@ -52,14 +52,14 @@ void unpackPixels(const void* data, u32 width, u32 height, size_t stride, PixelL
     }
 }
 
-Renderer* Renderer::create(stl::ObjPool& pool, plt::Window& window, const RendererOptions& options) {
+Renderer* Renderer::create(stl::ObjPool& pool, plt::Platform& platform, plt::Window& window, const RendererOptions& options) {
     if (!(options.sdrWhiteNits > 0.f) || options.sdrWhiteNits > 10000.f) {
         fail(StringView(u8"invalid SDR white level"));
     }
 #if defined(__APPLE__)
-    return createMetalRenderer(pool, window, options);
+    return createMetalRenderer(pool, platform, window, options);
 #else
-    return createVulkanRenderer(pool, window, options);
+    return createVulkanRenderer(pool, platform, window, options);
 #endif
 }
 
