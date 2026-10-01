@@ -10,8 +10,8 @@ using namespace stl;
 // The tool as every tool is now: a window opened, then a loop over its
 // events. A frame is one of them: on it the tool draws its ImGui windows,
 // and what it drew is shown when it asks for the next event.
-int mainUiDemo(int, char**) {
-    Ui& ui = Ui::open({320_d, 120_d});
+int mainUiDemo(ObjPool& pool, int, char**) {
+    Ui& ui = *Ui::create(pool, {320_d, 120_d});
     UiEvent event;
 
     while (ui.next(event)) {

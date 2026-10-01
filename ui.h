@@ -5,6 +5,10 @@
 
 #include <imgui.h>
 
+namespace stl {
+    class ObjPool;
+}
+
 // One scale for the whole ui. ImGui's widgets and font take it through
 // ImGui's own factors (ScaleAllSizes, FontScaleMain), what the tools draw
 // by hand takes it through px(): a design length times the scale. The
@@ -83,9 +87,9 @@ struct Ui {
 
     virtual void requestFullscreen(bool on) = 0;
 
-    // the window, shown; it lives as long as the tool. Throws where the
-    // window or its device cannot be had
-    static Ui& open(const UiOptions& options);
+    // the window, shown, owned by the pool; one per process. Throws where
+    // the window or its device cannot be had
+    static Ui* create(stl::ObjPool& pool, const UiOptions& options);
 };
 
 // a full-window panel that replaces the tool's ui (not an overlay) when
@@ -94,6 +98,8 @@ struct Ui {
 int drawErrorPanel(stl::StringView msg);
 
 // main's: the tool on its fiber under its name, the platform's loop until
-// it returns, its result. An exception out of the tool is reported under
-// its name and gives 1
-int runTool(stl::StringView name, int (*tool)(int argc, char** argv), int argc, char** argv);
+// it returns, its result. The tool makes what it holds, its window among
+// it, in the pool it is handed: the pool dies once the loop is over, never
+// inside an event, which the tool may return from. An exception out of
+// the tool is reported under its name and gives 1
+int runTool(stl::StringView name, int (*tool)(stl::ObjPool& pool, int argc, char** argv), int argc, char** argv);

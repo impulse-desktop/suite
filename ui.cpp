@@ -105,7 +105,7 @@ namespace {
         ObjPool* pool = nullptr;
         plt::Platform* platform = nullptr;
         plt::Fiber* fiber = nullptr;
-        int (*main)(int argc, char** argv) = nullptr;
+        int (*main)(ObjPool& pool, int argc, char** argv) = nullptr;
         int argc = 0;
         char** argv = nullptr;
         int result = 1;
@@ -150,7 +150,7 @@ namespace {
 
     void Running::run() {
         try {
-            result = main(argc, argv);
+            result = main(*pool, argc, argv);
         } catch (...) {
             sysE << "im "_sv << gTool << ": "_sv << Exception::current() << endL;
             result = 1;
@@ -320,7 +320,7 @@ namespace {
     }
 }
 
-Ui& Ui::open(const UiOptions& options) {
+Ui* Ui::create(ObjPool& pool, const UiOptions& options) {
     Running* running = gRunning;
 
     if (!running || running->platform->scheduler()->current() == nullptr) {
@@ -331,7 +331,6 @@ Ui& Ui::open(const UiOptions& options) {
         fail("one window per tool"_sv);
     }
 
-    ObjPool& pool = *running->pool;
     // made before the window, gone after it: the window calls into it
     ToolWindow& self = *pool.make<ToolWindow>();
     ImGuiPlt& imgui = *ImGuiPlt::create(pool);
@@ -383,10 +382,10 @@ Ui& Ui::open(const UiOptions& options) {
     window.requestShow();
     window.requestFrame();
 
-    return self;
+    return &self;
 }
 
-int runTool(StringView name, int (*main)(int argc, char** argv), int argc, char** argv) {
+int runTool(StringView name, int (*main)(ObjPool& pool, int argc, char** argv), int argc, char** argv) {
     gTool = name;
     gTraceFrames = getenv("IM_TRACE_FRAMES") != nullptr;
     initUiScale();

@@ -1017,8 +1017,8 @@ namespace {
     }
 
     // the error panel in place of the viewer, when there is nothing to show
-    int showError(StringView message) {
-        Ui& ui = Ui::open({480_d, 180_d});
+    int showError(ObjPool& pool, StringView message) {
+        Ui& ui = *Ui::create(pool, {480_d, 180_d});
         UiEvent event;
 
         while (ui.next(event)) {
@@ -1031,15 +1031,14 @@ namespace {
     }
 }
 
-int mainView(int argc, char** argv) {
+int mainView(ObjPool& pool, int argc, char** argv) {
     if (argc < 2) {
         sysE << "usage: im view <file|dir>..."_sv << endL;
 
         return 2;
     }
 
-    ObjPool::Ref pool = ObjPool::fromMemory();
-    ViewApp app;
+    ViewApp& app = *pool.make<ViewApp>();
 
     // the list: a directory's images, or the named files; one file
     // selects itself among its directory's
@@ -1055,7 +1054,7 @@ int mainView(int argc, char** argv) {
 
         try {
             if (S_ISDIR(st.st_mode)) {
-                addDirectory(*pool, app.entries, arg);
+                addDirectory(pool, app.entries, arg);
             } else if (argc == 2) {
                 size_t slash = arg.length();
 
@@ -1066,7 +1065,7 @@ int mainView(int argc, char** argv) {
                 StringView dir = slash == 0 ? "."_sv : slash == 1 ? "/"_sv : StringView(arg.begin(), arg.begin() + slash - 1);
                 StringView name(arg.begin() + slash, arg.end());
 
-                addDirectory(*pool, app.entries, dir);
+                addDirectory(pool, app.entries, dir);
 
                 bool listed = false;
 
@@ -1082,12 +1081,12 @@ int mainView(int argc, char** argv) {
                     Vector<Entry*> rest;
 
                     rest.xchg(app.entries);
-                    addFile(*pool, app.entries, arg);
+                    addFile(pool, app.entries, arg);
                     app.entries.append(rest.begin(), rest.end());
                     app.current = 0;
                 }
             } else {
-                addFile(*pool, app.entries, arg);
+                addFile(pool, app.entries, arg);
             }
         } catch (...) {
             sysE << "im view: "_sv << arg << ": "_sv << Exception::current() << endL;
@@ -1099,14 +1098,14 @@ int mainView(int argc, char** argv) {
     if (app.entries.empty()) {
         sysE << "im view: no images to show"_sv << endL;
 
-        return showError("no images to show"_sv);
+        return showError(pool, "no images to show"_sv);
     }
 
     // the whole directory into memory before the window: nothing reads
     // the disk after
     readAll(app.entries);
 
-    Ui& ui = Ui::open({windowWidth, windowHeight});
+    Ui& ui = *Ui::create(pool, {windowWidth, windowHeight});
 
     app.ui = &ui;
     app.maxSide = ui.maxTextureSide();
