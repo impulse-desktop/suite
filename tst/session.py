@@ -325,8 +325,10 @@ class Session:
     def pointer_output(self, x, y):
         self.input(f"move {x} {y} {self.width} {self.height}")
 
-    def button(self, code=BTN_LEFT, pressed=True):
-        self.input(f"button {code} {int(pressed)}")
+    def button(self, code=BTN_LEFT, pressed=True, client=True):
+        """A button press or release; one that ends the tool is sent with
+        client=False, as for a key."""
+        self.input(f"button {code} {int(pressed)}", client=client)
 
     def click(self, x, y, code=BTN_LEFT, app_id=None):
         self.pointer(x, y, app_id)
