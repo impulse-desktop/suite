@@ -3,6 +3,7 @@
 #include "error.h"
 
 #include <std/str/builder.h>
+#include <std/mem/obj_pool.h>
 
 #include <string.h>
 
@@ -32,6 +33,21 @@ namespace {
 
         u8* at(u64 offset, u64 length);
     };
+
+    struct Impl final: Image {
+        Instance instance;
+        const void* data_;
+        size_t length_;
+        u32 width_;
+        u32 height_;
+
+        Impl(StringView file, StringView name);
+
+        const void* data() const override;
+        size_t length() const override;
+        u32 width() const override;
+        u32 height() const override;
+    };
 }
 
 extern "C" void decodeTrapHandler(wasm_rt_trap_t code) {
@@ -56,12 +72,11 @@ u8* Instance::at(u64 offset, u64 length) {
     return (u8*)memory->data + offset;
 }
 
-void decode(StringView file, StringView name, DecodedImage& out) {
+Impl::Impl(StringView file, StringView name) {
     if (file.length() > 0xffffffffu - name.length()) {
         fail(StringView(u8"the file is too large for the decoder"));
     }
 
-    Instance instance;
     u32 total = (u32)(file.length() + name.length());
     u32 in = w2c_decode_malloc(&instance.wasm, total);
 
@@ -92,8 +107,28 @@ void decode(StringView file, StringView name, DecodedImage& out) {
         fail(StringView(StringBuilder() << StringView(u8"the decoder answered an image of ") << (i64)width << StringView(u8"x") << (i64)height));
     }
 
-    out.width = width;
-    out.height = height;
-    out.rgba = Buffer(instance.at((u64)res + 8, bytes), (size_t)bytes);
-    w2c_decode_free(&instance.wasm, res);
+    data_ = instance.at((u64)res + 8, bytes);
+    length_ = (size_t)bytes;
+    width_ = width;
+    height_ = height;
+}
+
+const void* Impl::data() const {
+    return data_;
+}
+
+size_t Impl::length() const {
+    return length_;
+}
+
+u32 Impl::width() const {
+    return width_;
+}
+
+u32 Impl::height() const {
+    return height_;
+}
+
+Image* decode(ObjPool& pool, StringView file, StringView name) {
+    return pool.make<Impl>(file, name);
 }

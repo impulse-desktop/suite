@@ -64,54 +64,25 @@ namespace {
         StringView name() const;
     };
 
-    void shrinkToSide(DecodedImage& img, u32 side) {
-        if (img.width <= side && img.height <= side) {
-            return;
+    struct ScaledImage final: Image {
+        Buffer rgba;
+        u32 width_;
+        u32 height_;
+
+        ScaledImage(const Image& image, u32 side);
+
+        const void* data() const override;
+        size_t length() const override;
+        u32 width() const override;
+        u32 height() const override;
+    };
+
+    static Image* shrinkToSide(ObjPool& pool, Image* image, u32 side) {
+        if (image->width() <= side && image->height() <= side) {
+            return image;
         }
 
-        u32 dw = img.width >= img.height ? side : (u32)max<u64>(1, (u64)side * img.width / img.height);
-        u32 dh = img.height >= img.width ? side : (u32)max<u64>(1, (u64)side * img.height / img.width);
-        Buffer out;
-
-        out.zero((size_t)dw * dh * 4);
-
-        const unsigned char* src = (const unsigned char*)img.rgba.data();
-        unsigned char* dst = (unsigned char*)out.mutData();
-
-        for (u32 dy = 0; dy < dh; dy++) {
-            u32 y0 = (u32)((u64)dy * img.height / dh);
-            u32 y1 = (u32)max<u64>(y0 + 1, (u64)(dy + 1) * img.height / dh);
-
-            for (u32 dx = 0; dx < dw; dx++) {
-                u32 x0 = (u32)((u64)dx * img.width / dw);
-                u32 x1 = (u32)max<u64>(x0 + 1, (u64)(dx + 1) * img.width / dw);
-                u64 sum[4] = {};
-
-                for (u32 y = y0; y < y1; y++) {
-                    const unsigned char* row = src + ((size_t)y * img.width + x0) * 4;
-
-                    for (u32 x = x0; x < x1; x++) {
-                        sum[0] += row[0];
-                        sum[1] += row[1];
-                        sum[2] += row[2];
-                        sum[3] += row[3];
-                        row += 4;
-                    }
-                }
-
-                u64 count = (u64)(x1 - x0) * (y1 - y0);
-                unsigned char* px = dst + ((size_t)dy * dw + dx) * 4;
-
-                px[0] = (unsigned char)((sum[0] + count / 2) / count);
-                px[1] = (unsigned char)((sum[1] + count / 2) / count);
-                px[2] = (unsigned char)((sum[2] + count / 2) / count);
-                px[3] = (unsigned char)((sum[3] + count / 2) / count);
-            }
-        }
-
-        img.width = dw;
-        img.height = dh;
-        img.rgba.xchg(out);
+        return pool.make<ScaledImage>(*image, side);
     }
 
     void readAll(Vector<Entry*>& entries) {
@@ -126,24 +97,25 @@ namespace {
         }
     }
 
-    void decodeEntry(Ui& ui, const Entry& entry, u32 side, DecodedImage& out) {
+    static Image* decodeEntry(ObjPool& pool, Ui& ui, const Entry& entry, u32 side) {
         u64 began = monotonicNowUs();
 
         if (!entry.error.empty()) {
             fail(StringView(entry.error));
         }
 
-        decode(StringView(entry.file), entry.name(), out);
+        Image* image = decode(pool, StringView(entry.file), entry.name());
 
         u64 decoded = monotonicNowUs();
 
-        shrinkToSide(out, side);
+        image = shrinkToSide(pool, image, side);
 
         StringBuilder text;
 
         text << StringView(u8"im decode ") << entry.name() << StringView(u8": decode ") << MS{decoded - began};
         text << StringView(u8" shrink ") << MS{monotonicNowUs() - decoded};
         ui.timing(StringView(text));
+        return image;
     }
 
     bool imageName(StringView name) {
@@ -333,6 +305,65 @@ namespace {
     }
 }
 
+ScaledImage::ScaledImage(const Image& image, u32 side) {
+    u32 sw = image.width();
+    u32 sh = image.height();
+
+    width_ = sw >= sh ? side : (u32)max<u64>(1, (u64)side * sw / sh);
+    height_ = sh >= sw ? side : (u32)max<u64>(1, (u64)side * sh / sw);
+    rgba.zero((size_t)width_ * height_ * 4);
+
+    const unsigned char* src = (const unsigned char*)image.data();
+    unsigned char* dst = (unsigned char*)rgba.mutData();
+
+    for (u32 dy = 0; dy < height_; dy++) {
+        u32 y0 = (u32)((u64)dy * sh / height_);
+        u32 y1 = (u32)max<u64>(y0 + 1, (u64)(dy + 1) * sh / height_);
+
+        for (u32 dx = 0; dx < width_; dx++) {
+            u32 x0 = (u32)((u64)dx * sw / width_);
+            u32 x1 = (u32)max<u64>(x0 + 1, (u64)(dx + 1) * sw / width_);
+            u64 sum[4] = {};
+
+            for (u32 y = y0; y < y1; y++) {
+                const unsigned char* row = src + ((size_t)y * sw + x0) * 4;
+
+                for (u32 x = x0; x < x1; x++) {
+                    sum[0] += row[0];
+                    sum[1] += row[1];
+                    sum[2] += row[2];
+                    sum[3] += row[3];
+                    row += 4;
+                }
+            }
+
+            u64 count = (u64)(x1 - x0) * (y1 - y0);
+            unsigned char* px = dst + ((size_t)dy * width_ + dx) * 4;
+
+            px[0] = (unsigned char)((sum[0] + count / 2) / count);
+            px[1] = (unsigned char)((sum[1] + count / 2) / count);
+            px[2] = (unsigned char)((sum[2] + count / 2) / count);
+            px[3] = (unsigned char)((sum[3] + count / 2) / count);
+        }
+    }
+}
+
+const void* ScaledImage::data() const {
+    return rgba.data();
+}
+
+size_t ScaledImage::length() const {
+    return rgba.length();
+}
+
+u32 ScaledImage::width() const {
+    return width_;
+}
+
+u32 ScaledImage::height() const {
+    return height_;
+}
+
 StringView Entry::name() const {
     StringView whole = StringView(path);
 
@@ -341,10 +372,11 @@ StringView Entry::name() const {
 
 void ViewApp::loadThumb(size_t index, u32 side) {
     Entry& entry = *entries[index];
-    DecodedImage image;
+    ObjPool::Ref pool = ObjPool::fromMemory();
+    Image* image;
 
     try {
-        decodeEntry(*ui, entry, side, image);
+        image = decodeEntry(*pool, *ui, entry, side);
     } catch (...) {
         Buffer error(Exception::current());
 
@@ -358,9 +390,9 @@ void ViewApp::loadThumb(size_t index, u32 side) {
         ui->releaseTexture(entry.thumbTex);
     }
 
-    entry.thumbTex = ui->loadTexture(image.width, image.height, image.rgba.data());
-    entry.thumbW = image.width;
-    entry.thumbH = image.height;
+    entry.thumbTex = ui->loadTexture(image->width(), image->height(), image->data());
+    entry.thumbW = image->width();
+    entry.thumbH = image->height();
     entry.thumbSide = side;
     entry.thumb = Load::Ready;
     ui->trace(StringView(StringBuilder() << StringView(u8"thumbnail ") << entry.name()));
@@ -374,10 +406,11 @@ void ViewApp::show(size_t index) {
     ui->trace(StringView(StringBuilder() << StringView(u8"selected ") << entry.name()));
     statFile();
 
-    DecodedImage image;
+    ObjPool::Ref pool = ObjPool::fromMemory();
+    Image* image;
 
     try {
-        decodeEntry(*ui, entry, maxSide, image);
+        image = decodeEntry(*pool, *ui, entry, maxSide);
     } catch (...) {
         dropShown();
         shown = Load::Failed;
@@ -389,9 +422,9 @@ void ViewApp::show(size_t index) {
     }
 
     dropShown();
-    tex = ui->loadTexture(image.width, image.height, image.rgba.data());
-    texW = image.width;
-    texH = image.height;
+    tex = ui->loadTexture(image->width(), image->height(), image->data());
+    texW = image->width();
+    texH = image->height();
     shown = Load::Ready;
     shownIndex = index;
     ui->trace(StringView(StringBuilder() << StringView(u8"showing ") << entry.name() << StringView(u8" ") << (i64)texW << StringView(u8"x") << (i64)texH));
