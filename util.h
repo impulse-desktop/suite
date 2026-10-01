@@ -22,6 +22,14 @@ inline stl::StringView sv(const stl::Buffer& b) {
 
 double parseFloat(stl::StringView s);
 
+// the tool's name, as its trace lines and panels say it: `im <tool>`
+extern stl::StringView gTool;
+
+// the test build's account of a step, for the scenarios to wait on; in
+// the ordinary build nothing
+void traceText(stl::StringView what);
+void traceSize(stl::StringView what, int w, int h);
+
 // a tool's own failure, carrying a human message shown verbatim on the
 // error panel; raised by fail() with its call site in front. Derives
 // stl::Exception so Exception::current() surfaces it in a generic catch,

@@ -345,7 +345,7 @@ namespace {
     }
 
     // the viewer: its list, the shown image and the view on it
-    struct ViewApp final: Ui {
+    struct ViewApp final: UiFrame {
         ObjPool* pool = nullptr;
         plt::Window* window = nullptr;
         Vector<Entry*> entries;
@@ -1094,7 +1094,7 @@ namespace {
     }
 
     // the error panel in place of the viewer, when there is nothing to show
-    struct NothingUi final: Ui {
+    struct NothingUi final: UiFrame {
         const Buffer* error = nullptr;
 
         int frame() override;

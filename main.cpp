@@ -1,5 +1,7 @@
+#include "ui.h"
 #include "util.h"
 #include "view.h"
+#include "ui_demo.h"
 #include "screenshot.h"
 
 #include <std/ios/sys.h>
@@ -36,9 +38,14 @@ namespace {
         return mainView(argc, argv);
     }
 
+    int runUiDemo(int argc, char** argv) {
+        return runTool("ui"_sv, mainUiDemo, argc, argv);
+    }
+
     constexpr Tool tools[] = {
         {"screenshot", runScreenshot},
         {"view", runView},
+        {"ui", runUiDemo},
     };
 
     StringView baseName(const char* path) {

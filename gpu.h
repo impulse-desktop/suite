@@ -29,8 +29,6 @@ struct ImGuiStyle;
 // linear-light scene the tool draws into, encoded to the PQ swapchain by
 // the output stage. One window per process, so the state is the process's.
 
-// the tool's name, as its trace lines and panels say it: `im <tool>`
-extern stl::StringView gTool;
 // the fault seam, configured from the tool's environment in the test build
 extern ChaosMonkey* gChaos;
 // IM_TRACE_FRAMES: a line per frame on stderr with the gap since the last
@@ -97,10 +95,6 @@ extern float gSdrWhiteNits;
 // error, as vulkan_error, or at the named site (IM_CHAOS vulkan-at=SITE)
 void vkc(VkResult e);
 void vkcAt(stl::StringView site, VkResult e);
-
-// the test build's account of a step, for the scenarios to wait on
-void traceText(stl::StringView what);
-void traceSize(stl::StringView what, int w, int h);
 
 // what the tool wants of the device: an HDR swapchain (the colour space
 // extension), a buffer shared by another process (imported on the device
@@ -181,7 +175,7 @@ int drawErrorPanel(stl::StringView msg);
 
 // the tool's frame: its ImGui windows, between NewFrame and Render. A
 // nonzero result stops the platform loop and lands in the driver's action
-struct Ui {
+struct UiFrame {
     virtual int frame() = 0;
 };
 
@@ -194,7 +188,7 @@ struct FrameDriver final: plt::FrameCallback, plt::WindowEvents {
     plt::Platform* platform = nullptr;
     plt::Window* window = nullptr;
     ImGuiPlt* imgui = nullptr;
-    Ui* ui = nullptr;
+    UiFrame* ui = nullptr;
     int action = 0;
 
     bool frame(const plt::WindowInfo& info) override;

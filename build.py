@@ -217,7 +217,7 @@ im_test = program(
     deps=im_deps,
 )
 
-tools = ["screenshot", "view"]
+tools = ["screenshot", "view", "ui"]
 
 links = command(
     name="links",

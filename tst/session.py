@@ -25,7 +25,8 @@ SKIPPED = 77
 # compositor spawns them; a session names its tool
 SCREENSHOT = "imscreenshot"
 VIEW = "imview"
-TOOLS = {"screenshot": SCREENSHOT, "view": VIEW}
+UI = "imui"
+TOOLS = {"screenshot": SCREENSHOT, "view": VIEW, "ui": UI}
 
 # the evdev codes the scenarios press
 KEY_ESC = 1

@@ -37,7 +37,6 @@ struct wl_surface;
 
 using namespace stl;
 
-StringView gTool = "im"_sv;
 ChaosMonkey* gChaos = nullptr;
 
 VkAllocationCallbacks* gAlloc = nullptr;
@@ -737,14 +736,6 @@ void vkcAt(StringView site, VkResult e) {
     }
 }
 
-void traceText(StringView what) {
-#ifdef IM_FOR_TESTS
-    sysO << "im "_sv << gTool << ": "_sv << what << endL;
-#else
-    (void)what;
-#endif
-}
-
 void setupVulkan(ObjPool& pool, const VulkanWants& wants) {
     VkApplicationInfo app = {};
 
@@ -1361,16 +1352,6 @@ void clampWindowSize(const plt::WindowInfo& info, int& w, int& h) {
     if (h > maxH) {
         h = maxH;
     }
-}
-
-void traceSize(StringView what, int w, int h) {
-#ifdef IM_FOR_TESTS
-    sysO << "im "_sv << gTool << ": "_sv << what << " "_sv << w << "x"_sv << h << endL;
-#else
-    (void)what;
-    (void)w;
-    (void)h;
-#endif
 }
 
 int drawErrorPanel(StringView msg) {

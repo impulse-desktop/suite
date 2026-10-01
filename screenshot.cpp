@@ -999,7 +999,7 @@ namespace {
 
     // the cropper behind the frame driver: the editor, or the error panel
     // when the load or the save failed
-    struct ScreenshotUi final: Ui {
+    struct ScreenshotUi final: UiFrame {
         plt::Window* window = nullptr;
         const Image* img = nullptr;
         Texture* tex = nullptr;

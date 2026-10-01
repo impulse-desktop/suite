@@ -1,5 +1,7 @@
 #include "util.h"
 
+#include <std/ios/sys.h>
+
 #include <string.h>
 
 using namespace stl;
@@ -58,4 +60,24 @@ double parseFloat(StringView s) {
     }
 
     return neg ? -r : r;
+}
+
+StringView gTool = "im"_sv;
+
+void traceText(StringView what) {
+#ifdef IM_FOR_TESTS
+    sysO << "im "_sv << gTool << ": "_sv << what << endL;
+#else
+    (void)what;
+#endif
+}
+
+void traceSize(StringView what, int w, int h) {
+#ifdef IM_FOR_TESTS
+    sysO << "im "_sv << gTool << ": "_sv << what << " "_sv << w << "x"_sv << h << endL;
+#else
+    (void)what;
+    (void)w;
+    (void)h;
+#endif
 }
