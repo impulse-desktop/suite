@@ -6,7 +6,7 @@ height, stride or size), or whose buffer cannot be opened, each open the
 480x180 error panel, which Escape dismisses with status 0. Well-formed
 metadata naming a GPU no device has gets no window: the tool says so and
 exits 1. Colour metadata it only partly understands falls back to SDR and
-still shows the image, and a ui scale below zero is no scale."""
+still shows the image, and a ui scale below zero falls back to the default."""
 
 import struct
 import time
@@ -55,10 +55,8 @@ with Session("input_errors") as s:
     error_panel("a buffer that cannot be opened", missing, IM_SHOT_DMABUF=f"64:48:44:0:256:0:12288:{uuid}")
     image("colour without a volume", good, IM_SHOT_COLOR="0:203")
     image("colour without a transfer", good, IM_SHOT_COLOR="garbage")
-    # a ui scale below zero is no scale: the editor opens at scale 1, the
-    # 64x48 capture at 50% beside the 200px panel and 8px of spacing, as
-    # tall as the panel's minimum
-    assert opened("a negative ui scale", good, IM_SCALE="-2") == (240, 220), f"a negative ui scale: {s.size()}"
+    # A negative ui scale falls back to 2: the minimum window is 480x440.
+    assert opened("a negative ui scale", good, IM_SCALE="-2") == (480, 440), f"a negative ui scale: {s.size()}"
     s.close()
 
     code, log = s.run(str(good), IM_SHOT_DMABUF=f"64:48:44:0:256:0:12288:{uuid}")

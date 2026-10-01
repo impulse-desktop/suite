@@ -90,6 +90,7 @@ class Session:
         self.socket = None
         self.runtime = None
         self.env = os.environ.copy()
+        self.env["IM_SCALE"] = "1"
         for key in ("DISPLAY", "WAYLAND_DISPLAY", "WAYLAND_SOCKET", "SWAYSOCK"):
             self.env.pop(key, None)
 

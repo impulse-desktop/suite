@@ -240,7 +240,7 @@ namespace {
             }
         }
 
-        return 1.f;
+        return 2.f;
     }
 
     static float scaledPx(Design d, float scale) {
