@@ -1,7 +1,5 @@
 #pragma once
 
-#include "ui.h"
-
 #include <std/str/view.h>
 #include <std/sys/types.h>
 #include <std/lib/vector.h>
@@ -13,21 +11,11 @@ namespace stl {
     class ObjPool;
 }
 
-namespace plt {
-    struct Platform;
-}
-
-struct ImGuiPlt;
+struct Renderer;
 struct ChaosMonkey;
 struct ImDrawCmd;
 struct ImDrawList;
 struct ImDrawData;
-
-float scaleFromEnv();
-float scaledPx(Design d, float scale);
-ImGuiStyle scaledStyle(float scale);
-
-int drawErrorPanel(stl::StringView tool, float scale, stl::StringView msg);
 
 struct Frame {
     VkImage image;
@@ -58,10 +46,7 @@ struct Presenter {
 };
 
 struct GpuOptions {
-    stl::StringView tool;
-    float scale = 1.f;
     ChaosMonkey* chaos = nullptr;
-    bool traceFrames = false;
     bool hdr = false;
     bool sharedBuffer = false;
     const u8* deviceUuid = nullptr;
@@ -78,10 +63,7 @@ struct Texture {
 };
 
 struct Gpu {
-    stl::StringView tool;
-    float scale = 1.f;
     ChaosMonkey* chaos = nullptr;
-    bool traceFrames = false;
 
     VkAllocationCallbacks* alloc = nullptr;
     VkInstance instance = VK_NULL_HANDLE;
@@ -94,13 +76,6 @@ struct Gpu {
     bool rebuild = false;
     bool linearHdr = false;
     float sdrWhiteNits = 203.f;
-
-    u64 frameBegan = 0;
-    u64 frameCount = 0;
-    u64 acquireNs = 0;
-    u64 fenceNs = 0;
-    u64 submitNs = 0;
-    u64 presentNs = 0;
 
     VkRenderPass scenePass = VK_NULL_HANDLE;
     VkImage sceneImage = VK_NULL_HANDLE;
@@ -122,13 +97,10 @@ struct Gpu {
     void vkc(VkResult e);
     void vkcAt(stl::StringView site, VkResult e);
 
-    void trace(stl::StringView what);
-    void traceSize(stl::StringView what, int w, int h);
-
     VkSurfaceKHR createSurface(plt::Window& window);
     void setupWindow(stl::ObjPool& pool, VkSurfaceKHR surface, int w, int h, bool hdr);
     void setupLinearHdr(stl::ObjPool& pool, u32 width, u32 height);
-    void setupImGui(stl::ObjPool& pool, bool hdr);
+    void setupBackend(stl::ObjPool& pool, bool hdr);
 
     u32 findMemoryType(u32 typeBits, VkMemoryPropertyFlags props);
     void finishTexture(VkFormat format, Texture& tex);
@@ -164,22 +136,4 @@ struct ImageDraw {
 
 void drawImage(const ImDrawList*, const ImDrawCmd* cmd);
 
-void clampWindowSize(const plt::WindowInfo& info, int& w, int& h);
-
-struct UiFrame {
-    virtual int frame() = 0;
-};
-
-struct FrameDriver final: plt::FrameCallback, plt::WindowEvents {
-    plt::Platform* platform = nullptr;
-    plt::Window* window = nullptr;
-    ImGuiPlt* imgui = nullptr;
-    Gpu* gpu = nullptr;
-    UiFrame* ui = nullptr;
-    int action = 0;
-
-    bool frame(const plt::WindowInfo& info) override;
-    void close() override;
-};
-
-int runUi(FrameDriver& driver);
+Renderer* createVulkanRenderer(stl::ObjPool& pool, Gpu& gpu);

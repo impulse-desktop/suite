@@ -4,6 +4,7 @@
 #include "gpu.h"
 #include "util.h"
 #include "color.h"
+#include "frame.h"
 #include "pooled.h"
 #include "imgui_plt.h"
 #include "chaos_monkey.h"
@@ -882,7 +883,7 @@ namespace {
         }
     }
 
-    int drawUi(Gpu& gpu, plt::Window& window, const Image& img, Texture& tex, Viewer& v) {
+    int drawUi(Gpu& gpu, float scale, plt::Window& window, const Image& img, Texture& tex, Viewer& v) {
         ImGuiViewport* vp = ImGui::GetMainViewport();
 
         ImGui::SetNextWindowPos(vp->Pos);
@@ -894,7 +895,7 @@ namespace {
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
 
         ImGui::Begin("##shot", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoSavedSettings);
-        const float panelW = scaledPx(200_d, gpu.scale);
+        const float panelW = scaledPx(200_d, scale);
 
         if (ImGui::IsKeyPressed(ImGuiKey_Equal) || ImGui::IsKeyPressed(ImGuiKey_KeypadAdd)) {
             applyZoom(v, kZoomStep);
@@ -926,7 +927,7 @@ namespace {
         if (reset) {
             int w, h;
 
-            initialWindowSize(img, ImGui::GetStyle(), gpu.scale, w, h);
+            initialWindowSize(img, ImGui::GetStyle(), scale, w, h);
             clampWindowSize(window.info(), w, h);
             window.requestResize((u32)w, (u32)h);
         }
@@ -936,6 +937,7 @@ namespace {
 
     struct ScreenshotUi final: UiFrame {
         Gpu* gpu = nullptr;
+        float scale = 1.f;
         plt::Window* window = nullptr;
         const Image* img = nullptr;
         Texture* tex = nullptr;
@@ -974,7 +976,7 @@ bool Image::shared() const {
 }
 
 int ScreenshotUi::frame() {
-    return error->empty() ? drawUi(*gpu, *window, *img, *tex, *view) : drawErrorPanel("screenshot"_sv, gpu->scale, sv(*error));
+    return error->empty() ? drawUi(*gpu, scale, *window, *img, *tex, *view) : drawErrorPanel("screenshot"_sv, scale, sv(*error));
 }
 
 int mainScreenshot(StringView path) {
@@ -1040,10 +1042,7 @@ int mainScreenshot(StringView path) {
 
     GpuOptions wants;
 
-    wants.tool = "screenshot"_sv;
-    wants.scale = scale;
     wants.chaos = &chaos;
-    wants.traceFrames = traceFrames;
     wants.hdr = loaded && img.color.hdr;
     wants.sharedBuffer = img.shared();
     wants.deviceUuid = img.deviceUuid;
@@ -1056,12 +1055,17 @@ int mainScreenshot(StringView path) {
     int fbh = (int)bootInfo.height;
 
     gpu.setupWindow(*shot, surface, fbw, fbh, loaded && img.color.hdr);
+    traceTool("screenshot"_sv, loaded && img.color.hdr ? "surface HDR10 PQ"_sv : "surface sRGB"_sv);
 
     if (loaded && img.color.hdr) {
         gpu.setupLinearHdr(*shot, (u32)fbw, (u32)fbh);
     }
 
-    gpu.setupImGui(*shot, loaded && img.color.hdr);
+    setupImGuiContext(*shot, scale);
+    gpu.setupBackend(*shot, loaded && img.color.hdr);
+
+    Renderer& renderer = *createVulkanRenderer(*shot, gpu);
+
     gpu.sdrWhiteNits = (float)img.color.sdrWhiteNits;
 
     if (loaded) {
@@ -1083,6 +1087,7 @@ int mainScreenshot(StringView path) {
     Viewer view;
 
     ui.gpu = &gpu;
+    ui.scale = scale;
     ui.window = &window;
     ui.img = &img;
     ui.tex = &tex;
@@ -1091,7 +1096,9 @@ int mainScreenshot(StringView path) {
     driver.platform = &platform;
     driver.window = &window;
     driver.imgui = &imgui;
-    driver.gpu = &gpu;
+    driver.renderer = &renderer;
+    driver.tool = "screenshot"_sv;
+    driver.traceFrames = traceFrames;
     driver.ui = &ui;
 
     int action = 0;

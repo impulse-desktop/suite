@@ -1,16 +1,9 @@
 #include "gpu.h"
 
-#include "ui.h"
 #include "util.h"
 #include "pooled.h"
-#include "imgui_plt.h"
 #include "chaos_monkey.h"
 
-#include <std/ios/sys.h>
-
-#include <math.h>
-#include <time.h>
-#include <stdlib.h>
 #include <string.h>
 
 #if defined(__APPLE__)
@@ -21,8 +14,6 @@ struct wl_surface;
 
     #include <vulkan/vulkan_wayland.h>
 #endif
-
-#include <plt/platform.h>
 
 #include <imgui.h>
 #include <imgui_impl_vulkan.h>
@@ -36,17 +27,6 @@ struct wl_surface;
 using namespace stl;
 
 namespace {
-    constexpr Design mouseThreshold = 6_d;
-
-    void applyScaledStyle(float scale) {
-        ImGui::GetStyle() = scaledStyle(scale);
-
-        ImGuiIO& io = ImGui::GetIO();
-
-        io.MouseDragThreshold = scaledPx(mouseThreshold, scale);
-        io.MouseDoubleClickMaxDist = scaledPx(mouseThreshold, scale);
-    }
-
     constexpr u32 kMinImageCount = 3;
 
     struct ImagePush {
@@ -57,79 +37,10 @@ namespace {
     };
 }
 
-float scaleFromEnv() {
-    if (const char* s = getenv("IM_SCALE")) {
-        double v = parseFloat(StringView(s));
-
-        if (v > 0.0) {
-            return (float)v;
-        }
-    }
-
-    return 1.f;
-}
-
-float scaledPx(Design d, float scale) {
-    float v = floorf(d.value * scale + .5f);
-
-    return d.value > 0.f && v < 1.f ? 1.f : v;
-}
-
-ImGuiStyle scaledStyle(float scale) {
-    ImGuiStyle style;
-
-    style.ScaleAllSizes(scale);
-    style.FontScaleMain = scale;
-
-    return style;
-}
-
-int drawErrorPanel(StringView tool, float scale, StringView msg) {
-    ImGuiViewport* vp = ImGui::GetMainViewport();
-
-    ImGui::SetNextWindowPos(vp->Pos);
-    ImGui::SetNextWindowSize(vp->Size);
-
-    int result = 0;
-
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(28, 28, 32, 255));
-
-    ImGui::Begin("##err", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
-    float pad = scaledPx(24_d, scale);
-
-    ImGui::SetCursorPos(ImVec2(pad, pad));
-    ImGui::BeginGroup();
-
-    StringBuilder heading;
-
-    heading << "im "_sv << tool;
-    ImGui::TextDisabled("%s", heading.cStr());
-    ImGui::Spacing();
-    ImGui::PushTextWrapPos(vp->Size.x - pad);
-    ImGui::TextUnformatted((const char*)msg.data(), (const char*)msg.data() + msg.length());
-    ImGui::PopTextWrapPos();
-    ImGui::Spacing();
-    ImGui::Spacing();
-
-    if (ImGui::Button("Exit", ImVec2(scaledPx(120_d, scale), 0.f)) || ImGui::IsKeyPressed(ImGuiKey_Escape) || ImGui::IsKeyPressed(ImGuiKey_Enter)) {
-        result = -1;
-    }
-
-    ImGui::EndGroup();
-
-    ImGui::End();
-    ImGui::PopStyleColor();
-
-    return result;
-}
-
 Gpu* Gpu::create(ObjPool& pool, const GpuOptions& options) {
     Gpu* gpu = pool.make<Gpu>();
 
-    gpu->tool = options.tool;
-    gpu->scale = options.scale;
     gpu->chaos = options.chaos;
-    gpu->traceFrames = options.traceFrames;
     gpu->setupVulkan(pool, options);
 
     return gpu;
@@ -141,17 +52,9 @@ Gpu* Gpu::createFor(ObjPool& pool, plt::Window& window, const GpuOptions& option
     plt::WindowInfo info = window.info();
 
     gpu->setupWindow(pool, surface, (int)info.width, (int)info.height, options.hdr);
-    gpu->setupImGui(pool, options.hdr);
+    gpu->setupBackend(pool, options.hdr);
 
     return gpu;
-}
-
-void Gpu::trace(StringView what) {
-    traceTool(tool, what);
-}
-
-void Gpu::traceSize(StringView what, int w, int h) {
-    traceTool(tool, sv(StringBuilder() << what << " "_sv << w << "x"_sv << h));
 }
 
 bool Gpu::hasDeviceExtension(VkPhysicalDevice candidate, const char* name) {
@@ -640,10 +543,7 @@ void Gpu::destroyLinearHdr() {
 
 void Gpu::frameRender(ImDrawData* draw) {
     Sync& sync = present.syncs.mut(present.syncIndex);
-    u64 t0 = nowNs();
     VkResult e = chaos->swapchain(vkAcquireNextImageKHR(device, present.swapchain, UINT64_MAX, sync.acquired, VK_NULL_HANDLE, &present.frameIndex));
-
-    acquireNs = nowNs() - t0;
 
     if (e == VK_ERROR_OUT_OF_DATE_KHR || e == VK_SUBOPTIMAL_KHR) {
         rebuild = true;
@@ -655,9 +555,7 @@ void Gpu::frameRender(ImDrawData* draw) {
 
     Frame& fd = present.frames.mut(present.frameIndex);
 
-    t0 = nowNs();
     vkWaitForFences(device, 1, &fd.fence, VK_TRUE, UINT64_MAX);
-    fenceNs = nowNs() - t0;
     vkResetFences(device, 1, &fd.fence);
     vkResetCommandPool(device, fd.commandPool, 0);
 
@@ -718,9 +616,7 @@ void Gpu::frameRender(ImDrawData* draw) {
     si.signalSemaphoreCount = 1;
     si.pSignalSemaphores = &sync.rendered;
     vkEndCommandBuffer(fd.commandBuffer);
-    t0 = nowNs();
     vkQueueSubmit(queue, 1, &si, fd.fence);
-    submitNs = nowNs() - t0;
 }
 
 void Gpu::framePresent() {
@@ -737,10 +633,7 @@ void Gpu::framePresent() {
     pi.pSwapchains = &present.swapchain;
     pi.pImageIndices = &present.frameIndex;
 
-    u64 t0 = nowNs();
     VkResult e = chaos->swapchain(vkQueuePresentKHR(queue, &pi));
-
-    presentNs = nowNs() - t0;
 
     if (e == VK_ERROR_OUT_OF_DATE_KHR || e == VK_SUBOPTIMAL_KHR) {
         rebuild = true;
@@ -942,10 +835,8 @@ void Gpu::setupWindow(ObjPool& pool, VkSurfaceKHR surface, int w, int h, bool hd
         fail("vulkan WSI has no BT.2020/PQ surface"_sv);
     }
 
-    trace(hdr ? "surface HDR10 PQ"_sv : "surface sRGB"_sv);
     createPresentPass();
     createSwapchain((u32)w, (u32)h);
-    traceSize("presenting"_sv, present.width, present.height);
 }
 
 u32 Gpu::findMemoryType(u32 typeBits, VkMemoryPropertyFlags props) {
@@ -1065,15 +956,7 @@ void Gpu::setupLinearHdr(ObjPool& pool, u32 width, u32 height) {
     linearHdr = true;
 }
 
-void Gpu::setupImGui(ObjPool& pool, bool hdr) {
-    IMGUI_CHECKVERSION();
-    ImGui::CreateContext();
-    pooledGuard(pool, [] {
-        ImGui::DestroyContext();
-    });
-    ImGui::GetIO().IniFilename = nullptr;
-    applyScaledStyle(scale);
-
+void Gpu::setupBackend(ObjPool& pool, bool hdr) {
     ImGui_ImplVulkan_InitInfo ii = {};
 
     ii.Instance = instance;
@@ -1331,125 +1214,4 @@ void drawImage(const ImDrawList*, const ImDrawCmd* cmd) {
     push.sdrWhiteNits = draw.sdrWhiteNits;
     vkCmdPushConstants(state->CommandBuffer, draw.gpu->imagePipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
     vkCmdDraw(state->CommandBuffer, 6, 1, 0, 0);
-}
-
-void clampWindowSize(const plt::WindowInfo& info, int& w, int& h) {
-    int maxW = (int)info.screenPixelWidth * 9 / 10;
-    int maxH = (int)info.screenPixelHeight * 9 / 10;
-
-    if (w > maxW) {
-        w = maxW;
-    }
-
-    if (h > maxH) {
-        h = maxH;
-    }
-}
-
-bool FrameDriver::frame(const plt::WindowInfo& info) {
-    int nw = (int)info.width;
-    int nh = (int)info.height;
-    u64 began = nowNs();
-    u64 gap = gpu->frameBegan ? began - gpu->frameBegan : 0;
-
-    gpu->frameBegan = began;
-    gpu->acquireNs = gpu->fenceNs = gpu->submitNs = gpu->presentNs = 0;
-
-    if (gpu->rebuild || gpu->present.width != nw || gpu->present.height != nh) {
-        gpu->createSwapchain((u32)nw, (u32)nh);
-        gpu->traceSize("presenting"_sv, gpu->present.width, gpu->present.height);
-
-        if (gpu->linearHdr) {
-            gpu->createSceneTarget((u32)nw, (u32)nh);
-        }
-
-        gpu->rebuild = false;
-    }
-
-    ImGui_ImplVulkan_NewFrame();
-
-    u64 backend = nowNs();
-
-    imgui->newFrame(*window);
-
-    u64 informed = nowNs();
-
-    ImGui::NewFrame();
-
-    u64 begun = nowNs();
-    int result = ui->frame();
-    u64 drew = nowNs();
-
-    ImGui::Render();
-
-    ImDrawData* dd = ImGui::GetDrawData();
-
-    gpu->present.clear.color.float32[0] = 0.1f;
-    gpu->present.clear.color.float32[1] = 0.1f;
-    gpu->present.clear.color.float32[2] = 0.1f;
-    gpu->present.clear.color.float32[3] = 1.0f;
-
-    u64 drawn = nowNs();
-
-    gpu->frameRender(dd);
-    gpu->framePresent();
-
-    if (gpu->traceFrames) {
-        StringBuilder text;
-
-        text << "im frame "_sv << (i64)gpu->frameCount++ << ": gap "_sv;
-        appendMs(text, gap);
-        text << " ui "_sv;
-        appendMs(text, drawn - began);
-        text << " (backend "_sv;
-        appendMs(text, backend - began);
-        text << " info "_sv;
-        appendMs(text, informed - backend);
-        text << " new "_sv;
-        appendMs(text, begun - informed);
-        text << " tool "_sv;
-        appendMs(text, drew - begun);
-        text << " render "_sv;
-        appendMs(text, drawn - drew);
-        text << ")"_sv;
-        text << " acquire "_sv;
-        appendMs(text, gpu->acquireNs);
-        text << " fence "_sv;
-        appendMs(text, gpu->fenceNs);
-        text << " submit "_sv;
-        appendMs(text, gpu->submitNs);
-        text << " present "_sv;
-        appendMs(text, gpu->presentNs);
-        text << " total "_sv;
-        appendMs(text, nowNs() - began);
-
-        if (gpu->rebuild) {
-            text << " rebuild"_sv;
-        }
-
-        sysE << sv(text) << endL;
-    }
-
-    if (result != 0) {
-        action = result;
-        platform->stop();
-    } else {
-        window->requestFrame();
-    }
-
-    return !gpu->rebuild;
-}
-
-void FrameDriver::close() {
-    action = -1;
-    platform->stop();
-}
-
-int runUi(FrameDriver& driver) {
-    driver.action = 0;
-    driver.window->requestShow();
-    driver.window->requestFrame();
-    driver.platform->run();
-
-    return driver.action ? driver.action : -1;
 }

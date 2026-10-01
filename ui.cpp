@@ -1,10 +1,9 @@
 #include "ui.h"
 
-#include "gpu.h"
 #include "util.h"
+#include "frame.h"
 #include "pooled.h"
 #include "imgui_plt.h"
-#include "chaos_monkey.h"
 
 #include <std/ios/sys.h>
 #include <std/alg/minmax.h>
@@ -25,13 +24,10 @@ using namespace stl;
 
 namespace {
     constexpr size_t toolStack = 16u << 20;
-    constexpr u32 defaultTextureSide = 4096;
-    constexpr u32 maxTextures = 16384;
 
     struct UiImpl final: Ui, UiFrame, plt::WindowEvents, Runable {
         ObjPool* pool = nullptr;
         plt::Platform* platform = nullptr;
-        ChaosMonkey* chaos = nullptr;
         StringView name;
         int (*main)(ObjPool& pool, Ui& ui, int argc, char** argv) = nullptr;
         int argc = 0;
@@ -43,7 +39,7 @@ namespace {
         float scale = 1.f;
         bool traceFrames = false;
         plt::Window* window = nullptr;
-        Gpu* gpu = nullptr;
+        Renderer* renderer = nullptr;
         FrameDriver driver;
         StringBuilder appId;
         StringBuilder title;
@@ -117,23 +113,19 @@ void UiImpl::open(const UiOptions& options) {
         shown.requestResize((u32)width, (u32)height);
     }
 
-    GpuOptions wants;
-
-    wants.tool = name;
-    wants.scale = scale;
-    wants.chaos = chaos;
-    wants.traceFrames = traceFrames;
-    wants.textures = maxTextures;
     pooledGuard(*pool, [this] {
         dropTextures();
     });
-    gpu = Gpu::createFor(*pool, shown, wants);
+    setupImGuiContext(*pool, scale);
+    renderer = Renderer::create(*pool, shown);
 
     driver.platform = platform;
     driver.window = &shown;
     driver.imgui = &imgui;
-    driver.gpu = gpu;
+    driver.renderer = renderer;
     driver.ui = this;
+    driver.tool = name;
+    driver.traceFrames = traceFrames;
     window = &shown;
     shown.requestShow();
     shown.requestFrame();
@@ -175,8 +167,8 @@ void UiImpl::requestFullscreen(bool on) {
 }
 
 ImTextureRef UiImpl::loadTexture(u32 width, u32 height, const void* rgba) {
-    if (textures.length() >= maxTextures) {
-        fail(sv(StringBuilder() << "more than "_sv << (i64)maxTextures << " textures at once"_sv));
+    if (textures.length() >= renderer->maxTextures()) {
+        fail(sv(StringBuilder() << "more than "_sv << (i64)renderer->maxTextures() << " textures at once"_sv));
     }
 
     ImTextureData* texture = IM_NEW(ImTextureData)();
@@ -202,13 +194,7 @@ void UiImpl::releaseTexture(ImTextureRef ref) {
 }
 
 u32 UiImpl::maxTextureSide() {
-    ImGuiPlatformIO& pio = ImGui::GetPlatformIO();
-
-    if (pio.Renderer_TextureMaxWidth > 0 && pio.Renderer_TextureMaxHeight > 0) {
-        return (u32)min(pio.Renderer_TextureMaxWidth, pio.Renderer_TextureMaxHeight);
-    }
-
-    return defaultTextureSide;
+    return renderer->maxTextureSide();
 }
 
 bool UiImpl::drawErrorPanel(StringView message) {
@@ -323,7 +309,6 @@ int runTool(StringView name, int (*main)(ObjPool& pool, Ui& ui, int argc, char**
     ui.argv = argv;
     ui.scale = scaleFromEnv();
     ui.traceFrames = getenv("IM_TRACE_FRAMES") != nullptr;
-    ui.chaos = ChaosMonkey::create(*pool);
     ui.platform = plt::Platform::create(*pool);
     ui.fiber = ui.platform->scheduler()->create(*pool, ui, toolStack);
 
