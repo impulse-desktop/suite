@@ -202,7 +202,7 @@ decode = library(
 
 
 # Linux builds every tool over Vulkan; macOS the runtime's tools over Metal
-wayland_only = ["renderer_vulkan.cpp", "screenshot.cpp", "color.cpp", "chaos_monkey.cpp"]
+wayland_only = ["renderer_vulkan.cpp", "screenshot.cpp", "chaos_monkey.cpp"]
 im_sources = [path for path in build.glob("$(S)/*.cpp") if not (darwin and os.path.basename(path) in wayland_only)]
 if darwin:
     im_sources.append("$(S)/renderer_metal.mm")

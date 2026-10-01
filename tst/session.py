@@ -653,7 +653,7 @@ def pq_decode(code):
 
 def sdr_tone_map(nits):
     """The tool's display mapping of a neutral luminance onto the SDR range
-    (color.cpp toneMap for the SDR output: a knee at 90% of 203 nits)."""
+    (screenshot.cpp toneMap for the SDR output: a knee at 90% of 203 nits)."""
     peak = SDR_WHITE_NITS
     knee = peak * 0.9
     if nits <= knee:
@@ -705,7 +705,7 @@ def _rgb_to_xyz(c):
 
 def hdr_png_pixel(nits):
     """The RGB bytes a linear BT.2020 colour, in nits, lands on in the PNG
-    the tool saves from a PQ frame: color.cpp's SDR mapping, the chroma
+    the tool saves from a PQ frame: screenshot.cpp's SDR mapping, the chroma
     held inside the sRGB gamut, then sRGB at 203."""
     scene = _rgb_to_xyz(BT2020_PRIMARIES)
     target = _rgb_to_xyz(SRGB_PRIMARIES)
