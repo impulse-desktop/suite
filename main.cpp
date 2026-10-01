@@ -35,7 +35,7 @@ namespace {
     }
 
     int runView(int argc, char** argv) {
-        return mainView(argc, argv);
+        return runTool("view"_sv, mainView, argc, argv);
     }
 
     int runUiDemo(int argc, char** argv) {

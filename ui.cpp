@@ -2,10 +2,13 @@
 
 #include "gpu.h"
 #include "util.h"
+#include "pooled.h"
 #include "imgui_plt.h"
 #include "chaos_monkey.h"
 
 #include <std/ios/sys.h>
+#include <std/alg/minmax.h>
+#include <std/lib/vector.h>
 #include <std/str/builder.h>
 #include <std/thr/runable.h>
 #include <std/mem/obj_pool.h>
@@ -13,6 +16,7 @@
 #include <math.h>
 #include <imgui.h>
 #include <stdlib.h>
+#include <string.h>
 #include <plt/fiber.h>
 #include <plt/window.h>
 #include <plt/platform.h>
@@ -86,6 +90,11 @@ namespace {
     // the tool's stack: ImGui's frames, a driver's shader compiler as the
     // device comes up, a decoder
     constexpr size_t toolStack = 16u << 20;
+    // the texture side when the renderer names no limit
+    constexpr u32 defaultTextureSide = 4096;
+    // released textures linger the frames in flight: room for a few
+    // released frame after frame over the tool's own budget
+    constexpr u32 releasedSlack = 16;
 
     struct ToolWindow;
 
@@ -111,7 +120,11 @@ namespace {
     // main stack, the events the tool takes on its fiber
     struct ToolWindow final: Ui, UiFrame, plt::WindowEvents {
         Running* running = nullptr;
+        plt::Window* window = nullptr;
         FrameDriver driver;
+        // the textures the tool loaded, ImGui's own objects, until the
+        // renderer has torn down those it released
+        Vector<ImTextureData*> textures;
         StringBuilder appId;
         StringBuilder title;
         // what waits for the tool: the frame begun, the window asked to go
@@ -123,8 +136,15 @@ namespace {
         bool parked = false;
 
         bool next(UiEvent& event) override;
+        ImTextureRef loadTexture(u32 width, u32 height, const void* rgba) override;
+        void releaseTexture(ImTextureRef texture) override;
+        u32 maxTextureSide() override;
+        void requestFullscreen(bool on) override;
         int frame() override;
         void close() override;
+
+        void tendTextures();
+        void dropTextures();
     };
 
     void Running::run() {
@@ -168,6 +188,82 @@ namespace {
         }
     }
 
+    // registered with ImGui, the renderer makes it on the next render
+    ImTextureRef ToolWindow::loadTexture(u32 width, u32 height, const void* rgba) {
+        ImTextureData* texture = IM_NEW(ImTextureData)();
+
+        texture->Create(ImTextureFormat_RGBA32, (int)width, (int)height);
+        memcpy(texture->GetPixels(), rgba, (size_t)width * height * 4);
+        ImGui::RegisterUserTexture(texture);
+        textures.pushBack(texture);
+
+        return texture->GetTexRef();
+    }
+
+    // told to go: the renderer tears it down once it has gone unused for
+    // as many frames as there are in flight, counted from here
+    void ToolWindow::releaseTexture(ImTextureRef ref) {
+        ImTextureData* texture = ref._TexData;
+
+        if (!texture || texture->WantDestroyNextFrame) {
+            return;
+        }
+
+        texture->WantDestroyNextFrame = true;
+        texture->SetStatus(ImTextureStatus_WantDestroy);
+        texture->UnusedFrames = 0;
+    }
+
+    u32 ToolWindow::maxTextureSide() {
+        ImGuiPlatformIO& pio = ImGui::GetPlatformIO();
+
+        if (pio.Renderer_TextureMaxWidth > 0 && pio.Renderer_TextureMaxHeight > 0) {
+            return (u32)min(pio.Renderer_TextureMaxWidth, pio.Renderer_TextureMaxHeight);
+        }
+
+        return defaultTextureSide;
+    }
+
+    void ToolWindow::requestFullscreen(bool on) {
+        window->requestFullscreen(on);
+    }
+
+    // once a frame, before the tool's turn: a copy of the pixels the
+    // renderer has taken goes, a texture it has torn down goes, the rest
+    // of the released count one more unused frame
+    void ToolWindow::tendTextures() {
+        Vector<ImTextureData*> kept;
+
+        for (ImTextureData* texture : textures) {
+            if (texture->WantDestroyNextFrame && texture->Status == ImTextureStatus_Destroyed) {
+                ImGui::UnregisterUserTexture(texture);
+                IM_DELETE(texture);
+
+                continue;
+            }
+
+            if (texture->Status == ImTextureStatus_WantDestroy) {
+                texture->UnusedFrames++;
+            } else if (texture->Status == ImTextureStatus_OK && texture->Pixels) {
+                texture->DestroyPixels();
+            }
+
+            kept.pushBack(texture);
+        }
+
+        textures.xchg(kept);
+    }
+
+    // at the end, once ImGui and its renderer are gone and the device
+    // side of every texture with them: the objects themselves
+    void ToolWindow::dropTextures() {
+        for (ImTextureData* texture : textures) {
+            IM_DELETE(texture);
+        }
+
+        textures.clear();
+    }
+
     // the driver's call between ImGui's NewFrame and Render: the tool's
     // turn. A tool that is not asleep in next() (a platform call of its
     // own that drew) gets none, a tool that is done neither
@@ -182,6 +278,7 @@ namespace {
 
         ImGuiErrorRecoveryState state;
 
+        tendTextures();
         ImGui::ErrorRecoveryStoreState(&state);
         framePending = true;
         running->fiber->wake();
@@ -262,8 +359,17 @@ Ui& Ui::open(const UiOptions& options) {
         window.requestResize((u32)width, (u32)height);
     }
 
-    setupGpu(pool, window, VulkanWants());
+    VulkanWants wants;
 
+    wants.textures = 2 * options.textures + releasedSlack;
+    // the textures are ImGui's objects and the tool's: they go after
+    // ImGui and its renderer, which tear their device side down
+    pooledGuard(pool, [w = &self] {
+        w->dropTextures();
+    });
+    setupGpu(pool, window, wants);
+
+    self.window = &window;
     self.driver.platform = running->platform;
     self.driver.window = &window;
     self.driver.imgui = &imgui;
@@ -316,4 +422,42 @@ int runTool(StringView name, int (*main)(int argc, char** argv), int argc, char*
 
         return 1;
     }
+}
+
+int drawErrorPanel(StringView msg) {
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+
+    ImGui::SetNextWindowPos(vp->Pos);
+    ImGui::SetNextWindowSize(vp->Size);
+
+    int result = 0;
+
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(28, 28, 32, 255));
+
+    ImGui::Begin("##err", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+    float pad = px(24_d);
+
+    ImGui::SetCursorPos(ImVec2(pad, pad));
+    ImGui::BeginGroup();
+    auto& heading = sb();
+
+    heading << "im "_sv << gTool;
+    ImGui::TextDisabled("%s", heading.cStr());
+    ImGui::Spacing();
+    ImGui::PushTextWrapPos(vp->Size.x - pad);
+    ImGui::TextUnformatted((const char*)msg.data(), (const char*)msg.data() + msg.length());
+    ImGui::PopTextWrapPos();
+    ImGui::Spacing();
+    ImGui::Spacing();
+
+    if (ImGui::Button("Exit", px(120_d, 0_d)) || ImGui::IsKeyPressed(ImGuiKey_Escape) || ImGui::IsKeyPressed(ImGuiKey_Enter)) {
+        result = -1;
+    }
+
+    ImGui::EndGroup();
+
+    ImGui::End();
+    ImGui::PopStyleColor();
+
+    return result;
 }

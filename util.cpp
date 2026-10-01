@@ -2,6 +2,7 @@
 
 #include <std/ios/sys.h>
 
+#include <time.h>
 #include <string.h>
 
 using namespace stl;
@@ -80,4 +81,24 @@ void traceSize(StringView what, int w, int h) {
     (void)w;
     (void)h;
 #endif
+}
+
+bool gTraceFrames = false;
+
+u64 nowNs() {
+    struct timespec ts;
+
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+
+    return (u64)ts.tv_sec * 1000000000ull + (u64)ts.tv_nsec;
+}
+
+void appendMs(StringBuilder& text, u64 ns) {
+    u64 tenths = (ns + 50000) / 100000;
+
+    text << (i64)(tenths / 10) << "."_sv << (i64)(tenths % 10);
+}
+
+float clampf(float v, float lo, float hi) {
+    return v < lo ? lo : (v > hi ? hi : v);
 }

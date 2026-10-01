@@ -51,6 +51,10 @@ struct UiOptions {
     // the screen's limits are the runtime's business
     Design width = 640_d;
     Design height = 480_d;
+    // the most textures the tool holds at once: the device sets aside
+    // room for them up front, and as much again for those released and
+    // not yet torn down
+    u32 textures = 0;
 };
 
 struct UiEvent {
@@ -70,10 +74,27 @@ struct Ui {
     // false: the window is gone, nothing more will come
     virtual bool next(UiEvent& event) = 0;
 
+    // a texture of these pixels, RGBA, 8 bits a channel, rows tightly
+    // packed; copied, the tool's own may go at once. ImGui draws it by
+    // the reference (AddImage), from the next frame shown on
+    virtual ImTextureRef loadTexture(u32 width, u32 height, const void* rgba) = 0;
+    // the tool is done with it: from here the reference is dead to the
+    // tool, the device's copy goes once no frame in flight reads it
+    virtual void releaseTexture(ImTextureRef texture) = 0;
+    // the longest side a texture may have
+    virtual u32 maxTextureSide() = 0;
+
+    virtual void requestFullscreen(bool on) = 0;
+
     // the window, shown; it lives as long as the tool. Throws where the
     // window or its device cannot be had
     static Ui& open(const UiOptions& options);
 };
+
+// a full-window panel that replaces the tool's ui (not an overlay) when
+// something goes wrong: reads like a message from the compositor, a
+// heading, the error text, and a single Exit button; -1 on exit
+int drawErrorPanel(stl::StringView msg);
 
 // main's: the tool on its fiber under its name, the platform's loop until
 // it returns, its result. An exception out of the tool is reported under

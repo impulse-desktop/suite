@@ -1,12 +1,8 @@
 #include "view.h"
 
 #include "ui.h"
-#include "gpu.h"
 #include "util.h"
-#include "pooled.h"
 #include "decoder.h"
-#include "imgui_plt.h"
-#include "chaos_monkey.h"
 
 #include <std/sys/fs.h>
 #include <std/ios/sys.h>
@@ -23,9 +19,6 @@
 #include <imgui.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <plt/window.h>
-#include <plt/platform.h>
-#include <imgui_internal.h>
 
 using namespace stl;
 
@@ -36,11 +29,10 @@ using namespace stl;
 // decoded from the bytes in memory when it is selected, on the one
 // thread, a fresh sandboxed ImageMagick every time.
 //
-// The viewer draws with ImGui alone. Its textures are ImGui's own
-// objects (ImTextureData): the viewer hands one the pixels and registers
-// it, the renderer backend makes it on the next render, draws from it
-// and tears it down in its own time once told, when no frame in flight
-// reads it any more. Which device is behind ImGui is gpu.cpp's business.
+// The viewer is a tool like any: it opens its window and loops over its
+// events, drawing with ImGui on each frame; its textures it loads and
+// releases through the window. What is behind the window is not its
+// business.
 
 namespace {
     // each side panel takes this share of the window's width
@@ -60,8 +52,6 @@ namespace {
     constexpr u32 thumbTexelsStep = 64;
     constexpr u32 thumbTexelsMin = 128;
     constexpr u32 thumbTexelsMax = 512;
-    // the shown image's long side when the renderer names no limit
-    constexpr u32 defaultMaxSide = 4096;
     constexpr float zoomMin = 0.02f;
     constexpr float zoomMax = 32.f;
     constexpr float zoomStep = 1.25f;
@@ -80,7 +70,9 @@ namespace {
         Buffer file;
         Buffer error;
         Load thumb = Load::None;
-        ImTextureData* thumbTex = nullptr;
+        ImTextureRef thumbTex;
+        u32 thumbW = 0;
+        u32 thumbH = 0;
         // the long side the thumbnail was asked at: a list grown much
         // wider since asks again
         u32 thumbSide = 0;
@@ -91,18 +83,6 @@ namespace {
         StringView whole = sv(path);
 
         return StringView(whole.begin() + nameAt, whole.end());
-    }
-
-    // a texture of ImGui's own with these pixels: registered, the
-    // renderer makes it on the next render
-    ImTextureData* makeTexture(const DecodedImage& image) {
-        ImTextureData* texture = IM_NEW(ImTextureData)();
-
-        texture->Create(ImTextureFormat_RGBA32, (int)image.width, (int)image.height);
-        memcpy(texture->GetPixels(), image.rgba.data(), (size_t)image.width * image.height * 4);
-        ImGui::RegisterUserTexture(texture);
-
-        return texture;
     }
 
     // area-averaged to fit the side: what a thumbnail is, and what an image
@@ -314,7 +294,7 @@ namespace {
     // a row's height for the list's width: the thumbnail's proportion, or a
     // photo's until it is decoded; whole px, so rows do not blur
     float rowHeightFor(const Entry& entry, float innerW) {
-        float aspect = entry.thumbTex && entry.thumbTex->Width ? (float)entry.thumbTex->Height / (float)entry.thumbTex->Width : placeholderAspect;
+        float aspect = entry.thumb == Load::Ready && entry.thumbW ? (float)entry.thumbH / (float)entry.thumbW : placeholderAspect;
 
         return max(1.f, floorf(innerW * aspect + .5f));
     }
@@ -345,20 +325,19 @@ namespace {
     }
 
     // the viewer: its list, the shown image and the view on it
-    struct ViewApp final: UiFrame {
-        ObjPool* pool = nullptr;
-        plt::Window* window = nullptr;
+    struct ViewApp {
+        Ui* ui = nullptr;
         Vector<Entry*> entries;
         size_t current = 0;
-        // what a texture may measure, the renderer's word
-        u32 maxSide = defaultMaxSide;
+        // what a texture may measure
+        u32 maxSide = 0;
         // the shown image's texture, or why there is none
         Load shown = Load::None;
         size_t shownIndex = (size_t)-1;
-        ImTextureData* tex = nullptr;
+        ImTextureRef tex;
+        u32 texW = 0;
+        u32 texH = 0;
         Buffer shownError;
-        // textures told to go, until the renderer has torn them down
-        Vector<ImTextureData*> dying;
         // the view on it
         float zoom = 1.f;
         bool fit = true;
@@ -369,7 +348,11 @@ namespace {
         bool panel = true;
         bool info = true;
         bool scrollToCurrent = true;
-        int result = 0;
+        // the directory decoded, on the first frame: at the list's width
+        // then
+        bool started = false;
+        // q or Escape: the viewer is done
+        bool quit = false;
         // the list's scroll the frame trace last reported
         float tracedScrollY = 0.f;
         // the shown file's own facts, for the properties panel: its size
@@ -377,14 +360,14 @@ namespace {
         i64 fileBytes = -1;
         Buffer fileModified;
 
-        int frame() override;
+        // a frame's ImGui calls; false once the viewer is done
+        bool frame();
 
+        void start();
         void loadThumb(size_t index, u32 side);
         void show(size_t index);
+        void dropShown();
         void step(long delta);
-        void retire(ImTextureData*& texture);
-        void tendTextures();
-        void dropTextures();
         void setZoom(float value);
         void fitView();
         void statFile();
@@ -394,70 +377,22 @@ namespace {
         void drawInfo();
     };
 
-    // a texture no longer drawn: told to go, the renderer tears it down
-    // once the frames in flight are through with it, which it counts by
-    // the frames the texture goes unused
-    void ViewApp::retire(ImTextureData*& texture) {
-        if (texture) {
-            texture->WantDestroyNextFrame = true;
-            texture->SetStatus(ImTextureStatus_WantDestroy);
-            texture->UnusedFrames = 1;
-            dying.pushBack(texture);
-            texture = nullptr;
+    // every thumbnail, at the width the list has on the first frame, and
+    // the selected image: all before that frame is shown
+    void ViewApp::start() {
+        float listW = floorf(ImGui::GetMainViewport()->Size.x * sideShare);
+        u32 side = thumbSideFor(listW * (1.f + bulge));
+
+        for (size_t i = 0; i < entries.length(); i++) {
+            loadThumb(i, side);
         }
+
+        show(current);
+        started = true;
     }
 
-    // once a frame, before drawing: the pixel copies the renderer has
-    // taken go, the textures it has torn down go, the rest of the dying
-    // count one more unused frame
-    void ViewApp::tendTextures() {
-        auto taken = [](ImTextureData* texture) {
-            if (texture && texture->Status == ImTextureStatus_OK && texture->Pixels) {
-                texture->DestroyPixels();
-            }
-        };
-
-        taken(tex);
-
-        for (Entry* entry : entries) {
-            taken(entry->thumbTex);
-        }
-
-        Vector<ImTextureData*> still;
-
-        for (ImTextureData* texture : dying) {
-            if (texture->Status == ImTextureStatus_Destroyed) {
-                ImGui::UnregisterUserTexture(texture);
-                IM_DELETE(texture);
-            } else {
-                texture->UnusedFrames++;
-                still.pushBack(texture);
-            }
-        }
-
-        dying.xchg(still);
-    }
-
-    // at the end, once ImGui and its renderer are gone and every
-    // texture's device side with them: the objects themselves
-    void ViewApp::dropTextures() {
-        IM_DELETE(tex);
-        tex = nullptr;
-
-        for (Entry* entry : entries) {
-            IM_DELETE(entry->thumbTex);
-            entry->thumbTex = nullptr;
-        }
-
-        for (ImTextureData* texture : dying) {
-            IM_DELETE(texture);
-        }
-
-        dying.clear();
-    }
-
-    // a row's thumbnail, decoded from the bytes in memory and handed to
-    // ImGui now, kept by the row's index
+    // a row's thumbnail, decoded from the bytes in memory and loaded now,
+    // kept by the row's index
     void ViewApp::loadThumb(size_t index, u32 side) {
         Entry& entry = *entries[index];
         DecodedImage image;
@@ -473,14 +408,19 @@ namespace {
             return;
         }
 
-        retire(entry.thumbTex);
-        entry.thumbTex = makeTexture(image);
+        if (entry.thumb == Load::Ready) {
+            ui->releaseTexture(entry.thumbTex);
+        }
+
+        entry.thumbTex = ui->loadTexture(image.width, image.height, image.rgba.data());
+        entry.thumbW = image.width;
+        entry.thumbH = image.height;
         entry.thumbSide = side;
         entry.thumb = Load::Ready;
         traceText(sv(StringBuilder() << "thumbnail "_sv << entry.name()));
     }
 
-    // the selected image, decoded and handed to ImGui now
+    // the selected image, decoded and loaded now
     void ViewApp::show(size_t index) {
         current = index;
         scrollToCurrent = true;
@@ -495,6 +435,7 @@ namespace {
         try {
             decodeEntry(entry, maxSide, image);
         } catch (...) {
+            dropShown();
             shown = Load::Failed;
             shownIndex = index;
             shownError = Buffer(Exception::current());
@@ -503,11 +444,22 @@ namespace {
             return;
         }
 
-        retire(tex);
-        tex = makeTexture(image);
+        dropShown();
+        tex = ui->loadTexture(image.width, image.height, image.rgba.data());
+        texW = image.width;
+        texH = image.height;
         shown = Load::Ready;
         shownIndex = index;
-        traceText(sv(StringBuilder() << "showing "_sv << entry.name() << " "_sv << (i64)tex->Width << "x"_sv << (i64)tex->Height));
+        traceText(sv(StringBuilder() << "showing "_sv << entry.name() << " "_sv << (i64)texW << "x"_sv << (i64)texH));
+    }
+
+    // the image shown so far goes, whatever comes instead
+    void ViewApp::dropShown() {
+        if (shown == Load::Ready) {
+            ui->releaseTexture(tex);
+        }
+
+        shown = Load::None;
     }
 
     void ViewApp::step(long delta) {
@@ -538,7 +490,7 @@ namespace {
         ImGuiIO& io = ImGui::GetIO();
 
         if (ImGui::IsKeyPressed(ImGuiKey_Escape) || ImGui::IsKeyPressed(ImGuiKey_Q)) {
-            result = -1;
+            quit = true;
         }
 
         if (ImGui::IsKeyPressed(ImGuiKey_RightArrow) || ImGui::IsKeyPressed(ImGuiKey_DownArrow) || ImGui::IsKeyPressed(ImGuiKey_Space) || ImGui::IsKeyPressed(ImGuiKey_PageDown) || ImGui::IsKeyPressed(ImGuiKey_J) || ImGui::IsKeyPressed(ImGuiKey_N)) {
@@ -577,7 +529,7 @@ namespace {
 
         if (ImGui::IsKeyPressed(ImGuiKey_F) || ImGui::IsKeyPressed(ImGuiKey_F11)) {
             fullscreen = !fullscreen;
-            window->requestFullscreen(fullscreen);
+            ui->requestFullscreen(fullscreen);
             traceText(fullscreen ? "fullscreen on"_sv : "fullscreen off"_sv);
         }
 
@@ -774,7 +726,7 @@ namespace {
             ImVec2 centre((p0.x + p1.x) / 2.f, (p0.y + p1.y) / 2.f);
             ImVec2 half((p1.x - p0.x) / 2.f * scale, (p1.y - p0.y) / 2.f * scale);
 
-            fg->AddImage(entry.thumbTex->GetTexRef(), ImVec2(centre.x - half.x, centre.y - half.y), ImVec2(centre.x + half.x, centre.y + half.y));
+            fg->AddImage(entry.thumbTex, ImVec2(centre.x - half.x, centre.y - half.y), ImVec2(centre.x + half.x, centre.y + half.y));
         };
 
         // a bulged thumbnail spills over the list's edge onto the canvas:
@@ -860,9 +812,9 @@ namespace {
             if (ready) {
                 auto& text = sb();
                 // megapixels to a tenth
-                i64 tenths = ((i64)tex->Width * (i64)tex->Height + 50000) / 100000;
+                i64 tenths = ((i64)texW * (i64)texH + 50000) / 100000;
 
-                text << (i64)tex->Width << " \xc3\x97 "_sv << (i64)tex->Height << "   "_sv << tenths / 10 << "."_sv << tenths % 10 << " MP"_sv;
+                text << (i64)texW << " \xc3\x97 "_sv << (i64)texH << "   "_sv << tenths / 10 << "."_sv << tenths % 10 << " MP"_sv;
                 row("Dimensions", sv(text));
             }
 
@@ -992,8 +944,8 @@ namespace {
             return;
         }
 
-        float rw = (float)(rotation & 1 ? tex->Height : tex->Width);
-        float rh = (float)(rotation & 1 ? tex->Width : tex->Height);
+        float rw = (float)(rotation & 1 ? texH : texW);
+        float rh = (float)(rotation & 1 ? texW : texH);
 
         if (fit) {
             // fit shrinks: a small image stays at its own size
@@ -1016,7 +968,7 @@ namespace {
         const ImVec2 uv[4] = {ImVec2(0, 0), ImVec2(1, 0), ImVec2(1, 1), ImVec2(0, 1)};
         int r = rotation;
 
-        dl->AddImageQuad(tex->GetTexRef(), p0, ImVec2(p1.x, p0.y), p1, ImVec2(p0.x, p1.y), uv[(4 - r) & 3], uv[(5 - r) & 3], uv[(6 - r) & 3], uv[(7 - r) & 3]);
+        dl->AddImageQuad(tex, p0, ImVec2(p1.x, p0.y), p1, ImVec2(p0.x, p1.y), uv[(4 - r) & 3], uv[(5 - r) & 3], uv[(6 - r) & 3], uv[(7 - r) & 3]);
 
         ImGuiIO& io = ImGui::GetIO();
 
@@ -1038,11 +990,13 @@ namespace {
         }
     }
 
-    int ViewApp::frame() {
+    bool ViewApp::frame() {
         ImGuiViewport* vp = ImGui::GetMainViewport();
 
-        result = 0;
-        tendTextures();
+        if (!started) {
+            start();
+        }
+
         keys();
 
         ImGui::SetNextWindowPos(vp->Pos);
@@ -1090,194 +1044,111 @@ namespace {
 
         ImGui::End();
 
-        return result;
+        return !quit;
     }
 
     // the error panel in place of the viewer, when there is nothing to show
-    struct NothingUi final: UiFrame {
-        const Buffer* error = nullptr;
+    int showError(StringView message) {
+        Ui& ui = Ui::open({480_d, 180_d});
+        UiEvent event;
 
-        int frame() override;
-    };
+        while (ui.next(event) && event.kind == UiEvent::Kind::Frame) {
+            if (drawErrorPanel(message) != 0) {
+                break;
+            }
+        }
 
-    int NothingUi::frame() {
-        return drawErrorPanel(sv(*error));
+        return 0;
     }
 }
 
 int mainView(int argc, char** argv) {
-    gTool = "view"_sv;
-    initUiScale();
-
     if (argc < 2) {
         sysE << "usage: im view <file|dir>..."_sv << endL;
 
         return 2;
     }
 
-    int rc = 0;
+    ObjPool::Ref pool = ObjPool::fromMemory();
+    ViewApp app;
 
-    try {
-        ViewApp app;
-        NothingUi nothing;
-        FrameDriver driver;
-        ObjPool::Ref shot = ObjPool::fromMemory();
+    // the list: a directory's images, or the named files; one file
+    // selects itself among its directory's
+    for (int i = 1; i < argc; i++) {
+        StringView arg(argv[i]);
+        struct stat st;
 
-        app.pool = &*shot;
-        gChaos = ChaosMonkey::create(*shot);
+        if (stat(argv[i], &st) != 0) {
+            sysE << "im view: "_sv << arg << ": "_sv << StringView(strerror(errno)) << endL;
 
-        // the list: a directory's images, or the named files; one file
-        // selects itself among its directory's
-        Buffer errText;
+            continue;
+        }
 
-        for (int i = 1; i < argc; i++) {
-            StringView arg(argv[i]);
-            struct stat st;
+        try {
+            if (S_ISDIR(st.st_mode)) {
+                addDirectory(*pool, app.entries, arg);
+            } else if (argc == 2) {
+                size_t slash = arg.length();
 
-            if (stat(argv[i], &st) != 0) {
-                sysE << "im view: "_sv << arg << ": "_sv << StringView(strerror(errno)) << endL;
-
-                continue;
-            }
-
-            try {
-                if (S_ISDIR(st.st_mode)) {
-                    addDirectory(*shot, app.entries, arg);
-                } else if (argc == 2) {
-                    size_t slash = arg.length();
-
-                    while (slash > 0 && arg[slash - 1] != '/') {
-                        slash--;
-                    }
-
-                    StringView dir = slash == 0 ? "."_sv : slash == 1 ? "/"_sv : StringView(arg.begin(), arg.begin() + slash - 1);
-                    StringView name(arg.begin() + slash, arg.end());
-
-                    addDirectory(*shot, app.entries, dir);
-
-                    bool listed = false;
-
-                    for (size_t j = 0; j < app.entries.length() && !listed; j++) {
-                        if (app.entries[j]->name() == name) {
-                            app.current = j;
-                            listed = true;
-                        }
-                    }
-
-                    if (!listed) {
-                        // a name the list did not take: shown all the same, first
-                        Vector<Entry*> rest;
-
-                        rest.xchg(app.entries);
-                        addFile(*shot, app.entries, arg);
-                        app.entries.append(rest.begin(), rest.end());
-                        app.current = 0;
-                    }
-                } else {
-                    addFile(*shot, app.entries, arg);
+                while (slash > 0 && arg[slash - 1] != '/') {
+                    slash--;
                 }
-            } catch (...) {
-                sysE << "im view: "_sv << arg << ": "_sv << Exception::current() << endL;
+
+                StringView dir = slash == 0 ? "."_sv : slash == 1 ? "/"_sv : StringView(arg.begin(), arg.begin() + slash - 1);
+                StringView name(arg.begin() + slash, arg.end());
+
+                addDirectory(*pool, app.entries, dir);
+
+                bool listed = false;
+
+                for (size_t j = 0; j < app.entries.length() && !listed; j++) {
+                    if (app.entries[j]->name() == name) {
+                        app.current = j;
+                        listed = true;
+                    }
+                }
+
+                if (!listed) {
+                    // a name the list did not take: shown all the same, first
+                    Vector<Entry*> rest;
+
+                    rest.xchg(app.entries);
+                    addFile(*pool, app.entries, arg);
+                    app.entries.append(rest.begin(), rest.end());
+                    app.current = 0;
+                }
+            } else {
+                addFile(*pool, app.entries, arg);
             }
+        } catch (...) {
+            sysE << "im view: "_sv << arg << ": "_sv << Exception::current() << endL;
         }
-
-        traceText(sv(StringBuilder() << "listed "_sv << (i64)app.entries.length()));
-
-        if (app.entries.empty()) {
-            errText = Buffer("no images to show"_sv);
-            sysE << "im view: "_sv << sv(errText) << endL;
-        }
-
-        // the platform, the input bridge and the window live in the same
-        // arena: LIFO death tears the window down after every gpu guard
-        // below and before the platform it belongs to
-        plt::Platform& platform = *plt::Platform::create(*shot);
-        ImGuiPlt& imgui = *ImGuiPlt::create(*shot);
-
-        int winW = pxi(1000_d);
-        int winH = pxi(700_d);
-
-        if (!errText.empty()) {
-            winW = pxi(480_d);
-            winH = pxi(180_d);
-        }
-
-        plt::WindowOptions options;
-
-        options.appId = "im-view"_sv;
-        options.title = "im view"_sv;
-        options.width = (u32)winW;
-        options.height = (u32)winH;
-        options.input = imgui.sink();
-        options.events = &driver;
-        options.frame = &driver;
-
-        plt::Window& window = *platform.createWindow(*shot, options);
-
-        // the window was asked for in the platform's logical units, and it
-        // says what pixels it made of them: not the design's pixels on an
-        // output that scales logical units by itself, or over the screen;
-        // a resize is in pixels
-        plt::WindowInfo made = window.info();
-        int wantW = winW;
-        int wantH = winH;
-
-        clampWindowSize(made, wantW, wantH);
-
-        if (wantW != (int)made.width || wantH != (int)made.height) {
-            window.requestResize((u32)wantW, (u32)wantH);
-        }
-
-        VulkanWants wants;
-
-        // ImGui holds a texture per thumbnail and one for the shown image,
-        // and for a few frames the ones they replace
-        wants.textures = 2 * (u32)app.entries.length() + 8;
-        // the textures are the viewer's objects: they go after ImGui and
-        // its renderer, which tear their device side down, have gone
-        pooledGuard(*shot, [a = &app] {
-            a->dropTextures();
-        });
-        setupGpu(*shot, window, wants);
-
-        // what a texture may measure, the renderer's word, if it has one
-        ImGuiPlatformIO& pio = ImGui::GetPlatformIO();
-
-        if (pio.Renderer_TextureMaxWidth > 0 && pio.Renderer_TextureMaxHeight > 0) {
-            app.maxSide = (u32)min(pio.Renderer_TextureMaxWidth, pio.Renderer_TextureMaxHeight);
-        }
-
-        app.window = &window;
-        driver.platform = &platform;
-        driver.window = &window;
-        driver.imgui = &imgui;
-
-        if (errText.empty()) {
-            driver.ui = &app;
-
-            // the whole directory into memory before the first frame: the
-            // bytes, then a thumbnail of each at the list's width
-            readAll(app.entries);
-
-            plt::WindowInfo bootInfo = window.info();
-            float innerW = max(1.f, floorf((float)bootInfo.width * sideShare) - 2.f * px(gap));
-            u32 side = thumbSideFor((innerW + 2.f * px(gap)) * (1.f + bulge));
-
-            for (size_t i = 0; i < app.entries.length(); i++) {
-                app.loadThumb(i, side);
-            }
-
-            app.show(app.current);
-        } else {
-            nothing.error = &errText;
-            driver.ui = &nothing;
-        }
-
-        runUi(driver);
-    } catch (...) {
-        sysE << "im view: "_sv << Exception::current() << endL;
-        rc = 1;
     }
 
-    return rc;
+    traceText(sv(StringBuilder() << "listed "_sv << (i64)app.entries.length()));
+
+    if (app.entries.empty()) {
+        sysE << "im view: no images to show"_sv << endL;
+
+        return showError("no images to show"_sv);
+    }
+
+    // the whole directory into memory before the window: nothing reads
+    // the disk after
+    readAll(app.entries);
+
+    // a texture per thumbnail, and the shown image's
+    Ui& ui = Ui::open({1000_d, 700_d, (u32)app.entries.length() + 1});
+    UiEvent event;
+
+    app.ui = &ui;
+    app.maxSide = ui.maxTextureSide();
+
+    while (ui.next(event) && event.kind == UiEvent::Kind::Frame) {
+        if (!app.frame()) {
+            break;
+        }
+    }
+
+    return 0;
 }

@@ -31,13 +31,6 @@ struct ImGuiStyle;
 
 // the fault seam, configured from the tool's environment in the test build
 extern ChaosMonkey* gChaos;
-// IM_TRACE_FRAMES: a line per frame on stderr with the gap since the last
-// one and the time of each phase, and one per decode; to see where a
-// jerk comes from
-extern bool gTraceFrames;
-u64 nowNs();
-// "12.3", milliseconds to a tenth
-void appendMs(stl::StringBuilder& text, u64 ns);
 
 extern VkAllocationCallbacks* gAlloc;
 extern VkInstance gInstance;
@@ -162,16 +155,9 @@ struct ImageDraw {
 // ImDrawCallback_ResetRenderState follows it
 void drawImage(const ImDrawList*, const ImDrawCmd* cmd);
 
-float clampf(float v, float lo, float hi);
-
 // clamp to 90% of the output, whose size arrived with the platform's
 // registry roundtrips, before any window
 void clampWindowSize(const plt::WindowInfo& info, int& w, int& h);
-
-// a full-window panel that replaces the tool's ui (not an overlay) when
-// something goes wrong — reads like a message from the compositor: a
-// heading, the error text, and a single Exit button. returns -1 on exit.
-int drawErrorPanel(stl::StringView msg);
 
 // the tool's frame: its ImGui windows, between NewFrame and Render. A
 // nonzero result stops the platform loop and lands in the driver's action

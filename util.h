@@ -30,6 +30,16 @@ extern stl::StringView gTool;
 void traceText(stl::StringView what);
 void traceSize(stl::StringView what, int w, int h);
 
+// IM_TRACE_FRAMES: a line per frame on stderr with the gap since the last
+// one and the time of each phase, and one per decode; to see where a
+// jerk comes from
+extern bool gTraceFrames;
+u64 nowNs();
+// "12.3", milliseconds to a tenth
+void appendMs(stl::StringBuilder& text, u64 ns);
+
+float clampf(float v, float lo, float hi);
+
 // a tool's own failure, carrying a human message shown verbatim on the
 // error panel; raised by fail() with its call site in front. Derives
 // stl::Exception so Exception::current() surfaces it in a generic catch,

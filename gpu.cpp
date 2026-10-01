@@ -51,22 +51,6 @@ float gSdrWhiteNits = 203.f;
 bool gRebuild = false;
 bool gLinearHdr = false;
 
-bool gTraceFrames = false;
-
-u64 nowNs() {
-    struct timespec ts;
-
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-
-    return (u64)ts.tv_sec * 1000000000ull + (u64)ts.tv_nsec;
-}
-
-void appendMs(StringBuilder& text, u64 ns) {
-    u64 tenths = (ns + 50000) / 100000;
-
-    text << (i64)(tenths / 10) << "."_sv << (i64)(tenths % 10);
-}
-
 namespace {
     // the frame trace's clocks: when the last frame began, how many there
     // were, and how long each phase of this one took
@@ -1337,10 +1321,6 @@ void drawImage(const ImDrawList*, const ImDrawCmd* cmd) {
     vkCmdDraw(state->CommandBuffer, 6, 1, 0, 0);
 }
 
-float clampf(float v, float lo, float hi) {
-    return v < lo ? lo : (v > hi ? hi : v);
-}
-
 void clampWindowSize(const plt::WindowInfo& info, int& w, int& h) {
     int maxW = (int)info.screenPixelWidth * 9 / 10;
     int maxH = (int)info.screenPixelHeight * 9 / 10;
@@ -1352,44 +1332,6 @@ void clampWindowSize(const plt::WindowInfo& info, int& w, int& h) {
     if (h > maxH) {
         h = maxH;
     }
-}
-
-int drawErrorPanel(StringView msg) {
-    ImGuiViewport* vp = ImGui::GetMainViewport();
-
-    ImGui::SetNextWindowPos(vp->Pos);
-    ImGui::SetNextWindowSize(vp->Size);
-
-    int result = 0;
-
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(28, 28, 32, 255));
-
-    ImGui::Begin("##err", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
-    float pad = px(24_d);
-
-    ImGui::SetCursorPos(ImVec2(pad, pad));
-    ImGui::BeginGroup();
-    auto& heading = sb();
-
-    heading << "im "_sv << gTool;
-    ImGui::TextDisabled("%s", heading.cStr());
-    ImGui::Spacing();
-    ImGui::PushTextWrapPos(vp->Size.x - pad);
-    ImGui::TextUnformatted((const char*)msg.data(), (const char*)msg.data() + msg.length());
-    ImGui::PopTextWrapPos();
-    ImGui::Spacing();
-    ImGui::Spacing();
-
-    if (ImGui::Button("Exit", px(120_d, 0_d)) || ImGui::IsKeyPressed(ImGuiKey_Escape) || ImGui::IsKeyPressed(ImGuiKey_Enter)) {
-        result = -1;
-    }
-
-    ImGui::EndGroup();
-
-    ImGui::End();
-    ImGui::PopStyleColor();
-
-    return result;
 }
 
 bool FrameDriver::frame(const plt::WindowInfo& info) {
