@@ -1,15 +1,18 @@
 #include "view.h"
 
 #include "ui.h"
-#include "util.h"
+#include "error.h"
+#include "timing.h"
 #include "decoder.h"
 
 #include <std/sys/fs.h>
 #include <std/ios/sys.h>
+#include <std/sys/crt.h>
 #include <std/alg/qsort.h>
 #include <std/sys/throw.h>
 #include <std/alg/minmax.h>
 #include <std/lib/vector.h>
+#include <std/str/builder.h>
 #include <std/ios/fs_utils.h>
 #include <std/mem/obj_pool.h>
 
@@ -23,6 +26,10 @@
 using namespace stl;
 
 namespace {
+    static float clampf(float v, float lo, float hi) {
+        return v < lo ? lo : (v > hi ? hi : v);
+    }
+
     constexpr Design windowWidth = 1000_d;
     constexpr Design windowHeight = 700_d;
     constexpr float sideShare = .2f;
@@ -109,7 +116,7 @@ namespace {
 
     void readAll(Vector<Entry*>& entries) {
         for (Entry* entry : entries) {
-            Buffer path(sv(entry->path));
+            Buffer path(StringView(entry->path));
 
             try {
                 readFileContent(path, entry->file);
@@ -120,27 +127,25 @@ namespace {
     }
 
     void decodeEntry(Ui& ui, const Entry& entry, u32 side, DecodedImage& out) {
-        u64 began = nowNs();
+        u64 began = monotonicNowUs();
 
         if (!entry.error.empty()) {
-            fail(sv(entry.error));
+            fail(StringView(entry.error));
         }
 
         ObjPool::Ref pool = ObjPool::fromMemory();
 
-        Decoder::create(*pool)->decode(sv(entry.file), entry.name(), out);
+        Decoder::create(*pool)->decode(StringView(entry.file), entry.name(), out);
 
-        u64 decoded = nowNs();
+        u64 decoded = monotonicNowUs();
 
         shrinkToSide(out, side);
 
         StringBuilder text;
 
-        text << "im decode "_sv << entry.name() << ": decode "_sv;
-        appendMs(text, decoded - began);
-        text << " shrink "_sv;
-        appendMs(text, nowNs() - decoded);
-        ui.timing(sv(text));
+        text << StringView(u8"im decode ") << entry.name() << StringView(u8": decode ") << MS{decoded - began};
+        text << StringView(u8" shrink ") << MS{monotonicNowUs() - decoded};
+        ui.timing(StringView(text));
     }
 
     bool imageName(StringView name) {
@@ -227,12 +232,12 @@ namespace {
 
                 path << dir;
 
-                if (!dir.endsWith("/"_sv)) {
-                    path << "/"_sv;
+                if (!dir.endsWith(StringView(u8"/"))) {
+                    path << StringView(u8"/");
                 }
 
                 path << info.item;
-                found.pushBack(makeEntry(pool, sv(path)));
+                found.pushBack(makeEntry(pool, StringView(path)));
             }
         });
         quickSort(found.mutBegin(), found.mutEnd(), [](const Entry* a, const Entry* b) {
@@ -258,10 +263,10 @@ namespace {
     }
 
     void appendBytes(StringBuilder& text, i64 bytes) {
-        static const StringView units[] = {"KB"_sv, "MB"_sv, "GB"_sv, "TB"_sv};
+        static const StringView units[] = {StringView(u8"KB"), StringView(u8"MB"), StringView(u8"GB"), StringView(u8"TB")};
 
         if (bytes < 1024) {
-            text << bytes << " bytes"_sv;
+            text << bytes << StringView(u8" bytes");
 
             return;
         }
@@ -274,7 +279,7 @@ namespace {
             unit++;
         }
 
-        text << tenths / 10 << "."_sv << tenths % 10 << " "_sv << units[unit];
+        text << tenths / 10 << StringView(u8".") << tenths % 10 << StringView(u8" ") << units[unit];
     }
 
     struct ViewApp {
@@ -331,7 +336,7 @@ namespace {
 }
 
 StringView Entry::name() const {
-    StringView whole = sv(path);
+    StringView whole = StringView(path);
 
     return StringView(whole.begin() + nameAt, whole.end());
 }
@@ -346,7 +351,7 @@ void ViewApp::loadThumb(size_t index, u32 side) {
         Buffer error(Exception::current());
 
         entry.thumb = Load::Failed;
-        ui->trace(sv(StringBuilder() << "no thumbnail "_sv << entry.name() << ": "_sv << sv(error)));
+        ui->trace(StringView(StringBuilder() << StringView(u8"no thumbnail ") << entry.name() << StringView(u8": ") << StringView(error)));
 
         return;
     }
@@ -360,7 +365,7 @@ void ViewApp::loadThumb(size_t index, u32 side) {
     entry.thumbH = image.height;
     entry.thumbSide = side;
     entry.thumb = Load::Ready;
-    ui->trace(sv(StringBuilder() << "thumbnail "_sv << entry.name()));
+    ui->trace(StringView(StringBuilder() << StringView(u8"thumbnail ") << entry.name()));
 }
 
 void ViewApp::show(size_t index) {
@@ -369,7 +374,7 @@ void ViewApp::show(size_t index) {
 
     Entry& entry = *entries[index];
 
-    ui->trace(sv(StringBuilder() << "selected "_sv << entry.name()));
+    ui->trace(StringView(StringBuilder() << StringView(u8"selected ") << entry.name()));
     statFile();
 
     DecodedImage image;
@@ -381,7 +386,7 @@ void ViewApp::show(size_t index) {
         shown = Load::Failed;
         shownIndex = index;
         shownError = Buffer(Exception::current());
-        ui->trace(sv(StringBuilder() << "cannot show "_sv << entry.name() << ": "_sv << sv(shownError)));
+        ui->trace(StringView(StringBuilder() << StringView(u8"cannot show ") << entry.name() << StringView(u8": ") << StringView(shownError)));
 
         return;
     }
@@ -392,7 +397,7 @@ void ViewApp::show(size_t index) {
     texH = image.height;
     shown = Load::Ready;
     shownIndex = index;
-    ui->trace(sv(StringBuilder() << "showing "_sv << entry.name() << " "_sv << (i64)texW << "x"_sv << (i64)texH));
+    ui->trace(StringView(StringBuilder() << StringView(u8"showing ") << entry.name() << StringView(u8" ") << (i64)texW << StringView(u8"x") << (i64)texH));
 }
 
 void ViewApp::dropShown() {
@@ -417,14 +422,14 @@ void ViewApp::step(long delta) {
 void ViewApp::setZoom(float value) {
     zoom = clampf(value, zoomMin, zoomMax);
     fit = false;
-    ui->trace(sv(StringBuilder() << "zoom "_sv << (i64)(zoom * 100.f + .5f)));
+    ui->trace(StringView(StringBuilder() << StringView(u8"zoom ") << (i64)(zoom * 100.f + .5f)));
 }
 
 void ViewApp::fitView() {
     fit = true;
     panX = 0.f;
     panY = 0.f;
-    ui->trace("fit"_sv);
+    ui->trace(StringView(u8"fit"));
 }
 
 void ViewApp::keys() {
@@ -467,22 +472,22 @@ void ViewApp::keys() {
     if (ImGui::IsKeyPressed(ImGuiKey_F) || ImGui::IsKeyPressed(ImGuiKey_F11)) {
         fullscreen = !fullscreen;
         ui->requestFullscreen(fullscreen);
-        ui->trace(fullscreen ? "fullscreen on"_sv : "fullscreen off"_sv);
+        ui->trace(fullscreen ? StringView(u8"fullscreen on") : StringView(u8"fullscreen off"));
     }
 
     if (ImGui::IsKeyPressed(ImGuiKey_R)) {
         rotation = (rotation + (io.KeyShift ? 3 : 1)) % 4;
-        ui->trace(sv(StringBuilder() << "rotated "_sv << (i64)(rotation * 90)));
+        ui->trace(StringView(StringBuilder() << StringView(u8"rotated ") << (i64)(rotation * 90)));
     }
 
     if (ImGui::IsKeyPressed(ImGuiKey_Tab)) {
         panel = !panel;
-        ui->trace(panel ? "panel on"_sv : "panel off"_sv);
+        ui->trace(panel ? StringView(u8"panel on") : StringView(u8"panel off"));
     }
 
     if (ImGui::IsKeyPressed(ImGuiKey_I)) {
         info = !info;
-        ui->trace(info ? "info on"_sv : "info off"_sv);
+        ui->trace(info ? StringView(u8"info on") : StringView(u8"info off"));
     }
 }
 
@@ -549,8 +554,8 @@ void ViewApp::drawGallery() {
     if (scrollY != tracedScrollY) {
         StringBuilder text;
 
-        text << "im scroll: y "_sv << (i64)scrollY << " dy "_sv << (i64)(scrollY - tracedScrollY) << " wheel/100 "_sv << (i64)(ImGui::GetIO().MouseWheel * 100.f);
-        ui->timing(sv(text));
+        text << StringView(u8"im scroll: y ") << (i64)scrollY << StringView(u8" dy ") << (i64)(scrollY - tracedScrollY) << StringView(u8" wheel/100 ") << (i64)(ImGui::GetIO().MouseWheel * 100.f);
+        ui->timing(StringView(text));
         tracedScrollY = scrollY;
     }
     size_t first = count;
@@ -706,15 +711,15 @@ void ViewApp::drawInfo() {
 
     if (ImGui::CollapsingHeader("Image", ImGuiTreeNodeFlags_DefaultOpen) && table("image")) {
         if (shown == Load::Failed && shownIndex == current) {
-            row("Error", sv(shownError));
+            row("Error", StringView(shownError));
         }
 
         if (ready) {
             StringBuilder text;
             i64 tenths = ((i64)texW * (i64)texH + 50000) / 100000;
 
-            text << (i64)texW << " \xc3\x97 "_sv << (i64)texH << "   "_sv << tenths / 10 << "."_sv << tenths % 10 << " MP"_sv;
-            row("Dimensions", sv(text));
+            text << (i64)texW << StringView(u8" \xc3\x97 ") << (i64)texH << StringView(u8"   ") << tenths / 10 << StringView(u8".") << tenths % 10 << StringView(u8" MP");
+            row("Dimensions", StringView(text));
         }
 
         {
@@ -734,7 +739,7 @@ void ViewApp::drawInfo() {
                 ext[n++] = (char)(*p >= 'a' && *p <= 'z' ? *p - 32 : *p);
             }
 
-            row("Type", n ? StringView((const u8*)ext, (const u8*)ext + n) : "?"_sv);
+            row("Type", n ? StringView((const u8*)ext, (const u8*)ext + n) : StringView(u8"?"));
         }
 
         if (ready) {
@@ -743,10 +748,10 @@ void ViewApp::drawInfo() {
             {
                 StringBuilder text;
 
-                text << (i64)(zoom * 100.f + .5f) << "%"_sv;
+                text << (i64)(zoom * 100.f + .5f) << StringView(u8"%");
 
                 if (fit) {
-                    text << " (fit)"_sv;
+                    text << StringView(u8" (fit)");
                 }
 
                 ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
@@ -761,7 +766,7 @@ void ViewApp::drawInfo() {
                     for (int preset : presets) {
                         StringBuilder label;
 
-                        label << (i64)preset << "%"_sv;
+                        label << (i64)preset << StringView(u8"%");
 
                         if (ImGui::Selectable(label.cStr(), !fit && (i64)(zoom * 100.f + .5f) == preset)) {
                             panX = 0.f;
@@ -777,16 +782,16 @@ void ViewApp::drawInfo() {
             {
                 StringBuilder text;
 
-                text << (i64)(rotation * 90) << "\xc2\xb0"_sv;
-                row("Rotation", sv(text));
+                text << (i64)(rotation * 90) << StringView(u8"\xc2\xb0");
+                row("Rotation", StringView(text));
             }
         }
 
         {
             StringBuilder text;
 
-            text << (i64)(current + 1) << " / "_sv << (i64)entries.length();
-            row("Position", sv(text));
+            text << (i64)(current + 1) << StringView(u8" / ") << (i64)entries.length();
+            row("Position", StringView(text));
         }
 
         ImGui::EndTable();
@@ -797,20 +802,20 @@ void ViewApp::drawInfo() {
     ImGui::Spacing();
 
     if (ImGui::CollapsingHeader("File", ImGuiTreeNodeFlags_DefaultOpen) && table("file")) {
-        StringView whole = sv(entry.path);
+        StringView whole = StringView(entry.path);
 
         row("Name", entry.name());
-        row("Folder", entry.nameAt == 0 ? "."_sv : entry.nameAt == 1 ? "/"_sv : StringView(whole.begin(), whole.begin() + entry.nameAt - 1));
+        row("Folder", entry.nameAt == 0 ? StringView(u8".") : entry.nameAt == 1 ? StringView(u8"/") : StringView(whole.begin(), whole.begin() + entry.nameAt - 1));
 
         if (fileBytes >= 0) {
             StringBuilder text;
 
             appendBytes(text, fileBytes);
-            row("Size", sv(text));
+            row("Size", StringView(text));
         }
 
         if (!fileModified.empty()) {
-            row("Modified", sv(fileModified));
+            row("Modified", StringView(fileModified));
         }
 
         ImGui::EndTable();
@@ -922,7 +927,7 @@ void ViewApp::draw() {
 
 int mainView(ObjPool& pool, Ui& ui, int argc, char** argv) {
     if (argc < 2) {
-        sysE << "usage: im view <file|dir>..."_sv << endL;
+        sysE << StringView(u8"usage: im view <file|dir>...") << endL;
 
         return 2;
     }
@@ -936,7 +941,7 @@ int mainView(ObjPool& pool, Ui& ui, int argc, char** argv) {
         struct stat st;
 
         if (stat(argv[i], &st) != 0) {
-            sysE << "im view: "_sv << arg << ": "_sv << StringView(strerror(errno)) << endL;
+            sysE << StringView(u8"im view: ") << arg << StringView(u8": ") << StringView(strerror(errno)) << endL;
 
             continue;
         }
@@ -951,7 +956,7 @@ int mainView(ObjPool& pool, Ui& ui, int argc, char** argv) {
                     slash--;
                 }
 
-                StringView dir = slash == 0 ? "."_sv : slash == 1 ? "/"_sv : StringView(arg.begin(), arg.begin() + slash - 1);
+                StringView dir = slash == 0 ? StringView(u8".") : slash == 1 ? StringView(u8"/") : StringView(arg.begin(), arg.begin() + slash - 1);
                 StringView name(arg.begin() + slash, arg.end());
 
                 addDirectory(pool, app.entries, dir);
@@ -977,16 +982,16 @@ int mainView(ObjPool& pool, Ui& ui, int argc, char** argv) {
                 addFile(pool, app.entries, arg);
             }
         } catch (...) {
-            sysE << "im view: "_sv << arg << ": "_sv << Exception::current() << endL;
+            sysE << StringView(u8"im view: ") << arg << StringView(u8": ") << Exception::current() << endL;
         }
     }
 
-    ui.trace(sv(StringBuilder() << "listed "_sv << (i64)app.entries.length()));
+    ui.trace(StringView(StringBuilder() << StringView(u8"listed ") << (i64)app.entries.length()));
 
     if (app.entries.empty()) {
-        sysE << "im view: no images to show"_sv << endL;
+        sysE << StringView(u8"im view: no images to show") << endL;
 
-        return showError(ui, "no images to show"_sv);
+        return showError(ui, StringView(u8"no images to show"));
     }
 
     readAll(app.entries);

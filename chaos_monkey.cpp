@@ -1,7 +1,6 @@
 #include "chaos_monkey.h"
 
-#include "util.h"
-
+#include <std/str/view.h>
 #include <std/mem/obj_pool.h>
 
 #include <stdlib.h>
@@ -31,9 +30,9 @@ EncoderChaos::EncoderChaos() {
             script = {};
         }
         if (word.split('=', fault, arg)) {
-            if (fault == "encoder-alloc"_sv) {
+            if (fault == StringView(u8"encoder-alloc")) {
                 allocSkip = (int)arg.stou();
-            } else if (fault == "encoder-output"_sv) {
+            } else if (fault == StringView(u8"encoder-output")) {
                 outputSkip = (int)arg.stou();
             }
         }

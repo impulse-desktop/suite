@@ -1,9 +1,13 @@
 #include "ui.h"
 
-#include "util.h"
+#include "error.h"
+#include "number.h"
 #include "pooled.h"
+#include "timing.h"
 
 #include <std/ios/sys.h>
+#include <std/sys/crt.h>
+#include <std/sys/throw.h>
 #include <std/alg/minmax.h>
 #include <std/lib/vector.h>
 #include <std/str/builder.h>
@@ -11,7 +15,6 @@
 #include <std/mem/obj_pool.h>
 
 #include <math.h>
-#include <time.h>
 #include <float.h>
 #include <imgui.h>
 #include <stdlib.h>
@@ -218,7 +221,7 @@ namespace {
 
     static void traceInput(StringView what, i32 x, i32 y) {
 #ifdef IM_FOR_TESTS
-        sysO << "im input: "_sv << what << " "_sv << x << " "_sv << y << endL;
+        sysO << StringView(u8"im input: ") << what << StringView(u8" ") << x << StringView(u8" ") << y << endL;
 #else
         (void)what;
         (void)x;
@@ -288,7 +291,7 @@ namespace {
 
         StringBuilder heading;
 
-        heading << "im "_sv << tool;
+        heading << StringView(u8"im ") << tool;
         ImGui::TextDisabled("%s", heading.cStr());
         ImGui::Spacing();
         ImGui::PushTextWrapPos(vp->Size.x - pad);
@@ -338,7 +341,7 @@ namespace {
         bool traceFrames = false;
         plt::Window* window = nullptr;
         Renderer* renderer = nullptr;
-        u64 frameNs = 0;
+        u64 frameUs = 0;
         plt::PointerIcon icon = plt::PointerIcon::Text;
         bool shown = false;
         u32 presentedWidth = 0;
@@ -396,14 +399,10 @@ void UiImpl::beginInputFrame() {
     io.BackendPlatformName = "imgui_plt";
     io.DisplaySize = ImVec2((float)info.width, (float)info.height);
 
-    struct timespec ts;
+    u64 now = monotonicNowUs();
 
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-
-    u64 now = (u64)ts.tv_sec * 1000000000ull + (u64)ts.tv_nsec;
-
-    io.DeltaTime = frameNs && now > frameNs ? (float)(now - frameNs) / 1e9f : 1.f / 60.f;
-    frameNs = now;
+    io.DeltaTime = frameUs && now > frameUs ? (float)(now - frameUs) / 1e6f : 1.f / 60.f;
+    frameUs = now;
 
     plt::PointerIcon wanted = pointerIcon(ImGui::GetMouseCursor());
 
@@ -440,10 +439,10 @@ void UiImpl::preedit(StringView, i32, i32) {
 }
 
 void UiImpl::pointerMotion(const plt::PointerMotionInput& input) {
-    traceInput("pointer"_sv, input.pixelX, input.pixelY);
+    traceInput(StringView(u8"pointer"), input.pixelX, input.pixelY);
 
     if (traceFrames) {
-        sysE << "im pointer: "_sv << (i64)input.pixelX << " "_sv << (i64)input.pixelY << endL;
+        sysE << StringView(u8"im pointer: ") << (i64)input.pixelX << StringView(u8" ") << (i64)input.pixelY << endL;
     }
 
     ImGui::GetIO().AddMousePosEvent((float)input.pixelX, (float)input.pixelY);
@@ -464,7 +463,7 @@ void UiImpl::pointerButton(const plt::PointerButtonInput& input) {
 
 void UiImpl::scroll(const plt::ScrollInput& input) {
     if (traceFrames) {
-        sysE << "im wheel: y/100 "_sv << (i64)(input.y * 100.0) << " precise "_sv << (i64)input.precise << " momentum "_sv << (i64)input.momentum << " phase "_sv << (i64)input.phase << endL;
+        sysE << StringView(u8"im wheel: y/100 ") << (i64)(input.y * 100.0) << StringView(u8" precise ") << (i64)input.precise << StringView(u8" momentum ") << (i64)input.momentum << StringView(u8" phase ") << (i64)input.phase << endL;
     }
 
     float x = (float)input.x;
@@ -485,7 +484,7 @@ void UiImpl::focus(bool focused) {
 }
 
 void UiImpl::pointerPresence(bool present) {
-    traceInput(present ? "pointer present"_sv : "pointer absent"_sv, 0, 0);
+    traceInput(present ? StringView(u8"pointer present") : StringView(u8"pointer absent"), 0, 0);
 
     if (!present) {
         ImGui::GetIO().AddMousePosEvent(-FLT_MAX, -FLT_MAX);
@@ -505,23 +504,23 @@ float UiImpl::px(Design d) {
 
 void UiImpl::open(const UiOptions& options) {
     if (platform->scheduler()->current() == nullptr) {
-        fail("a window opens from the tool's own fiber"_sv);
+        fail(StringView(u8"a window opens from the tool's own fiber"));
     }
 
     if (window) {
-        fail("one window per tool"_sv);
+        fail(StringView(u8"one window per tool"));
     }
 
     int width = (int)px(options.width);
     int height = (int)px(options.height);
 
-    appId << "im-"_sv << name;
-    title << "im "_sv << name;
+    appId << StringView(u8"im-") << name;
+    title << StringView(u8"im ") << name;
 
     plt::WindowOptions made;
 
-    made.appId = sv(appId);
-    made.title = sv(title);
+    made.appId = StringView(appId);
+    made.title = StringView(title);
     made.width = (u32)width;
     made.height = (u32)height;
     made.input = this;
@@ -548,7 +547,7 @@ void UiImpl::open(const UiOptions& options) {
 
 bool UiImpl::next(UiEvent& event) {
     if (!window) {
-        fail("no window to take events from: open it first"_sv);
+        fail(StringView(u8"no window to take events from: open it first"));
     }
 
     if (!shown) {
@@ -589,7 +588,7 @@ void UiImpl::requestFullscreen(bool on) {
 
 void UiImpl::requestResize(u32 width, u32 height) {
     if (!window || !width || !height || width > 0x7fffffffu || height > 0x7fffffffu) {
-        fail("invalid window resize"_sv);
+        fail(StringView(u8"invalid window resize"));
     }
     int w = (int)width, h = (int)height;
     clampWindowSize(window->info(), w, h);
@@ -606,7 +605,7 @@ RenderImage* UiImpl::importImage(ObjPool& owner, SharedImage& source, bool hdr) 
 
 ImTextureRef UiImpl::loadTexture(u32 width, u32 height, const void* rgba) {
     if (textures.length() >= renderer->maxTextures()) {
-        fail(sv(StringBuilder() << "more than "_sv << (i64)renderer->maxTextures() << " textures at once"_sv));
+        fail(StringView(StringBuilder() << StringView(u8"more than ") << (i64)renderer->maxTextures() << StringView(u8" textures at once")));
     }
 
     ImTextureData* texture = IM_NEW(ImTextureData)();
@@ -640,7 +639,11 @@ bool UiImpl::drawErrorPanel(StringView message) {
 }
 
 void UiImpl::trace(StringView what) {
-    traceTool(name, what);
+#ifdef IM_FOR_TESTS
+    sysO << StringView(u8"im ") << name << StringView(u8": ") << what << endL;
+#else
+    (void)what;
+#endif
 }
 
 void UiImpl::timing(StringView line) {
@@ -661,7 +664,7 @@ void UiImpl::run() {
 }
 
 bool UiImpl::frame(const plt::WindowInfo& info) {
-    u64 began = nowNs();
+    u64 began = monotonicNowUs();
     u64 gap = frameBegan ? began - frameBegan : 0;
 
     frameBegan = began;
@@ -670,44 +673,38 @@ bool UiImpl::frame(const plt::WindowInfo& info) {
     if (info.width != presentedWidth || info.height != presentedHeight) {
         presentedWidth = info.width;
         presentedHeight = info.height;
-        traceTool(name, sv(StringBuilder() << "presenting "_sv << (i64)info.width << "x"_sv << (i64)info.height));
+        trace(StringView(StringBuilder() << StringView(u8"presenting ") << (i64)info.width << StringView(u8"x") << (i64)info.height));
     }
 
-    u64 begun = nowNs();
+    u64 begun = monotonicNowUs();
 
     beginInputFrame();
     ImGui::NewFrame();
 
-    u64 opened = nowNs();
+    u64 opened = monotonicNowUs();
     int action = drawFrame();
-    u64 drew = nowNs();
+    u64 drew = monotonicNowUs();
 
     ImGui::Render();
 
-    u64 rendered = nowNs();
+    u64 rendered = monotonicNowUs();
     bool presented = renderer->endFrame(ImGui::GetDrawData());
 
     if (traceFrames) {
         StringBuilder text;
 
-        text << "im frame "_sv << (i64)frameCount++ << ": gap "_sv;
-        appendMs(text, gap);
-        text << " begin "_sv;
-        appendMs(text, begun - began);
-        text << " new "_sv;
-        appendMs(text, opened - begun);
-        text << " tool "_sv;
-        appendMs(text, drew - opened);
-        text << " render "_sv;
-        appendMs(text, rendered - drew);
-        text << " end "_sv;
-        appendMs(text, nowNs() - rendered);
+        text << StringView(u8"im frame ") << (i64)frameCount++ << StringView(u8": gap ") << MS{gap};
+        text << StringView(u8" begin ") << MS{begun - began};
+        text << StringView(u8" new ") << MS{opened - begun};
+        text << StringView(u8" tool ") << MS{drew - opened};
+        text << StringView(u8" render ") << MS{rendered - drew};
+        text << StringView(u8" end ") << MS{monotonicNowUs() - rendered};
 
         if (!presented) {
-            text << " unpresented"_sv;
+            text << StringView(u8" unpresented");
         }
 
-        sysE << sv(text) << endL;
+        sysE << StringView(text) << endL;
     }
 
     if (action != 0) {
@@ -751,7 +748,7 @@ int UiImpl::drawFrame() {
 }
 
 void UiImpl::close() {
-    trace("closed"_sv);
+    trace(StringView(u8"closed"));
 
     if (gone) {
         return;
@@ -819,7 +816,7 @@ int runTool(StringView name, int (*main)(ObjPool& pool, Ui& ui, int argc, char**
     }
 
     if (!ui.error.empty()) {
-        throw ToolError(Buffer(sv(ui.error)));
+        raiseError(StringView(ui.error));
     }
 
     return ui.result;

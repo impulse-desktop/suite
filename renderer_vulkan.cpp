@@ -1,11 +1,12 @@
 #include "renderer_vulkan.h"
 
-#include "util.h"
+#include "error.h"
 #include "pooled.h"
 #include "renderer.h"
 
 #include <std/alg/defer.h>
 #include <std/lib/vector.h>
+#include <std/str/builder.h>
 #include <std/mem/obj_pool.h>
 
 #include <fcntl.h>
@@ -236,28 +237,28 @@ void TestVulkanChaos::arm(StringView script) {
 }
 
 void TestVulkanChaos::armFault(StringView fault, StringView arg) {
-    if (fault == "memory-types"_sv) {
+    if (fault == StringView(u8"memory-types")) {
         memoryFaults = (int)arg.stou();
-    } else if (fault == "vulkan"_sv) {
+    } else if (fault == StringView(u8"vulkan")) {
         vulkanSkip = (int)arg.stou();
-    } else if (fault == "vulkan-at"_sv) {
+    } else if (fault == StringView(u8"vulkan-at")) {
         failingSites.pushBack(arg);
-    } else if (fault == "no-ext"_sv) {
+    } else if (fault == StringView(u8"no-ext")) {
         hiddenExtensions.pushBack(arg);
-    } else if (fault == "swapchain"_sv || fault == "swapchain-suboptimal"_sv) {
+    } else if (fault == StringView(u8"swapchain") || fault == StringView(u8"swapchain-suboptimal")) {
         swapchainSkip = (int)arg.stou();
-        swapchainFault = fault == "swapchain"_sv ? VK_ERROR_OUT_OF_DATE_KHR : VK_SUBOPTIMAL_KHR;
-    } else if (fault == "count"_sv) {
+        swapchainFault = fault == StringView(u8"swapchain") ? VK_ERROR_OUT_OF_DATE_KHR : VK_SUBOPTIMAL_KHR;
+    } else if (fault == StringView(u8"count")) {
         StringView what, n;
 
         if (arg.split(':', what, n)) {
             counts.pushBack({what, (u32)n.stou()});
         }
-    } else if (fault == "discrete-gpu"_sv) {
+    } else if (fault == StringView(u8"discrete-gpu")) {
         discreteGpu = true;
-    } else if (fault == "no-wsi"_sv) {
+    } else if (fault == StringView(u8"no-wsi")) {
         noWsi = true;
-    } else if (fault == "image-counts"_sv) {
+    } else if (fault == StringView(u8"image-counts")) {
         StringView lo, hi;
 
         if (arg.split(':', lo, hi)) {
@@ -440,10 +441,10 @@ VkPhysicalDevice Gpu::selectPhysicalDevice() {
     u32 count = 0;
 
     vkc(vkEnumeratePhysicalDevices(instance, &count, nullptr));
-    count = chaos->count("devices"_sv, count);
+    count = chaos->count(StringView(u8"devices"), count);
 
     if (!count) {
-        fail("no vulkan device"_sv);
+        fail(StringView(u8"no vulkan device"));
     }
 
     Vector<VkPhysicalDevice> devices;
@@ -473,7 +474,7 @@ u32 Gpu::selectQueueFamily(VkPhysicalDevice candidate) {
 
     families.zero(count);
     vkGetPhysicalDeviceQueueFamilyProperties(candidate, &count, families.mutData());
-    count = chaos->count("queue-families"_sv, count);
+    count = chaos->count(StringView(u8"queue-families"), count);
 
     for (u32 i = 0; i < count; i++) {
         if (families[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
@@ -481,17 +482,17 @@ u32 Gpu::selectQueueFamily(VkPhysicalDevice candidate) {
         }
     }
 
-    fail("no vulkan graphics queue"_sv);
+    fail(StringView(u8"no vulkan graphics queue"));
 }
 
 VkSurfaceFormatKHR Gpu::selectSurfaceFormat(VkSurfaceKHR surface, const VkFormat* wanted, u32 nwanted, VkColorSpaceKHR colorSpace) {
     u32 count = 0;
 
     vkc(vkGetPhysicalDeviceSurfaceFormatsKHR(phys, surface, &count, nullptr));
-    count = chaos->count("surface-formats"_sv, count);
+    count = chaos->count(StringView(u8"surface-formats"), count);
 
     if (!count) {
-        fail("vulkan WSI offers no surface format"_sv);
+        fail(StringView(u8"vulkan WSI offers no surface format"));
     }
 
     Vector<VkSurfaceFormatKHR> available;
@@ -620,12 +621,12 @@ void Gpu::createSwapchain(u32 width, u32 height) {
 
     VkResult made = vkCreateSwapchainKHR(device, &ci, alloc, &swapchain);
 
-    if (chaos->vulkanAt("swapchain"_sv, made) < 0) {
+    if (chaos->vulkanAt(StringView(u8"swapchain"), made) < 0) {
         if (made == VK_SUCCESS) {
             vkDestroySwapchainKHR(device, swapchain, alloc);
         }
 
-        fail("vulkan cannot make a swapchain on this surface"_sv);
+        fail(StringView(u8"vulkan cannot make a swapchain on this surface"));
     }
 
     if (present.swapchain) {
@@ -1003,7 +1004,7 @@ void Gpu::vkc(VkResult e) {
     e = chaos->vulkan(e);
 
     if (e < 0) {
-        fail(sv(StringBuilder() << "vulkan error "_sv << (i64)e));
+        fail(StringView(StringBuilder() << StringView(u8"vulkan error ") << (i64)e));
     }
 }
 
@@ -1011,7 +1012,7 @@ void Gpu::vkcAt(StringView site, VkResult e) {
     e = chaos->vulkanAt(site, e);
 
     if (e < 0) {
-        fail(sv(StringBuilder() << "vulkan error "_sv << (i64)e << " at "_sv << site));
+        fail(StringView(StringBuilder() << StringView(u8"vulkan error ") << (i64)e << StringView(u8" at ") << site));
     }
 }
 
@@ -1066,7 +1067,7 @@ void Gpu::setupVulkan(ObjPool& pool, const GpuOptions& wants) {
         }
 
         if (!phys) {
-            fail("shared screenshot gpu is unavailable"_sv);
+            fail(StringView(u8"shared screenshot gpu is unavailable"));
         }
     } else {
         phys = selectPhysicalDevice();
@@ -1085,7 +1086,7 @@ void Gpu::setupVulkan(ObjPool& pool, const GpuOptions& wants) {
 
     for (u32 i = 0; i < wantedCount; i++) {
         if (!hasDeviceExtension(phys, wantedExts[i])) {
-            fail(sv(StringBuilder() << "vulkan lacks "_sv << StringView(wantedExts[i])));
+            fail(StringView(StringBuilder() << StringView(u8"vulkan lacks ") << StringView(wantedExts[i])));
         }
 
         devExts.pushBack(wantedExts[i]);
@@ -1150,7 +1151,7 @@ void Gpu::setupWindow(ObjPool& pool, VkSurfaceKHR surface, int w, int h, bool hd
     vkc(vkGetPhysicalDeviceSurfaceSupportKHR(phys, queueFamily, surface, &supported));
 
     if (!chaos->surfaceSupport(supported)) {
-        fail("no vulkan WSI support"_sv);
+        fail(StringView(u8"no vulkan WSI support"));
     }
 
     const VkFormat hdrFmts[] = {
@@ -1171,7 +1172,7 @@ void Gpu::setupWindow(ObjPool& pool, VkSurfaceKHR surface, int w, int h, bool hd
     present.format = selectSurfaceFormat(surface, fmts, 4, colorSpace);
 
     if (hdr && present.format.colorSpace != colorSpace) {
-        fail("vulkan WSI has no BT.2020/PQ surface"_sv);
+        fail(StringView(u8"vulkan WSI has no BT.2020/PQ surface"));
     }
 
     createPresentPass();
@@ -1190,7 +1191,7 @@ u32 Gpu::findMemoryType(u32 typeBits, VkMemoryPropertyFlags props) {
         }
     }
 
-    fail("no vulkan memory type fits"_sv);
+    fail(StringView(u8"no vulkan memory type fits"));
 }
 
 void Gpu::setupLinearHdr(ObjPool& pool, u32 width, u32 height) {
@@ -1237,7 +1238,7 @@ void Gpu::setupLinearHdr(ObjPool& pool, u32 width, u32 height) {
     rpci.pSubpasses = &subpass;
     rpci.dependencyCount = 2;
     rpci.pDependencies = dependencies;
-    vkcAt("scene-pass"_sv, vkCreateRenderPass(device, &rpci, alloc, &scenePass));
+    vkcAt(StringView(u8"scene-pass"), vkCreateRenderPass(device, &rpci, alloc, &scenePass));
 
     VkSamplerCreateInfo sci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
 
@@ -1674,7 +1675,7 @@ namespace {
                 return PixelLayout::Bgr10A2;
             }
             default: {
-                fail("unsupported shared image format"_sv);
+                fail(StringView(u8"unsupported shared image format"));
             }
         }
     }
@@ -1739,16 +1740,16 @@ namespace {
 SharedImage* createVulkanSharedImage(ObjPool& pool, StringView description, intptr_t handle) {
     DmaImage* image = pool.make<DmaImage>();
     if (!parseShared(description, *image)) {
-        fail("bad shared screenshot metadata"_sv);
+        fail(StringView(u8"bad shared screenshot metadata"));
     }
     pixelLayout((VkFormat)image->format);
     checkImageSize(image->width, image->height, 65535);
     if (handle < 0 || handle > 0x7fffffff || image->stride < (u64)image->width * 4 || image->offset > image->allocationSize || (u64)(image->height - 1) * image->stride + (u64)image->width * 4 > image->allocationSize - image->offset) {
-        fail("bad shared screenshot metadata"_sv);
+        fail(StringView(u8"bad shared screenshot metadata"));
     }
     image->fd = fcntl((int)handle, F_DUPFD_CLOEXEC, 0);
     if (image->fd < 0) {
-        fail("cannot take the shared screenshot fd"_sv);
+        fail(StringView(u8"cannot take the shared screenshot fd"));
     }
     pooledGuard(pool, [image] {
         close(image->fd);
@@ -1760,7 +1761,7 @@ RenderImage* VulkanRenderer::import(ObjPool& pool, SharedImage& source, bool hdr
     DmaImage& img = static_cast<DmaImage&>(source);
     checkImageSize(img.width, img.height, maxTextureSide());
     if (hdr && !gpu->linearHdr) {
-        fail("HDR image needs an HDR renderer"_sv);
+        fail(StringView(u8"HDR image needs an HDR renderer"));
     }
     VulkanImage* image = pool.make<VulkanImage>();
     image->gpu = gpu;
@@ -1812,13 +1813,13 @@ RenderImage* VulkanRenderer::import(ObjPool& pool, SharedImage& source, bool hdr
     VkMemoryFdPropertiesKHR fdProps{VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR};
 
     if (!getFdProps || getFdProps(gpu->device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT, img.fd, &fdProps) != VK_SUCCESS) {
-        fail("cannot query shared screenshot memory"_sv);
+        fail(StringView(u8"cannot query shared screenshot memory"));
     }
 
     u32 memoryTypes = req.memoryTypeBits & fdProps.memoryTypeBits;
 
     if (!memoryTypes) {
-        fail("shared screenshot memory is incompatible"_sv);
+        fail(StringView(u8"shared screenshot memory is incompatible"));
     }
 
     VkMemoryDedicatedAllocateInfo dedicated{VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO};
@@ -1831,7 +1832,7 @@ RenderImage* VulkanRenderer::import(ObjPool& pool, SharedImage& source, bool hdr
     import.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
     int ownedFd = fcntl(img.fd, F_DUPFD_CLOEXEC, 0);
     if (ownedFd < 0) {
-        fail("cannot duplicate shared image fd"_sv);
+        fail(StringView(u8"cannot duplicate shared image fd"));
     }
     ScopedGuard descriptor = [&] mutable -> void {
         if (ownedFd >= 0) {
@@ -2008,7 +2009,7 @@ void VulkanImage::read(int x0, int y0, int x1, int y1, ImagePixels& out) {
 RenderImage* VulkanRenderer::upload(ObjPool& pool, u32 width, u32 height, const void* rgba, bool hdr) {
     checkImageSize(width, height, maxTextureSide());
     if (!rgba || (hdr && !gpu->linearHdr)) {
-        fail("invalid renderer image source"_sv);
+        fail(StringView(u8"invalid renderer image source"));
     }
     VulkanImage* image = pool.make<VulkanImage>();
     image->gpu = gpu;

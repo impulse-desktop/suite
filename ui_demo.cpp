@@ -1,7 +1,6 @@
 #include "ui_demo.h"
 
 #include "ui.h"
-#include "util.h"
 
 #include <imgui.h>
 
@@ -30,7 +29,7 @@ int mainUiDemo(ObjPool&, Ui& ui, int, char**) {
         ImGui::End();
 
         if (ok) {
-            ui.trace("ok"_sv);
+            ui.trace(StringView(u8"ok"));
 
             return 0;
         }

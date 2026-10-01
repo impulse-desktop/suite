@@ -1,7 +1,8 @@
 #include "screenshot.h"
 
 #include "ui.h"
-#include "util.h"
+#include "error.h"
+#include "number.h"
 #include "renderer.h"
 #include "chaos_monkey.h"
 
@@ -12,6 +13,7 @@
 #include <std/sys/types.h>
 #include <std/ios/out_fd.h>
 #include <std/lib/vector.h>
+#include <std/str/builder.h>
 #include <std/ios/fs_utils.h>
 #include <std/mem/obj_pool.h>
 
@@ -32,6 +34,10 @@
 using namespace stl;
 
 namespace {
+    static float clampf(float v, float lo, float hi) {
+        return v < lo ? lo : (v > hi ? hi : v);
+    }
+
     struct OutputColorState {
         bool hdr = false;
         double sdrWhiteNits = 80.0;
@@ -216,8 +222,8 @@ namespace {
     }
 
     void loadImage(ObjPool& pool, StringView path, Image& img) {
-        bool inherited = path == "fd:3"_sv;
-        Buffer p(inherited ? "/proc/self/fd/3"_sv : path);
+        bool inherited = path == StringView(u8"fd:3");
+        Buffer p(inherited ? StringView(u8"/proc/self/fd/3") : path);
 
         if (const char* color = getenv("IM_SHOT_COLOR")) {
             StringView value(color), hs, rest;
@@ -234,7 +240,7 @@ namespace {
 
                 double white = parseFloat(whiteString);
 
-                img.color = hs == "1"_sv ? OutputColorState::hdr10(white) : OutputColorState::sdr();
+                img.color = hs == StringView(u8"1") ? OutputColorState::hdr10(white) : OutputColorState::sdr();
 
                 if (volume) {
                     img.color.displayMinNits = parseFloat(minString);
@@ -248,7 +254,7 @@ namespace {
             img.dmaFd = inherited ? fcntl(3, F_DUPFD_CLOEXEC, 0) : open(p.cStr(), O_RDONLY | O_CLOEXEC);
 
             if (img.dmaFd < 0) {
-                fail(sv(StringBuilder() << "cannot take the shared screenshot fd: "_sv << StringView(strerror(errno))));
+                fail(StringView(StringBuilder() << StringView(u8"cannot take the shared screenshot fd: ") << StringView(strerror(errno))));
             }
 
             img.native = SharedImage::create(pool, StringView(spec), img.dmaFd);
@@ -262,20 +268,20 @@ namespace {
         readFileContent(p, img.file);
 
         if (img.file.used() < 12) {
-            fail("not an imway screenshot (too small)"_sv);
+            fail(StringView(u8"not an imway screenshot (too small)"));
         }
 
         const u32* h = (const u32*)img.file.data();
 
         if (h[0] != kMagic || !h[1] || !h[2]) {
-            fail("not an imway screenshot (bad header)"_sv);
+            fail(StringView(u8"not an imway screenshot (bad header)"));
         }
 
         img.w = h[1];
         img.h = h[2];
 
         if (img.file.used() < 12 + (size_t)img.w * img.h * 4) {
-            fail("truncated screenshot"_sv);
+            fail(StringView(u8"truncated screenshot"));
         }
 
         img.px = (const u8*)img.file.data() + 12;
@@ -327,7 +333,7 @@ namespace {
                 png_destroy_write_struct(&png, info ? &info : nullptr);
             }
 
-            fail("png encode failed"_sv);
+            fail(StringView(u8"png encode failed"));
         }
 
         png_set_write_fn(png, &out, pngWrite, nullptr);
@@ -383,7 +389,7 @@ namespace {
         ScopedFD fd(open(Buffer(file).cStr(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644));
 
         if (fd.get() < 0) {
-            fail(sv(StringBuilder() << "cannot write "_sv << file));
+            fail(StringView(StringBuilder() << StringView(u8"cannot write ") << file));
         }
 
         FDRegular out(fd);
@@ -396,7 +402,7 @@ namespace {
         JxlEncoder* enc = chaos.encoderAlloc(true) ? JxlEncoderCreate(nullptr) : nullptr;
 
         if (!enc) {
-            fail("jxl encoder allocation failed"_sv);
+            fail(StringView(u8"jxl encoder allocation failed"));
         }
 
         JxlBasicInfo info;
@@ -430,7 +436,7 @@ namespace {
         JxlEncoderFrameSettings* frame = chaos.encoderAlloc(true) ? JxlEncoderFrameSettingsCreate(enc, nullptr) : nullptr;
         JxlPixelFormat format{3, JXL_TYPE_UINT16, JXL_NATIVE_ENDIAN, 0};
         size_t bytes = (size_t)w * h * 3 * sizeof(u16);
-        bool lossless = !getenv("IM_SHOT_LOSSLESS") || StringView(getenv("IM_SHOT_LOSSLESS")) != "0"_sv;
+        bool lossless = !getenv("IM_SHOT_LOSSLESS") || StringView(getenv("IM_SHOT_LOSSLESS")) != StringView(u8"0");
         bool frameConfigured = false;
 
         if (frame) {
@@ -454,7 +460,7 @@ namespace {
 
         if (!ok) {
             JxlEncoderDestroy(enc);
-            fail("jxl encode setup failed"_sv);
+            fail(StringView(u8"jxl encode setup failed"));
         }
 
         JxlEncoderCloseInput(enc);
@@ -470,7 +476,7 @@ namespace {
 
             if (!chaos.encoderOutput(status == JXL_ENC_SUCCESS || status == JXL_ENC_NEED_MORE_OUTPUT)) {
                 JxlEncoderDestroy(enc);
-                fail("jxl encode failed"_sv);
+                fail(StringView(u8"jxl encode failed"));
             }
             if (status == JXL_ENC_SUCCESS) {
                 break;
@@ -520,15 +526,15 @@ namespace {
         } else {
             const char* home = getenv("HOME");
 
-            builder << StringView(home ? home : ".") << "/Pictures"_sv;
+            builder << StringView(home ? home : ".") << StringView(u8"/Pictures");
         }
 
         if (!configured || !*configured) {
-            builder << "/screenshots"_sv;
+            builder << StringView(u8"/screenshots");
         }
 
         builder.xchg(dir);
-        mkdirs(sv(dir));
+        mkdirs(StringView(dir));
 
         time_t t = time(nullptr);
         struct tm tm;
@@ -543,12 +549,12 @@ namespace {
         }
 
         if (!strftime(stamp, sizeof(stamp), name, &tm)) {
-            fail("screenshot filename is too long"_sv);
+            fail(StringView(u8"screenshot filename is too long"));
         }
 
-        StringView extension = getenv("IM_SHOT_FORMAT") && StringView(getenv("IM_SHOT_FORMAT")) == "png"_sv ? ".png"_sv : ".jxl"_sv;
+        StringView extension = getenv("IM_SHOT_FORMAT") && StringView(getenv("IM_SHOT_FORMAT")) == StringView(u8"png") ? StringView(u8".png") : StringView(u8".jxl");
 
-        return Buffer(sv(StringBuilder() << sv(dir) << "/"_sv << StringView(stamp) << extension));
+        return Buffer(StringView(StringBuilder() << StringView(dir) << StringView(u8"/") << StringView(stamp) << extension));
     }
 
     void encodeSelection(ChaosMonkey& chaos, const Image& img, RenderImage& tex, int x0, int y0, int x1, int y1, Buffer& png) {
@@ -598,7 +604,7 @@ namespace {
 
     void traceView(StringView what, const Viewer& v) {
 #ifdef IM_FOR_TESTS
-        sysO << "im screenshot: "_sv << what << " zoom "_sv << v.zoom << endL;
+        sysO << StringView(u8"im screenshot: ") << what << StringView(u8" zoom ") << v.zoom << endL;
 #else
         (void)what;
         (void)v;
@@ -611,14 +617,14 @@ namespace {
         if (z != v.zoom) {
             v.zoom = z;
             v.crop.clear();
-            traceView("zoomed"_sv, v);
+            traceView(StringView(u8"zoomed"), v);
         }
     }
 
     void resetView(Viewer& v) {
         v.zoom = kInitialZoom;
         v.crop.clear();
-        traceView("reset"_sv, v);
+        traceView(StringView(u8"reset"), v);
     }
 
     void drawPanel(Viewer& v, int& result, bool& reset) {
@@ -662,7 +668,7 @@ namespace {
         } else {
             StringBuilder text;
 
-            text << "selection "_sv << (i64)(crop.x1 - crop.x0 + 0.5f) << " x "_sv << (i64)(crop.y1 - crop.y0 + 0.5f);
+            text << StringView(u8"selection ") << (i64)(crop.x1 - crop.x0 + 0.5f) << StringView(u8" x ") << (i64)(crop.y1 - crop.y0 + 0.5f);
             ImGui::TextUnformatted(text.cStr());
         }
 
@@ -703,7 +709,7 @@ namespace {
             ImGui::SetScrollX(ImGui::GetScrollX() - d.x);
             ImGui::SetScrollY(ImGui::GetScrollY() - d.y);
             crop.clear();
-            traceView("panned"_sv, v);
+            traceView(StringView(u8"panned"), v);
         }
 
         float wheel = ImGui::GetIO().MouseWheel;
@@ -878,7 +884,7 @@ int mainScreenshot(ObjPool& pool, Ui& ui, int, char** argv) {
     options.renderer.sdrWhiteNits = (float)img.color.sdrWhiteNits;
     options.renderer.shared = img.native;
     ui.open(options);
-    ui.trace(options.renderer.hdr ? "surface HDR10 PQ"_sv : "surface sRGB"_sv);
+    ui.trace(options.renderer.hdr ? StringView(u8"surface HDR10 PQ") : StringView(u8"surface sRGB"));
     if (loaded) {
         int w, h;
         initialWindowSize(ui, img, w, h);
@@ -892,7 +898,7 @@ int mainScreenshot(ObjPool& pool, Ui& ui, int, char** argv) {
             if (event.kind == UiEvent::Kind::Close) {
                 return -1;
             }
-            int result = errText.empty() ? drawUi(ui, img, *tex, view) : (ui.drawErrorPanel(sv(errText)) ? -1 : 0);
+            int result = errText.empty() ? drawUi(ui, img, *tex, view) : (ui.drawErrorPanel(StringView(errText)) ? -1 : 0);
             if (result) {
                 return result;
             }
@@ -905,11 +911,11 @@ int mainScreenshot(ObjPool& pool, Ui& ui, int, char** argv) {
 
     auto report = [&] {
         if (!errText.empty()) {
-            sysE << "im screenshot: "_sv << sv(errText) << endL;
+            sysE << StringView(u8"im screenshot: ") << StringView(errText) << endL;
         }
     };
 
-    if (loaded && configuredAction == "save"_sv) {
+    if (loaded && configuredAction == StringView(u8"save")) {
         action = 1;
     } else {
         report();
@@ -923,7 +929,7 @@ int mainScreenshot(ObjPool& pool, Ui& ui, int, char** argv) {
             cropRegion(img, view.crop, x0, y0, x1, y1);
 
             Buffer encoded;
-            bool png = getenv("IM_SHOT_FORMAT") && StringView(getenv("IM_SHOT_FORMAT")) == "png"_sv;
+            bool png = getenv("IM_SHOT_FORMAT") && StringView(getenv("IM_SHOT_FORMAT")) == StringView(u8"png");
 
             if (png) {
                 encodeSelection(chaos, img, *tex, x0, y0, x1, y1, encoded);
@@ -933,8 +939,8 @@ int mainScreenshot(ObjPool& pool, Ui& ui, int, char** argv) {
 
             Buffer dest = destPath();
 
-            saveFile(encoded, sv(dest));
-            sysO << "im screenshot: saved "_sv << sv(dest) << endL;
+            saveFile(encoded, StringView(dest));
+            sysO << StringView(u8"im screenshot: saved ") << StringView(dest) << endL;
         } catch (...) {
             errText = Buffer(Exception::current());
         }

@@ -1,9 +1,10 @@
 #include "renderer.h"
 
 #include "ui.h"
-#include "util.h"
+#include "error.h"
 
 #include <std/ios/sys.h>
+#include <std/sys/throw.h>
 #include <std/mem/obj_pool.h>
 
 #include <string.h>
@@ -17,7 +18,7 @@ using namespace stl;
 namespace {
     static void verify(bool condition) {
         if (!condition) {
-            fail("renderer pixel check failed"_sv);
+            fail(StringView(u8"renderer pixel check failed"));
         }
     }
 
@@ -104,7 +105,7 @@ namespace {
         image.read(0, 0, 3, 2, pixels);
         verify(!memcmp(pixels.rgba.data(), source, sizeof(source)));
         verify(frames == 3);
-        sysO << "OK: renderer upload, crop readback, precision, bounds and drawing"_sv << endL;
+        sysO << StringView(u8"OK: renderer upload, crop readback, precision, bounds and drawing") << endL;
         return 0;
     }
 }
@@ -112,14 +113,14 @@ namespace {
 int main(int argc, char** argv) {
     try {
         checkPacked();
-        if (argc == 2 && StringView(argv[1]) == "--pixels"_sv) {
-            sysO << "OK: pixel layouts and 10-bit precision"_sv << endL;
+        if (argc == 2 && StringView(argv[1]) == StringView(u8"--pixels")) {
+            sysO << StringView(u8"OK: pixel layouts and 10-bit precision") << endL;
             return 0;
         }
-        if (argc > 2 || (argc == 2 && StringView(argv[1]) != "--hdr"_sv)) {
-            fail("usage: renderer_test [--pixels|--hdr]"_sv);
+        if (argc > 2 || (argc == 2 && StringView(argv[1]) != StringView(u8"--hdr"))) {
+            fail(StringView(u8"usage: renderer_test [--pixels|--hdr]"));
         }
-        return runTool("renderer-test"_sv, checkRenderer, argc, argv);
+        return runTool(StringView(u8"renderer-test"), checkRenderer, argc, argv);
     } catch (...) {
         sysE << Exception::current() << endL;
         return 1;

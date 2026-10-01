@@ -1,6 +1,6 @@
 #include "renderer.h"
 
-#include "util.h"
+#include "error.h"
 
 #include <string.h>
 
@@ -10,15 +10,17 @@
     #include "renderer_vulkan.h"
 #endif
 
+using namespace stl;
+
 void checkImageSize(u32 width, u32 height, u32 limit) {
     if (!width || !height || width > limit || height > limit || (u64)width * height > (1u << 28)) {
-        fail("invalid renderer image size"_sv);
+        fail(StringView(u8"invalid renderer image size"));
     }
 }
 
 void checkImageRegion(u32 width, u32 height, int x0, int y0, int x1, int y1) {
     if (x0 < 0 || y0 < 0 || x1 <= x0 || y1 <= y0 || (u32)x1 > width || (u32)y1 > height) {
-        fail("invalid renderer image region"_sv);
+        fail(StringView(u8"invalid renderer image region"));
     }
 }
 
@@ -52,7 +54,7 @@ void unpackPixels(const void* data, u32 width, u32 height, size_t stride, PixelL
 
 Renderer* Renderer::create(stl::ObjPool& pool, plt::Window& window, const RendererOptions& options) {
     if (!(options.sdrWhiteNits > 0.f) || options.sdrWhiteNits > 10000.f) {
-        fail("invalid SDR white level"_sv);
+        fail(StringView(u8"invalid SDR white level"));
     }
 #if defined(__APPLE__)
     return createMetalRenderer(pool, window, options);

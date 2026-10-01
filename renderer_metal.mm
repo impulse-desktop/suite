@@ -1,9 +1,10 @@
 #include "renderer_metal.h"
 
-#include "util.h"
+#include "error.h"
 #include "pooled.h"
 #include "renderer.h"
 
+#include <std/str/builder.h>
 #include <std/mem/obj_pool.h>
 
 #include <math.h>
@@ -78,7 +79,7 @@ namespace {
 
     static void checkCommand(id<MTLCommandBuffer> command) {
         if (command.status == MTLCommandBufferStatusError) {
-            fail(sv(StringBuilder() << "metal command failed: "_sv << StringView(command.error.localizedDescription.UTF8String)));
+            fail(StringView(StringBuilder() << StringView(u8"metal command failed: ") << StringView(command.error.localizedDescription.UTF8String)));
         }
     }
 
@@ -136,7 +137,7 @@ SurfaceImage::~SurfaceImage() noexcept {
 
 SharedImage* createMetalSharedImage(ObjPool& pool, StringView description, intptr_t handle) {
     if (!description.empty() || !handle) {
-        fail("a shared Metal image needs an IOSurface handle"_sv);
+        fail(StringView(u8"a shared Metal image needs an IOSurface handle"));
     }
     SurfaceImage* source = pool.make<SurfaceImage>();
     source->surface = (IOSurfaceRef)handle;
@@ -144,7 +145,7 @@ SharedImage* createMetalSharedImage(ObjPool& pool, StringView description, intpt
     size_t width = IOSurfaceGetWidth(source->surface);
     size_t height = IOSurfaceGetHeight(source->surface);
     if (width > maxTextureSize || height > maxTextureSize || IOSurfaceGetPlaneCount(source->surface) > 1) {
-        fail("unsupported IOSurface dimensions"_sv);
+        fail(StringView(u8"unsupported IOSurface dimensions"));
     }
     source->width = (u32)width;
     source->height = (u32)height;
@@ -166,7 +167,7 @@ SharedImage* createMetalSharedImage(ObjPool& pool, StringView description, intpt
             break;
         }
         default: {
-            fail("unsupported IOSurface pixel format"_sv);
+            fail(StringView(u8"unsupported IOSurface pixel format"));
         }
     }
     return source;
@@ -196,7 +197,7 @@ void MetalImage::read(int x0, int y0, int x1, int y1, ImagePixels& out) {
         id<MTLCommandBuffer> command = [renderer->queue commandBuffer];
         id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
         if (!buffer || !command || !blit) {
-            fail("cannot allocate Metal readback"_sv);
+            fail(StringView(u8"cannot allocate Metal readback"));
         }
         [blit copyFromTexture:texture sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(x0, y0, 0) sourceSize:MTLSizeMake(width, height, 1) toBuffer:buffer destinationOffset:0 destinationBytesPerRow:stride destinationBytesPerImage:stride * height];
         [blit endEncoding];
@@ -211,7 +212,7 @@ void MetalImage::read(int x0, int y0, int x1, int y1, ImagePixels& out) {
 RenderImage* MetalRenderer::upload(ObjPool& pool, u32 width, u32 height, const void* rgba, bool imageHdr) {
     checkImageSize(width, height, maxTextureSide());
     if (!rgba || (imageHdr && !hdr)) {
-        fail("invalid renderer image source"_sv);
+        fail(StringView(u8"invalid renderer image source"));
     }
     @autoreleasepool {
         MetalImage* image = pool.make<MetalImage>();
@@ -222,7 +223,7 @@ RenderImage* MetalRenderer::upload(ObjPool& pool, u32 width, u32 height, const v
         descriptor.usage = MTLTextureUsageShaderRead;
         image->texture = [device newTextureWithDescriptor:descriptor];
         if (!image->texture) {
-            fail("cannot allocate Metal image"_sv);
+            fail(StringView(u8"cannot allocate Metal image"));
         }
         [image->texture replaceRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0 withBytes:rgba bytesPerRow:(size_t)width * 4];
         return image;
@@ -232,7 +233,7 @@ RenderImage* MetalRenderer::upload(ObjPool& pool, u32 width, u32 height, const v
 RenderImage* MetalRenderer::import(ObjPool& pool, SharedImage& shared, bool imageHdr) {
     SurfaceImage& source = static_cast<SurfaceImage&>(shared);
     if (imageHdr && !hdr) {
-        fail("HDR image needs an HDR renderer"_sv);
+        fail(StringView(u8"HDR image needs an HDR renderer"));
     }
     @autoreleasepool {
         MetalImage* image = pool.make<MetalImage>();
@@ -244,7 +245,7 @@ RenderImage* MetalRenderer::import(ObjPool& pool, SharedImage& shared, bool imag
         descriptor.usage = MTLTextureUsageShaderRead;
         image->texture = [device newTextureWithDescriptor:descriptor iosurface:source.surface plane:0];
         if (!image->texture) {
-            fail("cannot import IOSurface into Metal"_sv);
+            fail(StringView(u8"cannot import IOSurface into Metal"));
         }
         return image;
     }
@@ -254,7 +255,7 @@ void MetalRenderer::setupHdr() {
     NSError* error = nil;
     id<MTLLibrary> library = [device newLibraryWithSource:[NSString stringWithUTF8String:hdrShaders] options:nil error:&error];
     if (!library) {
-        fail(sv(StringBuilder() << "Metal HDR shaders: "_sv << StringView(error.localizedDescription.UTF8String)));
+        fail(StringView(StringBuilder() << StringView(u8"Metal HDR shaders: ") << StringView(error.localizedDescription.UTF8String)));
     }
     MTLRenderPipelineDescriptor* descriptor = [[MTLRenderPipelineDescriptor alloc] init];
     descriptor.vertexFunction = [library newFunctionWithName:@"uiVertex"];
@@ -277,7 +278,7 @@ void MetalRenderer::setupHdr() {
     color.destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
     uiPipeline = [device newRenderPipelineStateWithDescriptor:descriptor error:&error];
     if (!uiPipeline) {
-        fail(sv(StringBuilder() << "Metal HDR UI pipeline: "_sv << StringView(error.localizedDescription.UTF8String)));
+        fail(StringView(StringBuilder() << StringView(u8"Metal HDR UI pipeline: ") << StringView(error.localizedDescription.UTF8String)));
     }
     descriptor.vertexDescriptor = nil;
     descriptor.vertexFunction = [library newFunctionWithName:@"imageVertex"];
@@ -285,7 +286,7 @@ void MetalRenderer::setupHdr() {
     color.blendingEnabled = NO;
     imagePipeline = [device newRenderPipelineStateWithDescriptor:descriptor error:&error];
     if (!imagePipeline) {
-        fail(sv(StringBuilder() << "Metal HDR image pipeline: "_sv << StringView(error.localizedDescription.UTF8String)));
+        fail(StringView(StringBuilder() << StringView(u8"Metal HDR image pipeline: ") << StringView(error.localizedDescription.UTF8String)));
     }
 }
 
@@ -339,7 +340,7 @@ void MetalRenderer::drawHdr(ImDrawData& draw) {
             vertices = [device newBufferWithBytes:list->VtxBuffer.Data length:(size_t)list->VtxBuffer.Size * sizeof(ImDrawVert) options:MTLResourceStorageModeShared];
             indices = [device newBufferWithBytes:list->IdxBuffer.Data length:(size_t)list->IdxBuffer.Size * sizeof(ImDrawIdx) options:MTLResourceStorageModeShared];
             if (!vertices || !indices) {
-                fail("cannot allocate Metal HDR draw buffers"_sv);
+                fail(StringView(u8"cannot allocate Metal HDR draw buffers"));
             }
         }
         for (const ImDrawCmd& command : list->CmdBuffer) {
@@ -386,7 +387,7 @@ bool MetalRenderer::endFrame(ImDrawData* draw) {
         id<MTLCommandBuffer> command = [queue commandBuffer];
         encoder = [command renderCommandEncoderWithDescriptor:pass];
         if (!command || !encoder) {
-            fail("cannot begin Metal frame"_sv);
+            fail(StringView(u8"cannot begin Metal frame"));
         }
         if (hdr) {
             drawHdr(*draw);
@@ -427,11 +428,11 @@ Renderer* createMetalRenderer(ObjPool& pool, plt::Window& window, const Renderer
     renderer->hdr = options.hdr;
     renderer->sdrWhiteNits = options.sdrWhiteNits;
     if (renderer->device == nil) {
-        fail("no metal device"_sv);
+        fail(StringView(u8"no metal device"));
     }
     renderer->queue = [renderer->device newCommandQueue];
     if (!renderer->queue) {
-        fail("cannot create Metal queue"_sv);
+        fail(StringView(u8"cannot create Metal queue"));
     }
     CAMetalLayer* layer = renderer->layer;
     layer.device = renderer->device;
@@ -443,7 +444,7 @@ Renderer* createMetalRenderer(ObjPool& pool, plt::Window& window, const Renderer
     layer.wantsExtendedDynamicRangeContent = options.hdr;
     CGColorSpaceRef color = CGColorSpaceCreateWithName(options.hdr ? kCGColorSpaceExtendedLinearITUR_2020 : kCGColorSpaceSRGB);
     if (!color) {
-        fail("cannot create Metal color space"_sv);
+        fail(StringView(u8"cannot create Metal color space"));
     }
     layer.colorspace = color;
     CGColorSpaceRelease(color);
@@ -451,7 +452,7 @@ Renderer* createMetalRenderer(ObjPool& pool, plt::Window& window, const Renderer
         renderer->setupHdr();
     }
     if (!ImGui_ImplMetal_Init(renderer->device)) {
-        fail("cannot initialize Metal ImGui backend"_sv);
+        fail(StringView(u8"cannot initialize Metal ImGui backend"));
     }
     pooledGuard(pool, [renderer] {
         [renderer->last waitUntilCompleted];

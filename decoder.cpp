@@ -1,6 +1,6 @@
 #include "decoder.h"
 
-#include "util.h"
+#include "error.h"
 
 #include <std/str/builder.h>
 #include <std/mem/obj_pool.h>
@@ -38,7 +38,7 @@ namespace {
 }
 
 extern "C" void decodeTrapHandler(wasm_rt_trap_t code) {
-    fail(sv(StringBuilder() << "the decoder trapped: "_sv << StringView(wasm_rt_strerror(code))));
+    fail(StringView(StringBuilder() << StringView(u8"the decoder trapped: ") << StringView(wasm_rt_strerror(code))));
 }
 
 DecoderImpl::DecoderImpl() {
@@ -53,7 +53,7 @@ u8* DecoderImpl::at(u64 offset, u64 length) {
     wasm_rt_memory_t* memory = w2c_decode_memory(&instance);
 
     if (offset + length > memory->size) {
-        fail("the decoder answered out of its memory"_sv);
+        fail(StringView(u8"the decoder answered out of its memory"));
     }
 
     return (u8*)memory->data + offset;
@@ -61,14 +61,14 @@ u8* DecoderImpl::at(u64 offset, u64 length) {
 
 void DecoderImpl::decode(StringView file, StringView name, DecodedImage& out) {
     if (file.length() > 0xffffffffu - name.length()) {
-        fail("the file is too large for the decoder"_sv);
+        fail(StringView(u8"the file is too large for the decoder"));
     }
 
     u32 total = (u32)(file.length() + name.length());
     u32 in = w2c_decode_malloc(&instance, total);
 
     if (!in) {
-        fail("the decoder is out of memory"_sv);
+        fail(StringView(u8"the decoder is out of memory"));
     }
 
     memcpy(at(in, total), file.data(), file.length());
@@ -79,7 +79,7 @@ void DecoderImpl::decode(StringView file, StringView name, DecodedImage& out) {
     w2c_decode_free(&instance, in);
 
     if (!res) {
-        fail("not an image the decoder reads"_sv);
+        fail(StringView(u8"not an image the decoder reads"));
     }
 
     u32 header[2];
@@ -91,7 +91,7 @@ void DecoderImpl::decode(StringView file, StringView name, DecodedImage& out) {
     u64 bytes = (u64)width * height * 4;
 
     if (!width || !height || width > maxSide || height > maxSide || bytes > maxBytes) {
-        fail(sv(StringBuilder() << "the decoder answered an image of "_sv << (i64)width << "x"_sv << (i64)height));
+        fail(StringView(StringBuilder() << StringView(u8"the decoder answered an image of ") << (i64)width << StringView(u8"x") << (i64)height));
     }
 
     out.width = width;

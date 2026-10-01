@@ -1,7 +1,7 @@
 #include "renderer_metal.h"
 
 #include "ui.h"
-#include "util.h"
+#include "error.h"
 #include "renderer.h"
 
 #include <std/alg/defer.h>
@@ -24,7 +24,7 @@ void checkMetalShared(ObjPool& pool, Ui& ui, bool hdr) {
         };
         IOSurfaceRef surface = IOSurfaceCreate((__bridge CFDictionaryRef)properties);
         if (!surface) {
-            fail("cannot create test IOSurface"_sv);
+            fail(StringView(u8"cannot create test IOSurface"));
         }
         STD_DEFER {
             CFRelease(surface);
@@ -45,7 +45,7 @@ void checkMetalShared(ObjPool& pool, Ui& ui, bool hdr) {
         image.read(1, 1, 3, 2, pixels);
         const u16 expected[] = {hdr ? (u16)65535 : (u16)4369, hdr ? (u16)32800 : (u16)8738, hdr ? (u16)64 : (u16)13107};
         if (pixels.width != 2 || pixels.height != 1 || memcmp(pixels.rgb16.data(), expected, sizeof(expected)) || memcmp((const char*)pixels.rgb16.data() + sizeof(expected), expected, sizeof(expected))) {
-            fail("Metal IOSurface readback differs"_sv);
+            fail(StringView(u8"Metal IOSurface readback differs"));
         }
     }
 }

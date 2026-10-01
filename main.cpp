@@ -1,5 +1,4 @@
 #include "ui.h"
-#include "util.h"
 #include "view.h"
 #include "ui_demo.h"
 
@@ -28,21 +27,21 @@ namespace {
 #if !defined(__APPLE__)
     int runScreenshot(int argc, char** argv) {
         if (argc < 2) {
-            sysE << "usage: im screenshot <path|fd:N>"_sv << endL;
+            sysE << StringView(u8"usage: im screenshot <path|fd:N>") << endL;
 
             return 2;
         }
 
-        return runTool("screenshot"_sv, mainScreenshot, argc, argv);
+        return runTool(StringView(u8"screenshot"), mainScreenshot, argc, argv);
     }
 #endif
 
     int runView(int argc, char** argv) {
-        return runTool("view"_sv, mainView, argc, argv);
+        return runTool(StringView(u8"view"), mainView, argc, argv);
     }
 
     int runUiDemo(int argc, char** argv) {
-        return runTool("ui"_sv, mainUiDemo, argc, argv);
+        return runTool(StringView(u8"ui"), mainUiDemo, argc, argv);
     }
 
     constexpr Tool tools[] = {
@@ -60,10 +59,10 @@ namespace {
     }
 
     int usage() {
-        sysE << "usage: im <tool> [args...]; tools:"_sv;
+        sysE << StringView(u8"usage: im <tool> [args...]; tools:");
 
         for (const Tool& tool : tools) {
-            sysE << " "_sv << StringView(tool.name);
+            sysE << StringView(u8" ") << StringView(tool.name);
         }
 
         sysE << endL;
@@ -92,7 +91,7 @@ int main(int argc, char** argv) {
     StringView self = baseName(argv[0]);
     const Tool* tool = nullptr;
 
-    if (self.length() > 2 && self.startsWith("im"_sv)) {
+    if (self.length() > 2 && self.startsWith(StringView(u8"im"))) {
         tool = find(StringView(self.begin() + 2, self.end()));
     }
 
@@ -112,7 +111,7 @@ int main(int argc, char** argv) {
     try {
         return tool->run(argc, argv);
     } catch (...) {
-        sysE << "im "_sv << StringView(tool->name) << ": "_sv << Exception::current() << endL;
+        sysE << StringView(u8"im ") << StringView(tool->name) << StringView(u8": ") << Exception::current() << endL;
 
         return 1;
     }
