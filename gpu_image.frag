@@ -1,6 +1,5 @@
 #version 450 core
 
-// The PQ screenshot decoded into the scene's linear BT.2020, SDR white at 1.0.
 
 layout(location = 0) in vec2 vUv;
 layout(location = 0) out vec4 fColor;

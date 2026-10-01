@@ -13,9 +13,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-// the window's surface: a CAMetalLayer on macOS (MoltenVK's metal
-// surface), a Wayland surface elsewhere; the platform headers name the
-// native objects through pointers only
 #if defined(__APPLE__)
     #include <vulkan/vulkan_metal.h>
 #else
@@ -39,12 +36,8 @@ struct wl_surface;
 using namespace stl;
 
 namespace {
-    // ImGui's drag and double-click thresholds, as a design length: its
-    // ScaleAllSizes leaves them alone
     constexpr Design mouseThreshold = 6_d;
 
-    // the style at the scale into the current context, with the input
-    // thresholds
     void applyScaledStyle(float scale) {
         ImGui::GetStyle() = scaledStyle(scale);
 
@@ -54,14 +47,8 @@ namespace {
         io.MouseDoubleClickMaxDist = scaledPx(mouseThreshold, scale);
     }
 
-    // three: MoltenVK takes the CAMetalLayer drawable at submit, and with
-    // two the submit blocks until the frame before last has left the
-    // screen, a display link tick lost each time
     constexpr u32 kMinImageCount = 3;
 
-    // gpu_image.vert's push constants: ImGui's own scale and
-    // translate, the quad in ImGui's screen space, the white the fragment
-    // stage divides its nits by
     struct ImagePush {
         float scale[2];
         float translate[2];
@@ -88,7 +75,6 @@ float scaledPx(Design d, float scale) {
     return d.value > 0.f && v < 1.f ? 1.f : v;
 }
 
-// from a fresh default every time: ScaleAllSizes compounds
 ImGuiStyle scaledStyle(float scale) {
     ImGuiStyle style;
 
@@ -190,7 +176,6 @@ bool Gpu::hasDeviceExtension(VkPhysicalDevice candidate, const char* name) {
     return chaos->deviceExtension(name, offered);
 }
 
-// a discrete GPU when there is one, the first device otherwise
 VkPhysicalDevice Gpu::selectPhysicalDevice() {
     u32 count = 0;
 
@@ -228,7 +213,6 @@ u32 Gpu::selectQueueFamily(VkPhysicalDevice candidate) {
 
     families.zero(count);
     vkGetPhysicalDeviceQueueFamilyProperties(candidate, &count, families.mutData());
-    // the driver's own query stays whole; the answer is what the seam bends
     count = chaos->count("queue-families"_sv, count);
 
     for (u32 i = 0; i < count; i++) {
@@ -240,8 +224,6 @@ u32 Gpu::selectQueueFamily(VkPhysicalDevice candidate) {
     fail("no vulkan graphics queue"_sv);
 }
 
-// the first of the wanted formats the surface offers in the color space,
-// else whatever it offers first: the HDR caller checks the color space
 VkSurfaceFormatKHR Gpu::selectSurfaceFormat(VkSurfaceKHR surface, const VkFormat* wanted, u32 nwanted, VkColorSpaceKHR colorSpace) {
     u32 count = 0;
 
@@ -287,8 +269,6 @@ void Gpu::createPresentPass() {
     subpass.colorAttachmentCount = 1;
     subpass.pColorAttachments = &color;
 
-    // the acquire's semaphore is waited at color output: the pass's
-    // write may not start before it
     VkSubpassDependency dependency{};
 
     dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
@@ -341,16 +321,12 @@ void Gpu::destroyFrames() {
     present.syncs.clear();
 }
 
-// the swapchain at the window's size; a swapchain already there is
-// retired by the new one, its frames torn down once the device is idle
 void Gpu::createSwapchain(u32 width, u32 height) {
     VkSurfaceCapabilitiesKHR caps;
 
     vkc(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(phys, present.surface, &caps));
     chaos->imageCounts(caps);
 
-    // Wayland leaves the extent to the client: the window's size, held
-    // to what the surface allows
     VkExtent2D extent = caps.currentExtent;
 
     if (extent.width == 0xffffffffu) {
@@ -382,9 +358,6 @@ void Gpu::createSwapchain(u32 width, u32 height) {
 
     VkSwapchainKHR swapchain = VK_NULL_HANDLE;
 
-    // a driver that cannot present to this compositor's surface fails
-    // here, and that is the tool's own report; a refusal the monkey
-    // made up leaves the driver's swapchain behind, and it goes
     VkResult made = vkCreateSwapchainKHR(device, &ci, alloc, &swapchain);
 
     if (chaos->vulkanAt("swapchain"_sv, made) < 0) {
@@ -454,7 +427,6 @@ void Gpu::createSwapchain(u32 width, u32 height) {
         cai.commandBufferCount = 1;
         vkc(vkAllocateCommandBuffers(device, &cai, &frame.commandBuffer));
 
-        // signaled: the first frame has nothing to wait for
         VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
 
         fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
@@ -585,8 +557,6 @@ void Gpu::createSceneTarget(u32 width, u32 height) {
     vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
 }
 
-// a pipeline whose vertices come from gl_VertexIndex alone: no vertex
-// input, no blending, the viewport and scissor set at draw time
 VkPipeline Gpu::vertexlessPipeline(const u32* vertCode, size_t vertBytes, const u32* fragCode, size_t fragBytes, VkPipelineLayout layout, VkRenderPass pass) {
     VkShaderModule vert = shaderModule(vertCode, vertBytes);
     VkShaderModule frag = shaderModule(fragCode, fragBytes);
@@ -787,7 +757,6 @@ void Gpu::vkc(VkResult e) {
     }
 }
 
-// a checked call a scenario can name (IM_CHAOS vulkan-at=SITE)
 void Gpu::vkcAt(StringView site, VkResult e) {
     e = chaos->vulkanAt(site, e);
 
@@ -803,7 +772,6 @@ void Gpu::setupVulkan(ObjPool& pool, const GpuOptions& wants) {
     app.pApplicationName = "im";
     app.apiVersion = VK_API_VERSION_1_2;
 
-    // the window's surface, and the HDR colour space on it when asked
     Vector<const char*> instanceExts;
 
     instanceExts.pushBack(VK_KHR_SURFACE_EXTENSION_NAME);
@@ -837,9 +805,6 @@ void Gpu::setupVulkan(ObjPool& pool, const GpuOptions& wants) {
         devices.zero(count);
         vkEnumeratePhysicalDevices(instance, &count, devices.mutData());
 
-        // the buffer is only known to import on the GPU that exported
-        // it; its deviceUUID names that GPU in any process, a software
-        // device without a drm node included
         for (VkPhysicalDevice candidate : devices) {
             VkPhysicalDeviceIDProperties ids{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES};
             VkPhysicalDeviceProperties2 props{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
@@ -881,8 +846,6 @@ void Gpu::setupVulkan(ObjPool& pool, const GpuOptions& wants) {
     }
 
 #if defined(__APPLE__)
-    // a device that is a portability subset (MoltenVK over Metal) wants to
-    // be told that it is used as one
     const char* portability = "VK_KHR_portability_subset";
 
     if (hasDeviceExtension(phys, portability)) {
@@ -910,7 +873,6 @@ void Gpu::setupVulkan(ObjPool& pool, const GpuOptions& wants) {
     });
     vkGetDeviceQueue(device, queueFamily, 0, &queue);
 
-    // the backend's own sets, and one for every texture the tool registers
     VkDescriptorPoolSize sz = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, IMGUI_IMPL_VULKAN_MINIMUM_IMAGE_SAMPLER_POOL_SIZE + wants.textures};
     VkDescriptorPoolCreateInfo pi = {};
 
@@ -930,7 +892,6 @@ VkSurfaceKHR Gpu::createSurface(plt::Window& window) {
     VkSurfaceKHR surface = VK_NULL_HANDLE;
 
 #if defined(__APPLE__)
-    // plt's Cocoa window draws through a CAMetalLayer, its connection
     VkMetalSurfaceCreateInfoEXT sci{VK_STRUCTURE_TYPE_METAL_SURFACE_CREATE_INFO_EXT};
 
     sci.pLayer = (const CAMetalLayer*)render.connection;
@@ -947,8 +908,6 @@ VkSurfaceKHR Gpu::createSurface(plt::Window& window) {
 }
 
 void Gpu::setupWindow(ObjPool& pool, VkSurfaceKHR surface, int w, int h, bool hdr) {
-    // the surface is the presenter's from here: registered before
-    // anything can throw, the guard tears down whatever was made
     present.surface = surface;
     pooledGuard(pool, [this] {
         destroyPresenter();
@@ -986,8 +945,6 @@ void Gpu::setupWindow(ObjPool& pool, VkSurfaceKHR surface, int w, int h, bool hd
     trace(hdr ? "surface HDR10 PQ"_sv : "surface sRGB"_sv);
     createPresentPass();
     createSwapchain((u32)w, (u32)h);
-    // the first present's size, as every later rebuild's: a scenario waits
-    // for the size the tool draws at, whichever way it got there
     traceSize("presenting"_sv, present.width, present.height);
 }
 
@@ -1007,8 +964,6 @@ u32 Gpu::findMemoryType(u32 typeBits, VkMemoryPropertyFlags props) {
 }
 
 void Gpu::setupLinearHdr(ObjPool& pool, u32 width, u32 height) {
-    // registered before the first object: a throw part way through
-    // tears down exactly the objects already made (the rest are null)
     pooledGuard(pool, [this] {
         destroyLinearHdr();
         linearHdr = false;
@@ -1073,8 +1028,6 @@ void Gpu::setupLinearHdr(ObjPool& pool, u32 width, u32 height) {
     dlci.pBindings = &binding;
     vkc(vkCreateDescriptorSetLayout(device, &dlci, alloc, &outputSetLayout));
 
-    // the scene holds SDR white at 1.0; the output stage scales it to
-    // nits by this constant
     VkPushConstantRange outputRange{VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(float)};
     VkPipelineLayoutCreateInfo plci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
 
@@ -1098,7 +1051,6 @@ void Gpu::setupLinearHdr(ObjPool& pool, u32 width, u32 height) {
     ilci.pBindings = &imageBinding;
     vkc(vkCreateDescriptorSetLayout(device, &ilci, alloc, &imageSetLayout));
 
-    // one range for both stages, and the one push names both
     VkPushConstantRange imageRange{VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(ImagePush)};
     VkPipelineLayoutCreateInfo iplci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
 
@@ -1137,8 +1089,6 @@ void Gpu::setupImGui(ObjPool& pool, bool hdr) {
     ii.PipelineInfoMain.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
 
     if (hdr) {
-        // ImGui's own draws land in the scene's linear light through the
-        // scene's fragment stage
         ii.CustomShaderFragCreateInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
         ii.CustomShaderFragCreateInfo.codeSize = sizeof(gpu_scene_frag_spv);
         ii.CustomShaderFragCreateInfo.pCode = gpu_scene_frag_spv;
@@ -1149,7 +1099,6 @@ void Gpu::setupImGui(ObjPool& pool, bool hdr) {
         ImGui_ImplVulkan_Shutdown();
     });
 
-    // the backend leaves the texture limit unsaid; the device's
     VkPhysicalDeviceProperties props;
 
     vkGetPhysicalDeviceProperties(phys, &props);
@@ -1159,9 +1108,6 @@ void Gpu::setupImGui(ObjPool& pool, bool hdr) {
     pio.Renderer_TextureMaxWidth = (int)props.limits.maxImageDimension2D;
     pio.Renderer_TextureMaxHeight = (int)props.limits.maxImageDimension2D;
 
-    // the last guard in, the first out: the device finishes the frames
-    // in flight before the backend's textures, the frames and their
-    // fences go under them
     pooledGuard(pool, [this] {
         vkDeviceWaitIdle(device);
     });
@@ -1436,7 +1382,6 @@ bool FrameDriver::frame(const plt::WindowInfo& info) {
 
     ImGui::Render();
 
-    // the draw data is the window's size, checked positive above
     ImDrawData* dd = ImGui::GetDrawData();
 
     gpu->present.clear.color.float32[0] = 0.1f;
@@ -1450,8 +1395,6 @@ bool FrameDriver::frame(const plt::WindowInfo& info) {
     gpu->framePresent();
 
     if (gpu->traceFrames) {
-        // a line per frame: the gap since the last one began, then this
-        // one's phases, ImGui and the tool's own drawing first
         StringBuilder text;
 
         text << "im frame "_sv << (i64)gpu->frameCount++ << ": gap "_sv;
@@ -1491,13 +1434,9 @@ bool FrameDriver::frame(const plt::WindowInfo& info) {
         action = result;
         platform->stop();
     } else {
-        // imgui animates every frame while interactive; plt paces this
-        // through the compositor's frame callbacks
         window->requestFrame();
     }
 
-    // a swapchain-rebuild frame presented nothing: returning false makes
-    // plt retry instead of waiting on a frame callback that never comes
     return !gpu->rebuild;
 }
 

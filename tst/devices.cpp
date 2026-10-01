@@ -1,27 +1,11 @@
-// The driver's input devices on the test compositor: a virtual pointer and
-// a virtual keyboard (the wlroots protocols) kept attached for the whole
-// session, fed one command per line on stdin, each answered with DONE and
-// a serial once the compositor has taken it:
-//   move X Y W H        the pointer to X,Y of a W x H output
-//   button CODE STATE   an evdev button, 1 pressed / 0 released
-//   scroll STEPS        wheel clicks, positive down
-//   key CODE STATE      an evdev key, 1 pressed / 0 released
-//   mods DEP LAT LOCK   the keyboard's xkb modifier masks
-// Before READY it lists every global the compositor offers, one
-// "GLOBAL interface version" line each: what a scenario may require of it.
-// The compositor takes a virtual keyboard's keys without running them
-// through its xkb state (wlroots: update_state is false for them), so the
-// keyboard keeps a state of its own over its keymap and sends the modifier
-// masks a key changes, as a real keyboard's would arrive: a tap on NumLock
-// locks it, a held Shift is depressed.
-#include "virtual-keyboard-client.h"
 #include "virtual-pointer-client.h"
+#include "virtual-keyboard-client.h"
 
+#include <time.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/mman.h>
-#include <time.h>
 #include <unistd.h>
+#include <sys/mman.h>
 #include <wayland-client.h>
 #include <xkbcommon/xkbcommon.h>
 
@@ -52,8 +36,6 @@ namespace {
     void removed(void*, wl_registry*, uint32_t) {
     }
 
-    // the keyboard's keymap, a US layout compiled by xkbcommon, in a sealed
-    // memfd the compositor maps; the state over it is the keyboard's own
     xkb_state* uploadKeymap(zwp_virtual_keyboard_v1* keyboard) {
         xkb_context* context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
         xkb_rule_names names{};
@@ -143,8 +125,6 @@ int main() {
             zwlr_virtual_pointer_v1_axis_discrete(pointer, time, WL_POINTER_AXIS_VERTICAL_SCROLL, wl_fixed_from_int(steps * 10), steps);
             zwlr_virtual_pointer_v1_frame(pointer);
         } else if (sscanf(line, "key %u %u", &code, &pressed) == 2) {
-            // evdev codes are xkb keycodes less 8; the masks a key changes go
-            // ahead of it, as a real keyboard's compositor sends them
             xkb_state_update_key(state, code + 8, pressed ? XKB_KEY_DOWN : XKB_KEY_UP);
             const Modifiers now = modifiers(state);
             if (!(now == sent)) {

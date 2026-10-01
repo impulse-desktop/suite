@@ -1,8 +1,5 @@
 #version 450 core
 
-// The screenshot's quad in the HDR viewer's scene, drawn from an ImGui
-// draw callback: rect is in ImGui's screen space, scale and translate are
-// ImGui's own (2 / display size, -1 - position * scale).
 
 layout(push_constant) uniform PushConstant {
     vec2 scale;

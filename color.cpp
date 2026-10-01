@@ -3,7 +3,6 @@
 #include <math.h>
 
 namespace {
-    // CIE xy chromaticities in millionths: red, green, blue, white
     struct Chromaticities {
         i32 rx, ry, gx, gy, bx, by, wx, wy;
     };

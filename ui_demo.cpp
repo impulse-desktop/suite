@@ -7,9 +7,6 @@
 
 using namespace stl;
 
-// The tool as every tool is now: a window opened, then a loop over its
-// events. A frame is one of them: on it the tool draws its ImGui windows,
-// and what it drew is shown when it asks for the next event.
 int mainUiDemo(ObjPool&, Ui& ui, int, char**) {
     UiEvent event;
 
@@ -20,7 +17,6 @@ int mainUiDemo(ObjPool&, Ui& ui, int, char**) {
             return 0;
         }
 
-        // the whole window one ImGui window, the button in its middle
         ImGuiViewport* vp = ImGui::GetMainViewport();
         ImVec2 button(ui.px(96_d), ImGui::GetFrameHeight());
 

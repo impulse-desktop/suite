@@ -1,10 +1,6 @@
-// A JPEG XL file's pixels as the scenarios read them: the width and the
-// height on a line, then the rows of 16-bit RGB samples, native endian,
-// in the image's own colour encoding (a PQ frame stays PQ code values):
-//   jxl_dump shot.jxl out.rgb16
-#include <jxl/decode.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <jxl/decode.h>
 
 int main(int argc, char** argv) {
     if (argc < 3) {

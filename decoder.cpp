@@ -7,9 +7,6 @@
 
 #include <string.h>
 
-// the generated header's core type names: libstd already has u8..u64 (its
-// u8 is char8_t, which nothing the header declares uses), the rest come
-// from here
 #define WASM_RT_CORE_TYPES_DEFINED
 typedef int8_t s8;
 typedef int16_t s16;
@@ -25,8 +22,6 @@ extern "C" {
 using namespace stl;
 
 namespace {
-    // what a decode may answer: a side a Vulkan image can have, a gigabyte
-    // of pixels at most
     constexpr u32 maxSide = 65535;
     constexpr u64 maxBytes = 1u << 30;
 
@@ -38,15 +33,10 @@ namespace {
 
         void decode(StringView file, StringView name, DecodedImage& out) override;
 
-        // a range of the module's memory: the module answers, it is not trusted
         u8* at(u64 offset, u64 length);
     };
 }
 
-// the runtime's trap (an access past the memory, an unreachable, a
-// recursion past the depth limit) lands here from inside the module's C
-// frames, compiled to be unwound through, and leaves as the decode's
-// exception (WASM_RT_TRAP_HANDLER in build.py)
 extern "C" void decodeTrapHandler(wasm_rt_trap_t code) {
     fail(sv(StringBuilder() << "the decoder trapped: "_sv << StringView(wasm_rt_strerror(code))));
 }
@@ -74,7 +64,6 @@ void DecoderImpl::decode(StringView file, StringView name, DecodedImage& out) {
         fail("the file is too large for the decoder"_sv);
     }
 
-    // the file, then its name right behind it, in one allocation
     u32 total = (u32)(file.length() + name.length());
     u32 in = w2c_decode_malloc(&instance, total);
 
@@ -93,7 +82,6 @@ void DecoderImpl::decode(StringView file, StringView name, DecodedImage& out) {
         fail("not an image the decoder reads"_sv);
     }
 
-    // {u32 width; u32 height; u8 rgba[]}
     u32 header[2];
 
     memcpy(header, at(res, sizeof(header)), sizeof(header));

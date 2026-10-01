@@ -22,35 +22,15 @@
 
 using namespace stl;
 
-// im view <file|dir>...: the list on the left, the image in the middle,
-// the file's properties on the right. The whole directory is read at the
-// start: every file's bytes, and a thumbnail decoded from each, kept by
-// the file's index; nothing touches the disk after. The shown image is
-// decoded from the bytes in memory when it is selected, on the one
-// thread, a fresh sandboxed ImageMagick every time.
-//
-// The viewer is a tool like any: it reads what it shows, opens its
-// window, decodes, and loops over the window's events, drawing with ImGui
-// on each frame; its textures it loads and releases through the window.
-
 namespace {
-    // the window asked for, and the share of its width each side panel
-    // takes
     constexpr Design windowWidth = 1000_d;
     constexpr Design windowHeight = 700_d;
     constexpr float sideShare = .2f;
-    // the gutter around thumbnails, a design length
     constexpr Design gap = 4_d;
-    // the thumbnails bulge towards the pointer: the scale gained by one
-    // centred right under it, and the distance over which the bulge fades
-    // to nothing
     constexpr float bulge = .2f;
     constexpr Design bulgeReach = 240_d;
     constexpr float pi = 3.14159265f;
-    // a thumbnail fills the list's width; until it is decoded its row is
-    // this tall for its width, a photo's proportion
     constexpr float placeholderAspect = .75f;
-    // a thumbnail's long side in texels follows the list's width, in steps
     constexpr u32 thumbTexelsStep = 64;
     constexpr u32 thumbTexelsMin = 128;
     constexpr u32 thumbTexelsMax = 512;
@@ -64,8 +44,6 @@ namespace {
         Failed
     };
 
-    // one file of the list: its bytes, read at the start (or why they
-    // could not be), and its thumbnail
     struct Entry {
         Buffer path;
         size_t nameAt = 0;
@@ -75,14 +53,10 @@ namespace {
         ImTextureRef thumbTex;
         u32 thumbW = 0;
         u32 thumbH = 0;
-        // the long side the thumbnail was asked at: a list grown much
-        // wider since asks again
         u32 thumbSide = 0;
         StringView name() const;
     };
 
-    // area-averaged to fit the side: what a thumbnail is, and what an image
-    // wider than the renderer's textures becomes
     void shrinkToSide(DecodedImage& img, u32 side) {
         if (img.width <= side && img.height <= side) {
             return;
@@ -133,8 +107,6 @@ namespace {
         img.rgba.xchg(out);
     }
 
-    // every file's bytes into memory, once; a file that cannot be read
-    // keeps the reason instead
     void readAll(Vector<Entry*>& entries) {
         for (Entry* entry : entries) {
             Buffer path(sv(entry->path));
@@ -147,11 +119,6 @@ namespace {
         }
     }
 
-    // the entry's bytes decoded and shrunk to the side, here and now. The
-    // decoder and its pool live for the one file: a failure spends the
-    // decoder, and a module grown to a large image's pixel cache never
-    // shrinks. A failure is thrown, the decoder's own words, or the
-    // reader's
     void decodeEntry(Ui& ui, const Entry& entry, u32 side, DecodedImage& out) {
         u64 began = nowNs();
 
@@ -233,8 +200,6 @@ namespace {
         return false;
     }
 
-    // the entries live in the pool: the list holds them by pointer, as a
-    // Vector holds only what needs no destructor
     Entry* makeEntry(ObjPool& pool, StringView path) {
         Entry* entry = pool.make<Entry>();
         size_t slash = path.length();
@@ -253,7 +218,6 @@ namespace {
         entries.pushBack(makeEntry(pool, path));
     }
 
-    // the directory's images, by name; throws where it cannot be read
     void addDirectory(ObjPool& pool, Vector<Entry*>& entries, StringView dir) {
         Vector<Entry*> found;
 
@@ -277,16 +241,12 @@ namespace {
         entries.append(found.begin(), found.end());
     }
 
-    // a thumbnail's long side in texels for a list this wide, in steps,
-    // so a list a few px wider asks nothing new
     u32 thumbSideFor(float innerW) {
         u32 side = (u32)ceilf(innerW / (float)thumbTexelsStep) * thumbTexelsStep;
 
         return side < thumbTexelsMin ? thumbTexelsMin : side > thumbTexelsMax ? thumbTexelsMax : side;
     }
 
-    // a row's height for the list's width: the thumbnail's proportion, or a
-    // photo's until it is decoded; whole px, so rows do not blur
     float rowHeightFor(const Entry& entry, float innerW) {
         float aspect = entry.thumb == Load::Ready && entry.thumbW ? (float)entry.thumbH / (float)entry.thumbW : placeholderAspect;
 
@@ -297,7 +257,6 @@ namespace {
         return sqrtf((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y));
     }
 
-    // "1.5 MB", or the bytes themselves under a KB
     void appendBytes(StringBuilder& text, i64 bytes) {
         static const StringView units[] = {"KB"_sv, "MB"_sv, "GB"_sv, "TB"_sv};
 
@@ -318,21 +277,17 @@ namespace {
         text << tenths / 10 << "."_sv << tenths % 10 << " "_sv << units[unit];
     }
 
-    // the viewer: its list, the shown image and the view on it
     struct ViewApp {
         Ui* ui = nullptr;
         Vector<Entry*> entries;
         size_t current = 0;
-        // what a texture may measure
         u32 maxSide = 0;
-        // the shown image's texture, or why there is none
         Load shown = Load::None;
         size_t shownIndex = (size_t)-1;
         ImTextureRef tex;
         u32 texW = 0;
         u32 texH = 0;
         Buffer shownError;
-        // the view on it
         float zoom = 1.f;
         bool fit = true;
         float panX = 0.f;
@@ -342,10 +297,7 @@ namespace {
         bool panel = true;
         bool info = true;
         bool scrollToCurrent = true;
-        // the list's scroll the frame trace last reported
         float tracedScrollY = 0.f;
-        // the shown file's own facts, for the properties panel: its size
-        // (-1 when unknown) and modification time
         i64 fileBytes = -1;
         Buffer fileModified;
 
@@ -363,7 +315,6 @@ namespace {
         void drawInfo();
     };
 
-    // the error panel in place of the viewer, when there is nothing to show
     int showError(Ui& ui, StringView message) {
         UiEvent event;
 
@@ -385,8 +336,6 @@ StringView Entry::name() const {
     return StringView(whole.begin() + nameAt, whole.end());
 }
 
-// a row's thumbnail, decoded from the bytes in memory and loaded now,
-// kept by the row's index
 void ViewApp::loadThumb(size_t index, u32 side) {
     Entry& entry = *entries[index];
     DecodedImage image;
@@ -414,7 +363,6 @@ void ViewApp::loadThumb(size_t index, u32 side) {
     ui->trace(sv(StringBuilder() << "thumbnail "_sv << entry.name()));
 }
 
-// the selected image, decoded and loaded now
 void ViewApp::show(size_t index) {
     current = index;
     scrollToCurrent = true;
@@ -447,7 +395,6 @@ void ViewApp::show(size_t index) {
     ui->trace(sv(StringBuilder() << "showing "_sv << entry.name() << " "_sv << (i64)texW << "x"_sv << (i64)texH));
 }
 
-// the image shown so far goes, whatever comes instead
 void ViewApp::dropShown() {
     if (shown == Load::Ready) {
         ui->releaseTexture(tex);
@@ -539,7 +486,6 @@ void ViewApp::keys() {
     }
 }
 
-// the shown file's facts, read once per selection
 void ViewApp::statFile() {
     struct stat st;
 
@@ -562,18 +508,9 @@ void ViewApp::statFile() {
     }
 }
 
-// the list: thumbnails one under another, each as wide as the list
-// and as tall as its proportion asks, the selected one's row filled.
-// The thumbnails bulge towards the pointer: each scales about its own
-// centre by how close the pointer is, the nearest most, so they are
-// drawn from the far ones to the nearest, without a sort: the rows
-// above it top down, the rows below it bottom up (their centres share
-// an x, so the nearest in height is the nearest)
 void ViewApp::drawGallery() {
     float g = ui->px(gap);
     float innerW = max(1.f, ImGui::GetWindowWidth() - 2.f * g);
-    // the texels for a bulged thumbnail's width: what it is drawn at
-    // is then a reduction at every scale
     u32 side = thumbSideFor((innerW + 2.f * g) * (1.f + bulge));
     float viewH = ImGui::GetWindowHeight();
     size_t count = entries.length();
@@ -583,7 +520,6 @@ void ViewApp::drawGallery() {
     ImU32 dimColor = ImGui::GetColorU32(ImGuiCol_TextDisabled);
     ImVec2 mouse = ImGui::GetIO().MousePos;
     ImGuiViewport* vp = ImGui::GetMainViewport();
-    // the pointer anywhere over the window counts
     bool pointed = mouse.x >= vp->Pos.x && mouse.x < vp->Pos.x + vp->Size.x && mouse.y >= vp->Pos.y && mouse.y < vp->Pos.y + vp->Size.y;
     float reach = ui->px(bulgeReach);
     float total = g;
@@ -601,7 +537,6 @@ void ViewApp::drawGallery() {
         total += h + g;
     }
 
-    // the list's extent, for the scrolling; the rows are placed by hand
     ImGui::Dummy(ImVec2(innerW, total));
 
     if (scrollToCurrent) {
@@ -611,8 +546,6 @@ void ViewApp::drawGallery() {
 
     float scrollY = clampf(ImGui::GetScrollY(), 0.f, max(0.f, total - viewH));
 
-    // the frame trace: how far the list moved this frame, and what the
-    // wheel said
     if (scrollY != tracedScrollY) {
         StringBuilder text;
 
@@ -624,7 +557,6 @@ void ViewApp::drawGallery() {
     size_t last = 0;
     float firstTop = 0.f;
     float lastBottom = 0.f;
-    // the row nearest the pointer in height, and its distance
     size_t nearest = count;
     float nearestD = 0.f;
     float top = g;
@@ -645,8 +577,6 @@ void ViewApp::drawGallery() {
             lastBottom = bottom;
         }
 
-        // decoded at a size the list has since outgrown: again, from
-        // the bytes in memory
         if (inView && entry.thumb == Load::Ready && entry.thumbSide * 4 < side * 3) {
             loadThumb(i, side);
         }
@@ -664,9 +594,6 @@ void ViewApp::drawGallery() {
 
             ImGui::PopID();
 
-            // the row is the thumbnail with its whole gutter, so two rows
-            // meet in the gap; the selection fills its row, under every
-            // thumbnail
             if (i == current) {
                 dl->AddRectFilled(ImVec2(p0.x - g, p0.y - g), ImVec2(p1.x + g, p1.y + g), ImGui::GetColorU32(ImGuiCol_Header));
             }
@@ -686,9 +613,6 @@ void ViewApp::drawGallery() {
 
     ImDrawList* fg = ImGui::GetForegroundDrawList();
 
-    // a row's thumbnail, scaled about its centre by the pointer's
-    // distance from that centre: the full bulge at none, nothing at
-    // the reach
     auto draw = [&](size_t i, float rowTop, float h) {
         Entry& entry = *entries[i];
         ImVec2 p0(origin.x + g, origin.y + rowTop);
@@ -719,9 +643,6 @@ void ViewApp::drawGallery() {
         fg->AddImage(entry.thumbTex, ImVec2(centre.x - half.x, centre.y - half.y), ImVec2(centre.x + half.x, centre.y + half.y));
     };
 
-    // a bulged thumbnail spills over the list's edge onto the canvas:
-    // the thumbnails go on the foreground, over every window, clipped
-    // to the list's height and the window's right edge
     ImVec2 viewportEnd(vp->Pos.x + vp->Size.x, windowPos.y + viewH);
 
     fg->PushClipRect(windowPos, viewportEnd, false);
@@ -730,7 +651,6 @@ void ViewApp::drawGallery() {
         size_t stop = nearest == count ? last + 1 : nearest;
         float y = firstTop;
 
-        // top down to the nearest row
         for (size_t i = first; i < stop; i++) {
             float h = rowHeightFor(*entries[i], innerW);
 
@@ -739,7 +659,6 @@ void ViewApp::drawGallery() {
         }
 
         if (nearest != count) {
-            // bottom up to it, then the nearest itself, over all
             float bottom = lastBottom;
 
             for (size_t i = last; i > nearest; i--) {
@@ -756,16 +675,10 @@ void ViewApp::drawGallery() {
     fg->PopClipRect();
 }
 
-// the properties panel: sections that fold to their title. The image's
-// first (what is shown, at what zoom: a menu picks one), then the
-// file's own facts
 void ViewApp::drawInfo() {
     const Entry& entry = *entries[current];
     bool ready = shown == Load::Ready && shownIndex == current;
 
-    // ImGui's own spacing, frames and colours; every row one frame
-    // tall, text sitting where a frame's would
-    // a key in the dim column, the value beside it
     auto key = [&](const char* name) {
         ImGui::TableNextRow();
         ImGui::TableSetColumnIndex(0);
@@ -780,9 +693,6 @@ void ViewApp::drawInfo() {
         ImGui::TextUnformatted((const char*)value.begin(), (const char*)value.end());
         ImGui::PopTextWrapPos();
     };
-    // the key column as wide as its keys, the value column the rest,
-    // its weight given: a weight derived from the contents is nothing
-    // on the first pass, and nothing over nothing is not a width
     auto table = [&](const char* id) {
         if (!ImGui::BeginTable(id, 2, ImGuiTableFlags_SizingStretchSame)) {
             return false;
@@ -801,7 +711,6 @@ void ViewApp::drawInfo() {
 
         if (ready) {
             StringBuilder text;
-            // megapixels to a tenth
             i64 tenths = ((i64)texW * (i64)texH + 50000) / 100000;
 
             text << (i64)texW << " \xc3\x97 "_sv << (i64)texH << "   "_sv << tenths / 10 << "."_sv << tenths % 10 << " MP"_sv;
@@ -809,8 +718,6 @@ void ViewApp::drawInfo() {
         }
 
         {
-            // the name's extension, upper-cased; the decoder's word on
-            // the format comes later
             StringView name = entry.name();
             const u8* dot = name.end();
 
@@ -893,8 +800,6 @@ void ViewApp::drawInfo() {
         StringView whole = sv(entry.path);
 
         row("Name", entry.name());
-        // the path up to the name's slash; a bare name is of the working
-        // directory, a name under the root of "/"
         row("Folder", entry.nameAt == 0 ? "."_sv : entry.nameAt == 1 ? "/"_sv : StringView(whole.begin(), whole.begin() + entry.nameAt - 1));
 
         if (fileBytes >= 0) {
@@ -938,23 +843,18 @@ void ViewApp::drawCanvas() {
     float rh = (float)(rotation & 1 ? texW : texH);
 
     if (fit) {
-        // fit shrinks: a small image stays at its own size
         zoom = min(1.f, min(size.x / rw, size.y / rh));
     }
 
     float dw = rw * zoom;
     float dh = rh * zoom;
 
-    // an image within the canvas sits centred; a larger one pans, never
-    // past its edges
     panX = dw <= size.x ? 0.f : clampf(panX, (size.x - dw) / 2.f, (dw - size.x) / 2.f);
     panY = dh <= size.y ? 0.f : clampf(panY, (size.y - dh) / 2.f, (dh - size.y) / 2.f);
 
     ImVec2 centre(origin.x + size.x / 2.f + panX, origin.y + size.y / 2.f + panY);
     ImVec2 p0(centre.x - dw / 2.f, centre.y - dh / 2.f);
     ImVec2 p1(centre.x + dw / 2.f, centre.y + dh / 2.f);
-    // the texture's corners, top-left first clockwise; a quarter turn
-    // clockwise puts the texture's top-left at the screen's top-right
     const ImVec2 uv[4] = {ImVec2(0, 0), ImVec2(1, 0), ImVec2(1, 1), ImVec2(0, 1)};
     int r = rotation;
 
@@ -962,7 +862,6 @@ void ViewApp::drawCanvas() {
 
     ImGuiIO& io = ImGui::GetIO();
 
-    // the wheel zooms about the pointer: what is under it stays put
     if (hovered && io.MouseWheel != 0.f) {
         float before = zoom;
         float after = clampf(zoom * powf(zoomStep, io.MouseWheel), zoomMin, zoomMax);
@@ -980,7 +879,6 @@ void ViewApp::drawCanvas() {
     }
 }
 
-// the window: the list, the canvas, the properties
 void ViewApp::draw() {
     ImGuiViewport* vp = ImGui::GetMainViewport();
 
@@ -988,12 +886,6 @@ void ViewApp::draw() {
     ImGui::SetNextWindowSize(vp->Size);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0, 0));
-    // Begin's and BeginChild's results go unread here and below: a
-    // window that cannot collapse, and a child of one, is shown every
-    // frame, and drawing into a hidden one would only be wasted
-    // as an ImGui application lays out: the panels are windows, in the
-    // window colour, the canvas between them is the application's own
-    // background, the presenter's clear colour
     ImGui::Begin("##view", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBackground);
 
     float sideW = floorf(vp->Size.x * sideShare);
@@ -1015,8 +907,6 @@ void ViewApp::draw() {
 
     if (right) {
         ImGui::SameLine();
-        // the zeros placed the children; inside the panel ImGui's own
-        // padding and spacing
         ImGui::PopStyleVar(2);
         ImGui::PushStyleColor(ImGuiCol_ChildBg, ImGui::GetStyleColorVec4(ImGuiCol_WindowBg));
         ImGui::BeginChild("info", ImVec2(sideW, 0.f), ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoScrollbar);
@@ -1041,8 +931,6 @@ int mainView(ObjPool& pool, Ui& ui, int argc, char** argv) {
 
     app.ui = &ui;
 
-    // the list: a directory's images, or the named files; one file
-    // selects itself among its directory's
     for (int i = 1; i < argc; i++) {
         StringView arg(argv[i]);
         struct stat st;
@@ -1078,7 +966,6 @@ int mainView(ObjPool& pool, Ui& ui, int argc, char** argv) {
                 }
 
                 if (!listed) {
-                    // a name the list did not take: shown all the same, first
                     Vector<Entry*> rest;
 
                     rest.xchg(app.entries);
@@ -1102,16 +989,11 @@ int mainView(ObjPool& pool, Ui& ui, int argc, char** argv) {
         return showError(ui, "no images to show"_sv);
     }
 
-    // the whole directory into memory before the window: nothing reads
-    // the disk after
     readAll(app.entries);
 
     ui.open({windowWidth, windowHeight});
     app.maxSide = ui.maxTextureSide();
 
-    // every thumbnail at the list's width in the window asked for, and the
-    // selected image, before the first frame; a list grown much wider
-    // decodes its rows again as it draws them
     u32 side = thumbSideFor(floorf(ui.px(windowWidth) * sideShare) * (1.f + bulge));
 
     for (size_t i = 0; i < app.entries.length(); i++) {

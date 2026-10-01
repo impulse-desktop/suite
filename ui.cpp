@@ -23,33 +23,15 @@
 
 using namespace stl;
 
-// The runtime behind Ui. The tool is a fiber of the platform's scheduler:
-// it runs until it asks for an event there is not, and sleeps in next().
-// The platform's loop runs on the main stack; its callbacks put the event
-// there and wake the tool, which runs inside the callback until it asks
-// again. So a frame is the driver's, as for any tool: the swapchain, the
-// ImGui frame begun, the tool's turn, the frame rendered and presented,
-// all within plt's frame callback; the tool only sees its turn. All of it
-// is one object, made by runTool in the pool it hands the tool.
-
 namespace {
-    // the tool's stack: ImGui's frames, a driver's shader compiler as the
-    // device comes up, a decoder
     constexpr size_t toolStack = 16u << 20;
-    // the texture side when the renderer names no limit
     constexpr u32 defaultTextureSide = 4096;
-    // the textures a window holds at once, the released ones still in
-    // flight among them: the renderer's descriptor pool is made for them
-    // up front
     constexpr u32 maxTextures = 16384;
 
     struct UiImpl final: Ui, UiFrame, plt::WindowEvents, Runable {
-        // the pool all of it lives in, the platform, the fault seam
         ObjPool* pool = nullptr;
         plt::Platform* platform = nullptr;
         ChaosMonkey* chaos = nullptr;
-        // the tool: its name, its main and arguments, its fiber, what it
-        // returned, whether it has
         StringView name;
         int (*main)(ObjPool& pool, Ui& ui, int argc, char** argv) = nullptr;
         int argc = 0;
@@ -57,24 +39,17 @@ namespace {
         plt::Fiber* fiber = nullptr;
         int result = 1;
         bool finished = false;
-        // IM_SCALE, IM_TRACE_FRAMES
         float scale = 1.f;
         bool traceFrames = false;
-        // the window, once open, and what draws into it
         plt::Window* window = nullptr;
         Gpu* gpu = nullptr;
         FrameDriver driver;
         StringBuilder appId;
         StringBuilder title;
-        // the textures the tool loaded, ImGui's own objects, until the
-        // renderer has torn down those it released
         Vector<ImTextureData*> textures;
-        // what waits for the tool: the frame begun, the window asked to go
         bool framePending = false;
         bool closePending = false;
-        // the close was handed over, or the loop is over: nothing more
         bool gone = false;
-        // the tool sleeps in next(), and only there is it woken
         bool parked = false;
 
         using Ui::px;
@@ -89,11 +64,8 @@ namespace {
         void trace(StringView what) override;
         void timing(StringView line) override;
 
-        // the fiber's entry: the tool, then the loop's end
         void run() override;
-        // the driver's call between ImGui's NewFrame and Render
         int frame() override;
-        // the window asked to go
         void close() override;
 
         void tendTextures();
@@ -136,9 +108,6 @@ void UiImpl::open(const UiOptions& options) {
     made.frame = &driver;
 
     plt::Window& shown = *platform->createWindow(*pool, made);
-    // asked for in the platform's logical units, it says what pixels it
-    // made of them: not the design's on an output that scales logical
-    // units by itself, or over the screen; a resize is in pixels
     plt::WindowInfo info = shown.info();
 
     clampWindowSize(info, width, height);
@@ -154,8 +123,6 @@ void UiImpl::open(const UiOptions& options) {
     wants.chaos = chaos;
     wants.traceFrames = traceFrames;
     wants.textures = maxTextures;
-    // the textures are ImGui's objects and the tool's: they go after
-    // ImGui and its renderer, which tear their device side down
     pooledGuard(*pool, [this] {
         dropTextures();
     });
@@ -176,8 +143,6 @@ bool UiImpl::next(UiEvent& event) {
         fail("no window to take events from: open it first"_sv);
     }
 
-    // the frame the tool held, if any, is done: the driver renders it
-    // once the tool sleeps
     for (;;) {
         if (closePending) {
             closePending = false;
@@ -208,7 +173,6 @@ void UiImpl::requestFullscreen(bool on) {
     window->requestFullscreen(on);
 }
 
-// registered with ImGui, the renderer makes it on the next render
 ImTextureRef UiImpl::loadTexture(u32 width, u32 height, const void* rgba) {
     if (textures.length() >= maxTextures) {
         fail(sv(StringBuilder() << "more than "_sv << (i64)maxTextures << " textures at once"_sv));
@@ -224,8 +188,6 @@ ImTextureRef UiImpl::loadTexture(u32 width, u32 height, const void* rgba) {
     return texture->GetTexRef();
 }
 
-// told to go: the renderer tears it down once it has gone unused for
-// as many frames as there are in flight, counted from here
 void UiImpl::releaseTexture(ImTextureRef ref) {
     ImTextureData* texture = ref._TexData;
 
@@ -274,8 +236,6 @@ void UiImpl::run() {
     platform->stop();
 }
 
-// the tool's turn. A tool that is not asleep in next() (a platform
-// call of its own that drew) gets none, a tool that is done neither
 int UiImpl::frame() {
     if (finished) {
         return -1;
@@ -297,8 +257,6 @@ int UiImpl::frame() {
         return 0;
     }
 
-    // a tool that ended inside its frame, by a return or an exception,
-    // may have left its windows open: closed for it, the frame its last
     ImGuiIO& io = ImGui::GetIO();
     bool asserting = io.ConfigErrorRecoveryEnableAssert;
 
@@ -323,9 +281,6 @@ void UiImpl::close() {
     }
 }
 
-// once a frame, before the tool's turn: a copy of the pixels the
-// renderer has taken goes, a texture it has torn down goes, the rest
-// of the released count one more unused frame
 void UiImpl::tendTextures() {
     Vector<ImTextureData*> kept;
 
@@ -349,8 +304,6 @@ void UiImpl::tendTextures() {
     textures.xchg(kept);
 }
 
-// at the end, once ImGui and its renderer are gone and the device
-// side of every texture with them: the objects themselves
 void UiImpl::dropTextures() {
     for (ImTextureData* texture : textures) {
         IM_DELETE(texture);
@@ -362,7 +315,6 @@ void UiImpl::dropTextures() {
 int runTool(StringView name, int (*main)(ObjPool& pool, Ui& ui, int argc, char** argv), int argc, char** argv) {
     try {
         ObjPool::Ref pool = ObjPool::fromMemory();
-        // made first, gone last: the window and the fiber call into it
         UiImpl& ui = *pool->make<UiImpl>();
 
         ui.pool = &*pool;
@@ -374,15 +326,12 @@ int runTool(StringView name, int (*main)(ObjPool& pool, Ui& ui, int argc, char**
         ui.traceFrames = getenv("IM_TRACE_FRAMES") != nullptr;
         ui.chaos = ChaosMonkey::create(*pool);
         ui.platform = plt::Platform::create(*pool);
-        // the tool runs from here until it first sleeps
         ui.fiber = ui.platform->scheduler()->create(*pool, ui, toolStack);
 
         if (!ui.finished) {
             ui.platform->run();
         }
 
-        // the loop is over with the tool still asleep: its window is gone,
-        // and its last next() says so
         if (!ui.finished && ui.window) {
             ui.gone = true;
             ui.fiber->wake();

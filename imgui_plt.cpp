@@ -18,10 +18,9 @@
 using namespace stl;
 
 namespace {
-    // indexed by plt::InputKey; keep in that enum's declaration order
     constexpr ImGuiKey namedKeys[] = {
-        ImGuiKey_None, // Unknown
-        ImGuiKey_None, // Printable: mapped from the base codepoint instead
+        ImGuiKey_None,
+        ImGuiKey_None,
         ImGuiKey_Space,
         ImGuiKey_Escape,
         ImGuiKey_Enter,
@@ -37,7 +36,7 @@ namespace {
         ImGuiKey_RightArrow,
         ImGuiKey_PageUp,
         ImGuiKey_PageDown,
-        ImGuiKey_None, // Clear
+        ImGuiKey_None,
         ImGuiKey_F1,
         ImGuiKey_F2,
         ImGuiKey_F3,
@@ -62,17 +61,17 @@ namespace {
         ImGuiKey_F22,
         ImGuiKey_F23,
         ImGuiKey_F24,
-        ImGuiKey_None, // F25: ImGui stops at F24
-        ImGuiKey_None, // F26
-        ImGuiKey_None, // F27
-        ImGuiKey_None, // F28
-        ImGuiKey_None, // F29
-        ImGuiKey_None, // F30
-        ImGuiKey_None, // F31
-        ImGuiKey_None, // F32
-        ImGuiKey_None, // F33
-        ImGuiKey_None, // F34
-        ImGuiKey_None, // F35
+        ImGuiKey_None,
+        ImGuiKey_None,
+        ImGuiKey_None,
+        ImGuiKey_None,
+        ImGuiKey_None,
+        ImGuiKey_None,
+        ImGuiKey_None,
+        ImGuiKey_None,
+        ImGuiKey_None,
+        ImGuiKey_None,
+        ImGuiKey_None,
         ImGuiKey_Keypad0,
         ImGuiKey_Keypad1,
         ImGuiKey_Keypad2,
@@ -90,12 +89,11 @@ namespace {
         ImGuiKey_KeypadAdd,
         ImGuiKey_KeypadEnter,
         ImGuiKey_KeypadEqual,
-        ImGuiKey_None, // KeypadSeparator
-        ImGuiKey_None, // KeypadF1
-        ImGuiKey_None, // KeypadF2
-        ImGuiKey_None, // KeypadF3
-        ImGuiKey_None, // KeypadF4
-        // numlock-off keypad navigation folds onto the plain nav keys
+        ImGuiKey_None,
+        ImGuiKey_None,
+        ImGuiKey_None,
+        ImGuiKey_None,
+        ImGuiKey_None,
         ImGuiKey_Insert,
         ImGuiKey_Delete,
         ImGuiKey_UpArrow,
@@ -106,7 +104,7 @@ namespace {
         ImGuiKey_End,
         ImGuiKey_PageUp,
         ImGuiKey_PageDown,
-        ImGuiKey_None, // KeypadBegin
+        ImGuiKey_None,
         ImGuiKey_Space,
         ImGuiKey_Tab,
         ImGuiKey_CapsLock,
@@ -123,19 +121,19 @@ namespace {
         ImGuiKey_RightCtrl,
         ImGuiKey_RightAlt,
         ImGuiKey_RightSuper,
-        ImGuiKey_None, // MediaPlay
-        ImGuiKey_None, // MediaPause
-        ImGuiKey_None, // MediaPlayPause
-        ImGuiKey_None, // MediaReverse
-        ImGuiKey_None, // MediaStop
-        ImGuiKey_None, // MediaFastForward
-        ImGuiKey_None, // MediaRewind
-        ImGuiKey_None, // MediaTrackNext
-        ImGuiKey_None, // MediaTrackPrevious
-        ImGuiKey_None, // MediaRecord
-        ImGuiKey_None, // VolumeDown
-        ImGuiKey_None, // VolumeUp
-        ImGuiKey_None, // VolumeMute
+        ImGuiKey_None,
+        ImGuiKey_None,
+        ImGuiKey_None,
+        ImGuiKey_None,
+        ImGuiKey_None,
+        ImGuiKey_None,
+        ImGuiKey_None,
+        ImGuiKey_None,
+        ImGuiKey_None,
+        ImGuiKey_None,
+        ImGuiKey_None,
+        ImGuiKey_None,
+        ImGuiKey_None,
     };
 
     static_assert(sizeof(namedKeys) / sizeof(namedKeys[0]) == (size_t)plt::InputKey::Count, "the key table tracks plt::InputKey");
@@ -161,18 +159,10 @@ namespace {
         float scale = 1.f;
         bool traceFrames = false;
         u64 frameNs = 0;
-        // plt windows start with the Text icon; the first newFrame pushes
-        // the ImGui choice (normally Default) by differing from it
         plt::PointerIcon icon = plt::PointerIcon::Text;
     };
 
-    // ImGui keys name US-layout positions, so the layout-independent base
-    // codepoint is the right source; letters, digits, the punctuation row
-    // and the space (a printable key to the platform) are all ImGui cares
-    // about
     ImGuiKey printableKey(u32 codepoint) {
-        // an ASCII letter of either case folds to lower case by its 0x20
-        // bit; no other codepoint lands in a-z that way
         u32 folded = codepoint | 0x20;
 
         if (folded >= 'a' && folded <= 'z') {
@@ -213,12 +203,6 @@ namespace {
         }
     }
 
-    // what the screenshot tool, this binding's one user, ever makes ImGui
-    // ask for: nothing calls SetMouseCursor, the Hand producers (TextLink,
-    // the debug item picker) are never used, and no resize cursor can come
-    // up: both top-level windows are NoDecoration (so NoResize), its child
-    // windows set no ResizeX/Y, and it has no tables, columns or splitters.
-    // Its zoom slider becomes a text field on Ctrl+click.
     plt::PointerIcon pointerIcon(ImGuiMouseCursor cursor) {
         switch (cursor) {
             case ImGuiMouseCursor_TextInput:
@@ -245,8 +229,6 @@ namespace {
         }
     }
 
-    // the test build says what the platform handed ImGui, so a scenario
-    // that fails on a frame can tell where the pointer was
     void traceInput(StringView what, i32 x, i32 y) {
 #ifdef IM_FOR_TESTS
         sysO << "im input: "_sv << what << " "_sv << x << " "_sv << y << endL;
@@ -294,7 +276,6 @@ void ImGuiPltImpl::key(const plt::KeyInput& input) {
     io.AddKeyEvent(ImGuiMod_Alt, (input.modifiers & plt::InputAlt) != 0);
     io.AddKeyEvent(ImGuiMod_Super, (input.modifiers & plt::InputSuper) != 0);
 
-    // ImGui synthesizes repeats from held keys on its own
     if (input.action == plt::InputAction::Repeat) {
         return;
     }
@@ -311,7 +292,6 @@ void ImGuiPltImpl::text(const plt::TextInput& input) {
 }
 
 void ImGuiPltImpl::preedit(StringView, i32, i32) {
-    // no composition preview: ImGui widgets have no preedit rendering
 }
 
 void ImGuiPltImpl::pointerMotion(const plt::PointerMotionInput& input) {
@@ -338,18 +318,10 @@ void ImGuiPltImpl::pointerButton(const plt::PointerButtonInput& input) {
 }
 
 void ImGuiPltImpl::scroll(const plt::ScrollInput& input) {
-    // the frame trace: every wheel event as plt hands it over, between
-    // the frames' lines
     if (traceFrames) {
         sysE << "im wheel: y/100 "_sv << (i64)(input.y * 100.0) << " precise "_sv << (i64)input.precise << " momentum "_sv << (i64)input.momentum << " phase "_sv << (i64)input.phase << endL;
     }
 
-    // plt's precise scroll is tenths of a logical pixel (a finger on a
-    // trackpad, points on Cocoa), its notched one is wheel steps. ImGui
-    // moves a window by five lines per wheel unit, so a finger's point
-    // is turned into the units that make it one design pixel of
-    // content, as the platform's own scrolling does; a notch stays
-    // ImGui's five lines
     float x = (float)input.x;
     float y = (float)input.y;
 
@@ -376,7 +348,6 @@ void ImGuiPltImpl::pointerPresence(bool present) {
 }
 
 void ImGuiPltImpl::flush() {
-    // plt batches per pointer frame; ImGui consumes its queue in NewFrame
 }
 
 ImGuiPlt* ImGuiPlt::create(ObjPool& pool, float scale, bool traceFrames) {

@@ -1,6 +1,5 @@
 #version 450 core
 
-// The scene (linear BT.2020, SDR white at 1.0) to the PQ swapchain.
 
 layout(location = 0) out vec4 fColor;
 layout(set = 0, binding = 0) uniform sampler2D scene;

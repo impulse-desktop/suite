@@ -35,17 +35,7 @@
 
 using namespace stl;
 
-// im screenshot <path>: a standalone plt+Vulkan imgui client. On KMS the
-// path names an owned scanout DMA-BUF and metadata comes through the
-// environment; a readback comes as a self-describing IMW1 memfd. The HDR viewer
-// decodes the shared PQ image into an FP16 linear-BT.2020/nits target, blends
-// ImGui there, then encodes the result to its PQ swapchain. Save still
-// reads only the selected source region. plt owns window/input.
-
 namespace {
-    // ---- decoded source image ----
-    // the whole memfd (IMW1 header + RGBA8 rows) is read into one buffer; px
-    // points past the 12-byte header, so no separate pixel allocation
     struct Image {
         Buffer file;
         u32 w = 0, h = 0;
@@ -66,10 +56,8 @@ namespace {
 
     void readTexture(Gpu& gpu, const Image& img, const Texture& tex, int x0, int y0, int x1, int y1, Image& out);
 
-    constexpr u32 kMagic = 0x31574d49u; // 'IMW1' little-endian
+    constexpr u32 kMagic = 0x31574d49u;
 
-    // W:H:FORMAT:OFFSET:STRIDE:MODIFIER:SIZE:UUID, seven decimal fields and
-    // the exporting GPU's deviceUUID as 32 hex digits
     bool parseShared(StringView spec, Image& img) {
         u64 values[7] = {};
         size_t pos = 0;
@@ -121,9 +109,6 @@ namespace {
         return img.w && img.h && img.stride && img.allocationSize;
     }
 
-    // throws (ToolError, or the Errno readFileContent raises) on any failure.
-    // "fd:3" names the buffer handed over the spawn socket: dma-bufs cannot
-    // be reopened through /proc at all (ENXIO), so the fd itself travels
     void loadImage(StringView path, Image& img) {
         bool inherited = path == "fd:3"_sv;
         Buffer p(inherited ? "/proc/self/fd/3"_sv : path);
@@ -132,8 +117,6 @@ namespace {
             StringView value(color), hs, rest;
 
             if (value.split(':', hs, rest)) {
-                // the white level leads; a display volume after it counts
-                // only when all three of its fields are there
                 StringView whiteString = rest;
                 StringView minString, peakString, fallString, head, tail;
                 bool volume = false;
@@ -193,8 +176,6 @@ namespace {
         img.px = (const u8*)img.file.data() + 12;
     }
 
-    // ---- encoded output ----
-    // mkdir -p: create each '/'-separated prefix of the path in turn
     void mkdirs(StringView path) {
         Buffer b(path);
         char* s = b.cStr();
@@ -210,8 +191,6 @@ namespace {
         mkdir(s, 0755);
     }
 
-    // libpng writes go through this into a growable buffer, so the same encode
-    // path feeds both the file save and the clipboard data source
     void pngWrite(png_structp png, png_bytep data, png_size_t len) {
         ((Buffer*)png_get_io_ptr(png))->append(data, (size_t)len);
     }
@@ -234,8 +213,6 @@ namespace {
         return (u8)lround(encoded * 255.0);
     }
 
-    // encode the [x0,y0,x1,y1) region of img (image px, already clamped) as an
-    // RGBA png into out; throws on failure
     void encodePng(ChaosMonkey& chaos, const Image& img, int x0, int y0, int x1, int y1, Buffer& out) {
         png_structp png = chaos.encoderAlloc(true) ? png_create_write_struct(PNG_LIBPNG_VER_STRING, nullptr, nullptr, nullptr) : nullptr;
         png_infop info = png && chaos.encoderAlloc(true) ? png_create_info_struct(png) : nullptr;
@@ -297,7 +274,6 @@ namespace {
         png_destroy_write_struct(&png, &info);
     }
 
-    // stream the encoded png to a file; throws on open/write failure
     void saveFile(const Buffer& data, StringView file) {
         ScopedFD fd(open(Buffer(file).cStr(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644));
 
@@ -426,8 +402,6 @@ namespace {
         encodeJxlPixels(*gpu.chaos, selected, (const u16*)selected.rgb16.data(), selected.w, selected.h, out);
     }
 
-    // User directory/template, falling back to
-    // $XDG_PICTURES_DIR/screenshots/imway-YYYYMMDD-HHMMSS.<format>.
     Buffer destPath() {
         Buffer dir;
         StringBuilder builder((Buffer&&)dir);
@@ -718,10 +692,6 @@ namespace {
         encodePng(*gpu.chaos, pixels, 0, 0, (int)pixels.w, (int)pixels.h, png);
     }
 
-    // ---- crop interaction ----
-    // selection in image px; empty (zero-area) means "no selection", which the
-    // save/copy path treats as the whole frame. drawn by a left-drag, wiped by
-    // a pan or a zoom change
     struct Crop {
         float x0 = 0, y0 = 0, x1 = 0, y1 = 0;
         bool dragging = false;
@@ -731,8 +701,6 @@ namespace {
         void clear();
     };
 
-    // view state: the on-screen zoom (percent, view-only — save/copy always use
-    // full-res image px) plus the current selection
     constexpr int kInitialZoom = 50;
 
     struct Viewer {
@@ -755,8 +723,6 @@ namespace {
         }
     }
 
-    // the test build says what the editor did with its input, so scenarios
-    // wait for the editor itself instead of for pixels
     void traceView(StringView what, const Viewer& v) {
 #ifdef IM_FOR_TESTS
         sysO << "im screenshot: "_sv << what << " zoom "_sv << v.zoom << endL;
@@ -766,7 +732,6 @@ namespace {
 #endif
     }
 
-    // nudge the zoom by delta% (clamped); any change drops the selection
     void applyZoom(Viewer& v, int delta) {
         int z = (int)clampf((float)(v.zoom + delta), (float)kZoomMin, (float)kZoomMax);
 
@@ -783,8 +748,6 @@ namespace {
         traceView("reset"_sv, v);
     }
 
-    // left control panel: zoom on top, then Save/Reset in one row, then
-    // the selection readout. writes the chosen action into result.
     void drawPanel(Viewer& v, int& result, bool& reset) {
         Crop& crop = v.crop;
 
@@ -794,12 +757,11 @@ namespace {
         int z = v.zoom;
 
         if (ImGui::SliderInt("##zoom", &z, kZoomMin, kZoomMax, "%d%%")) {
-            applyZoom(v, z - v.zoom); // clamps + drops the selection
+            applyZoom(v, z - v.zoom);
         }
 
         ImGui::Spacing();
 
-        // two equal buttons across the panel width
         float avail = ImGui::GetContentRegionAvail().x;
         float bw = (avail - ImGui::GetStyle().ItemSpacing.x) / 2.f;
 
@@ -836,8 +798,6 @@ namespace {
         ImGui::TextDisabled("scroll / +-: zoom, 0: reset");
     }
 
-    // right canvas: the image at v.zoom in a scrollable viewport. left-drag
-    // draws the crop selection; middle-drag pans and wipes the selection.
     void drawCanvas(Gpu& gpu, const Image& img, Texture& tex, Viewer& v, bool reset) {
         Crop& crop = v.crop;
 
@@ -850,15 +810,11 @@ namespace {
         ImVec2 content((float)img.w * scale, (float)img.h * scale);
         ImVec2 origin = ImGui::GetCursorScreenPos();
 
-        // an invisible button both sizes the scroll region and captures the
-        // left-drag for selection
         ImGui::InvisibleButton("img", content, ImGuiButtonFlags_MouseButtonLeft);
 
         ImDrawList* dl = ImGui::GetWindowDrawList();
 
         if (img.color.hdr) {
-            // the screenshot draws itself, PQ decoded into the scene's
-            // linear light by its own pipeline; ImGui's state comes back after
             ImageDraw draw{&gpu, tex.imageSet, origin.x, origin.y, origin.x + content.x, origin.y + content.y, (float)img.color.sdrWhiteNits};
 
             dl->AddCallback(drawImage, &draw, sizeof(draw));
@@ -875,7 +831,6 @@ namespace {
             return ImVec2(clampf((s.x - origin.x) / scale, 0.f, (float)img.w), clampf((s.y - origin.y) / scale, 0.f, (float)img.h));
         };
 
-        // middle-drag pans the viewport and clears the selection
         if (ImGui::IsWindowHovered() && ImGui::IsMouseDragging(ImGuiMouseButton_Middle)) {
             ImVec2 d = ImGui::GetIO().MouseDelta;
 
@@ -885,14 +840,12 @@ namespace {
             traceView("panned"_sv, v);
         }
 
-        // wheel zooms (the child has NoScrollWithMouse, so the wheel is ours)
         float wheel = ImGui::GetIO().MouseWheel;
 
         if (wheel != 0.f && ImGui::IsWindowHovered()) {
             applyZoom(v, wheel > 0.f ? kZoomStep : -kZoomStep);
         }
 
-        // left-drag on the image draws a fresh selection
         if (ImGui::IsItemActivated()) {
             ImVec2 p = toImg(mouse);
 
@@ -914,22 +867,20 @@ namespace {
             }
         }
 
-        // dim outside the selection, outline it (clipped to the child)
         if (!crop.empty()) {
             ImVec2 s0 = toScreen(crop.x0, crop.y0);
             ImVec2 s1 = toScreen(crop.x1, crop.y1);
             ImVec2 hi(origin.x + content.x, origin.y + content.y);
             ImU32 dim = IM_COL32(0, 0, 0, 140);
 
-            dl->AddRectFilled(origin, ImVec2(hi.x, s0.y), dim);             // above
-            dl->AddRectFilled(ImVec2(origin.x, s1.y), hi, dim);             // below
-            dl->AddRectFilled(ImVec2(origin.x, s0.y), s0, dim);             // left
-            dl->AddRectFilled(ImVec2(s1.x, s0.y), ImVec2(hi.x, s1.y), dim); // right
+            dl->AddRectFilled(origin, ImVec2(hi.x, s0.y), dim);
+            dl->AddRectFilled(ImVec2(origin.x, s1.y), hi, dim);
+            dl->AddRectFilled(ImVec2(origin.x, s0.y), s0, dim);
+            dl->AddRectFilled(ImVec2(s1.x, s0.y), ImVec2(hi.x, s1.y), dim);
             dl->AddRect(s0, s1, IM_COL32(255, 255, 255, 230), 0, 0, 1.5f);
         }
     }
 
-    // draw the whole cropper; returns 1 = save, -1 = cancel, 0 = keep going
     int drawUi(Gpu& gpu, plt::Window& window, const Image& img, Texture& tex, Viewer& v) {
         ImGuiViewport* vp = ImGui::GetMainViewport();
 
@@ -941,13 +892,9 @@ namespace {
 
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
 
-        // Begin's and BeginChild's results go unread here and below: a
-        // window that cannot collapse, and a child of one, is shown every
-        // frame, and drawing into a hidden one would only be wasted
         ImGui::Begin("##shot", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoSavedSettings);
         const float panelW = scaledPx(200_d, gpu.scale);
 
-        // +/- zoom, handled before the panel so the slider reflects it
         if (ImGui::IsKeyPressed(ImGuiKey_Equal) || ImGui::IsKeyPressed(ImGuiKey_KeypadAdd)) {
             applyZoom(v, kZoomStep);
         }
@@ -980,28 +927,23 @@ namespace {
 
             initialWindowSize(img, ImGui::GetStyle(), gpu.scale, w, h);
             clampWindowSize(window.info(), w, h);
-            // requestResize speaks pixels and converts to logical itself
             window.requestResize((u32)w, (u32)h);
         }
 
         return result;
     }
 
-    // the cropper behind the frame driver: the editor, or the error panel
-    // when the load or the save failed
     struct ScreenshotUi final: UiFrame {
         Gpu* gpu = nullptr;
         plt::Window* window = nullptr;
         const Image* img = nullptr;
         Texture* tex = nullptr;
         Viewer* view = nullptr;
-        // non-empty switches the ui to the error panel
         const Buffer* error = nullptr;
 
         int frame() override;
     };
 
-    // the crop rect in image px, with the empty-selection-is-whole-frame rule
     void cropRegion(const Image& img, const Crop& c, int& x0, int& y0, int& x1, int& y1) {
         x0 = (int)(clampf(c.x0, 0, (float)img.w) + 0.5f);
         y0 = (int)(clampf(c.y0, 0, (float)img.h) + 0.5f);
@@ -1038,8 +980,6 @@ int mainScreenshot(StringView path) {
     float scale = scaleFromEnv();
     bool traceFrames = getenv("IM_TRACE_FRAMES") != nullptr;
 
-    // load first; any failure becomes an on-screen error panel, not a console
-    // line, so it reads like a message from the compositor
     Image img;
     Buffer errText;
     bool loaded = false;
@@ -1056,11 +996,6 @@ int mainScreenshot(StringView path) {
     int rc = 0;
 
     try {
-        // pooled unwind: every stage registers its teardown right after it
-        // succeeds, so the arena's LIFO death replays the epilogue in order
-        // and an exception mid-setup unwinds exactly the completed stages.
-        // tex outlives the pool: its guard reads it at pool-death time;
-        // driver outlives it too: the dying window still points at it
         Texture tex;
         FrameDriver driver;
         ScreenshotUi ui;
@@ -1068,20 +1003,12 @@ int mainScreenshot(StringView path) {
 
         ChaosMonkey& chaos = *ChaosMonkey::create(*shot);
 
-        // the platform, the input bridge and the window live in the same
-        // arena: LIFO death tears the window down after every vulkan guard
-        // below and before the platform it belongs to
         plt::Platform& platform = *plt::Platform::create(*shot);
         ImGuiPlt& imgui = *ImGuiPlt::create(*shot, scale, traceFrames);
 
-        // Open at the image's on-screen size (50% zoom) plus the actual
-        // ImGui chrome. A bare error panel gets a small fixed size. Clamp
-        // to 90% of the output.
         int winW, winH;
 
         if (loaded) {
-            // sized with the style drawUi will use: WindowPadding at zero
-            // there, only SameLine's ItemSpacing parts the panel and the image
             initialWindowSize(img, scaledStyle(scale), scale, winW, winH);
         } else {
             winW = (int)scaledPx(480_d, scale);
@@ -1100,11 +1027,6 @@ int mainScreenshot(StringView path) {
 
         plt::Window& window = *platform.createWindow(*shot, options);
 
-        // the window was asked for in the platform's logical units, and it
-        // says what pixels it made of them: not the design's pixels on an
-        // output that scales logical units by itself, or over the screen
-        // (the output size arrived with the platform's registry roundtrips,
-        // only a window can report it); a resize is in pixels
         plt::WindowInfo made = window.info();
         int wantW = winW, wantH = winH;
 
@@ -1141,8 +1063,6 @@ int mainScreenshot(StringView path) {
         gpu.sdrWhiteNits = (float)img.color.sdrWhiteNits;
 
         if (loaded) {
-            // registered before the import so a mid-import throw still
-            // releases the partially built handles
             pooledGuard(*shot, [g = &gpu, t = &tex] {
                 g->destroyTexture(*t);
             });
@@ -1154,12 +1074,11 @@ int mainScreenshot(StringView path) {
             }
         }
 
-        // last in, first out: the queue drains before anything above dies
         pooledGuard(*shot, [g = &gpu] {
             vkDeviceWaitIdle(g->device);
         });
 
-        Viewer view; // zoom 50%, no selection (whole frame) until the user drags
+        Viewer view;
 
         ui.gpu = &gpu;
         ui.window = &window;
@@ -1173,31 +1092,22 @@ int mainScreenshot(StringView path) {
         driver.gpu = &gpu;
         driver.ui = &ui;
 
-        // interactive phase: the cropper, or the error panel if the load failed
         int action = 0;
         StringView configuredAction(getenv("IM_SHOT_ACTION") ? getenv("IM_SHOT_ACTION") : "editor");
 
-        // what the error panel shows goes to the log too: a save without a
-        // window would otherwise fail without a word
         auto report = [&] {
             if (!errText.empty()) {
                 sysE << "im screenshot: "_sv << sv(errText) << endL;
             }
         };
 
-        // errText is still empty here whenever the load succeeded: only the
-        // load's own failure has written it yet
         if (loaded && configuredAction == "save"_sv) {
-            // non-interactive: encode straight from the texture, the window
-            // never maps. "copy" lands in the editor below until the
-            // clipboard path returns.
             action = 1;
         } else {
             report();
             action = runUi(driver);
         }
 
-        // action phase: encode + save; a failure switches to the error panel
         if (loaded && action == 1) {
             try {
                 int x0, y0, x1, y1;
@@ -1224,17 +1134,11 @@ int mainScreenshot(StringView path) {
             }
 
             if (!errText.empty()) {
-                // a save-mode window was never shown; runUi maps it now
                 report();
                 runUi(driver);
             }
         }
-
-        // teardown happens here: the pool ref dies at the end of the block
-        // and its guards unwind the whole stack in reverse creation order
     } catch (...) {
-        // vulkan/imgui setup blew up — nothing to show it on; the pool has
-        // already unwound the stages that did come up; log and leave
         sysE << "im screenshot: "_sv << Exception::current() << endL;
         rc = 1;
     }

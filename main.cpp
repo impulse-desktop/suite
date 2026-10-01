@@ -16,9 +16,6 @@
 using namespace stl;
 
 namespace {
-    // One binary, many tools: `im NAME ARGS...` runs the tool NAME, and a
-    // link named imNAME (imscreenshot, imview) runs the same tool with the
-    // link's own arguments. Each tool takes its arguments as argv[1..].
     struct Tool {
         const char* name;
         int (*run)(int argc, char** argv);
@@ -81,13 +78,9 @@ namespace {
 
 int main(int argc, char** argv) {
 #if defined(IM_FOR_TESTS) && defined(__linux__)
-    // the scenario that started this tool may read its stacks when it fails
-    // with the tool alive; Yama lets only an ancestor attach otherwise
     prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY, 0, 0, 0);
 #endif
 
-    // a link named after a tool runs it: imscreenshot ARGS is im screenshot
-    // ARGS; any other name (im, im_test) takes the tool from the first word
     StringView self = baseName(argv[0]);
 
     if (self.length() > 2 && self.startsWith("im"_sv)) {

@@ -16,21 +16,13 @@ inline stl::StringView sv(const stl::Buffer& b) {
 
 double parseFloat(stl::StringView s);
 
-// the test build's account of a step, `im <tool>: <what>`, for the
-// scenarios to wait on; in the ordinary build nothing
 void traceTool(stl::StringView tool, stl::StringView what);
 
-// the monotonic clock, for the frame trace
 u64 nowNs();
-// "12.3", milliseconds to a tenth
 void appendMs(stl::StringBuilder& text, u64 ns);
 
 float clampf(float v, float lo, float hi);
 
-// a tool's own failure, carrying a human message shown verbatim on the
-// error panel; raised by fail() with its call site in front. Derives
-// stl::Exception so Exception::current() surfaces it in a generic catch,
-// like the rest of the suite
 struct ToolError: stl::Exception {
     stl::Buffer msg;
 

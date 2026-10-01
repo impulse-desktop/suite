@@ -13,27 +13,6 @@
 using namespace stl;
 
 #ifdef IM_FOR_TESTS
-// The test binary's monkey. IM_CHAOS lists the faults as FAULT=ARG words,
-// read once at start, and each fault is spent by the call it fires on, so
-// a scenario states exactly which call goes wrong:
-//   memory-types=N    the next N memory-type queries find none
-//   vulkan=K          K checked Vulkan calls pass, the one after fails
-//   vulkan-at=SITE    the checked Vulkan call named SITE fails (the word
-//                     may repeat for several)
-//   no-ext=NAME       the Vulkan device does not offer extension NAME (the
-//                     word may repeat for several)
-//   swapchain=K       K swapchain acquires and presents pass, the one after
-//                     reports the swapchain out of date
-//   swapchain-suboptimal=K  the same, reporting it suboptimal instead
-//   encoder-alloc=K   K encoder allocations pass, the one after fails as
-//                     out of memory
-//   encoder-output=K  K JPEG XL output steps pass, the one after fails
-//   count=NAME:N      the device answers N to the count named NAME
-//                     (devices, queue-families, surface-formats)
-//   discrete-gpu=1    the physical device says it is a discrete GPU
-//   no-wsi=1          the queue cannot present to the surface
-//   image-counts=MIN:MAX  the surface wants MIN images at least and
-//                     allows MAX at most
 namespace {
     struct NamedCount {
         StringView what;
@@ -74,7 +53,6 @@ namespace {
         void imageCounts(VkSurfaceCapabilitiesKHR& caps) override;
     };
 
-    // a counted fault: fires while the count lasts, each firing spends one
     static bool spend(int& count) {
         if (count <= 0) {
             return false;
@@ -85,8 +63,6 @@ namespace {
         return true;
     }
 
-    // an ordinal fault, -1 while unarmed: K calls pass, the next one fails,
-    // and the fault is spent
     static bool failsOnce(int& skip) {
         if (skip < 0) {
             return false;
@@ -243,7 +219,6 @@ ChaosMonkey* ChaosMonkey::create(ObjPool& pool) {
     return pool.make<TestChaosMonkey>(StringView(script ? script : ""));
 }
 #else
-// The production monkey: every call gives its argument back.
 namespace {
     struct IdleChaosMonkey: public ChaosMonkey {
         void memoryTypes(VkPhysicalDeviceMemoryProperties& props) override;

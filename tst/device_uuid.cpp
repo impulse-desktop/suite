@@ -1,6 +1,3 @@
-// The Vulkan device's UUID, the one a compositor names a shared buffer's
-// exporting device with, as 32 lowercase hex digits: the first device the
-// loader offers, which under VK_DRIVER_FILES is the one the tool gets too.
 #include <stdio.h>
 #include <vulkan/vulkan.h>
 
