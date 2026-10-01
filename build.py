@@ -238,7 +238,7 @@ im_test = program(
 renderer_test = program(
     name="renderer_test",
     output="$(B)/e2e/renderer_test",
-    srcs=["$(S)/tst/renderer.cpp", "$(S)/renderer.cpp", "$(S)/ui.cpp", "$(S)/imgui_plt.cpp", "$(S)/util.cpp", *(["$(S)/renderer_metal.mm", "$(S)/tst/renderer_metal.mm"] if darwin else ["$(S)/renderer_vulkan.cpp"])],
+    srcs=["$(S)/tst/renderer.cpp", "$(S)/renderer.cpp", "$(S)/ui.cpp", "$(S)/util.cpp", *(["$(S)/renderer_metal.mm", "$(S)/tst/renderer_metal.mm"] if darwin else ["$(S)/renderer_vulkan.cpp"])],
     cflags=warning_flags,
     deps=im_deps,
 )

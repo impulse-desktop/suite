@@ -48,8 +48,8 @@ library is not used, the vocabulary comes from
 
 `ui.h` is the tools’ window and event interface, shared by screenshot,
 view and ui. Its implementation in `ui.cpp` owns the frame loop and ImGui
-setup. `renderer.h` is the graphics boundary; the renderer owns its device,
-presentation and resources. The
+setup, platform input and cursor handling. `renderer.h` is the graphics
+boundary; the renderer owns its device, presentation and resources. The
 suite's Vulkan implementation, including dma-buf import, HDR pipelines,
 readback and GPU fault injection, lives in `renderer_vulkan.cpp`. No Vulkan
 types or backend calls enter the tools or public headers. The vendored
