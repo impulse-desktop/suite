@@ -1,0 +1,73 @@
+"""A blocked decode leaves the UI live; late results cannot replace a newer selection.
+FIFOs hold real file reads without sleeps or test-only controls in the decoder.
+"""
+import errno
+import os
+from pathlib import Path
+
+from session import KEY_END, KEY_HOME, KEY_LEFT, KEY_RIGHT, Session, near, png, write_png
+
+
+with Session("view_async", tool="view") as s:
+    pics = Path(s.runtime.name) / "pics"
+    pics.mkdir()
+    for name, rgb in (("a", (255, 0, 0)), ("b", (0, 255, 0)), ("c", (0, 0, 255))):
+        write_png(pics / f"{name}.png", 64, 48, rgb)
+    s.launch(str(pics))
+    s.focus()
+    s.said("showing a.png")
+    for name in ("a", "b", "c"):
+        s.said(f"thumbnail {name}.png")
+    r = s.window()["rect"]
+    canvas = (220, 0, r["width"] - 420, r["height"])
+
+    def shows(rgb, label):
+        s.wait(lambda: near(s.capture(label, region=canvas), rgb) >= 2900, f"canvas {label}")
+
+    # Its thumbnail is already cached: selecting b now starts a Show callback.
+    blocked = pics / "b.png"
+    blocked.unlink()
+    os.mkfifo(blocked)
+    s.tap(KEY_RIGHT)
+    s.said("loading image b.png")
+    shows((255, 0, 0), "old-image-during-load")
+    s.tap(KEY_RIGHT)
+    s.said("showing c.png")
+    shows((0, 0, 255), "newer-selection")
+
+    def release(data):
+        def writer():
+            try:
+                return os.open(blocked, os.O_WRONLY | os.O_NONBLOCK)
+            except OSError as error:
+                if error.errno != errno.ENXIO:
+                    raise
+                return None
+        fd = s.wait(writer, "blocked decoder opens FIFO")
+        try:
+            assert os.write(fd, data) == len(data)
+        finally:
+            os.close(fd)
+
+    release(png(64, 48, bytes((0, 255, 0)) * (64 * 48)))
+    s.said("discarded image b.png")
+    assert "im view: showing b.png" not in s.client_log(), "late image replaced the selection"
+    shows((0, 0, 255), "late-success-ignored")
+
+    # A stale error must also leave the newer selection alone.
+    s.tap(KEY_LEFT)
+    s.said("loading image b.png", 2)
+    shows((0, 0, 255), "old-image-during-second-load")
+    s.tap(KEY_HOME)
+    s.said("showing a.png", 2)
+    release(b"not an image")
+    s.said("discarded image b.png", 2)
+    assert "im view: cannot show b.png" not in s.client_log(), "stale error replaced the selection"
+    shows((255, 0, 0), "late-error-ignored")
+
+    # Exit while a worker is blocked in file I/O: joining it would hang forever.
+    s.tap(KEY_RIGHT)
+    s.said("loading image b.png", 3)
+    s.close()
+
+print("OK: previous image retained, stale success and error ignored, exit without joining")

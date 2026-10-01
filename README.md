@@ -34,13 +34,17 @@ does the same from the one binary. Tools so far:
   its ends, a thumbnail click selects; the wheel zooms about the pointer,
   a drag pans, `-`/`=` step the zoom, `1` is 1:1, `0`/`w` fit; `r`/`R`
   turn the image, `f` fullscreen, Tab hides the list, `i` the properties,
-  `q`/Escape leave. The whole directory is read at the start, every
-  file's bytes and a thumbnail decoded from each through the sandboxed
-  decoder below; nothing touches the disk after, the shown image decodes
-  from memory when selected, all on the one thread.
+  `q`/Escape leave. Four workers read and decode the selected image and
+  visible thumbnails through the sandboxed decoder below. Selection has
+  priority; the previous image remains visible until its replacement is
+  ready. Every loaded thumbnail stays cached for the process's lifetime;
+  scrolling away never evicts it.
 
-Single-threaded by design. Every object lives in a pool; the C++ standard
-library is not used, the vocabulary comes from
+The UI owns the view state and textures. Workers receive `Runable` callbacks
+through a `Channel` and send callbacks back for the UI to apply. At most four
+loads await acceptance; each load transfers its own pool with its result.
+Tools exit without joining workers or destroying the process's pool.
+The C++ standard library is not used; the vocabulary comes from
 [libstd](https://github.com/pg83/std). The codebase follows
 [STYLE.md](STYLE.md).
 
@@ -58,7 +62,8 @@ in `renderer.cpp` select the platform through `renderer_vulkan.h` or
 `renderer_metal.h`; these headers expose creation functions using only
 portable types.
 
-`Ui::open` prepares the window; the first `Ui::next` shows it. This lets
+`Ui::create` prepares the window in the caller's pool. The client supplies
+its own `Runable` to `Ui::run`; the first `Ui::next` shows the window. This lets
 screenshot save directly without mapping a window, while still opening
 the error panel if saving fails. Resize requests use pixels and stay
 within 90% of the output size.

@@ -5,8 +5,10 @@
 
 #include <std/ios/sys.h>
 #include <std/sys/throw.h>
+#include <std/thr/runable.h>
 #include <std/mem/obj_pool.h>
 
+#include <stdlib.h>
 #include <string.h>
 
 #if defined(__APPLE__)
@@ -39,10 +41,7 @@ namespace {
         verify(!memcmp(pixels.rgb16.data(), reversed, sizeof(reversed)));
     }
 
-    static int checkRenderer(ObjPool& pool, Ui& ui, int argc, char**) {
-        UiOptions options{64_d, 64_d};
-        options.renderer.hdr = argc > 1;
-        ui.open(options);
+    static void checkRenderer(ObjPool& pool, Ui& ui, bool hdr) {
         const unsigned char source[] = {
             1,
             2,
@@ -69,7 +68,7 @@ namespace {
             53,
             255,
         };
-        RenderImage& image = *ui.uploadImage(pool, 3, 2, source, options.renderer.hdr);
+        RenderImage& image = *ui.uploadImage(pool, 3, 2, source, hdr);
         ImagePixels pixels;
         image.read(0, 0, 3, 2, pixels);
         verify(pixels.width == 3 && pixels.height == 2 && pixels.rgba.length() == sizeof(source));
@@ -87,7 +86,7 @@ namespace {
         }
         verify(rejected);
 #if defined(__APPLE__)
-        checkMetalShared(pool, ui, options.renderer.hdr);
+        checkMetalShared(pool, ui, hdr);
 #endif
         UiEvent event;
         int frames = 0;
@@ -107,11 +106,12 @@ namespace {
         verify(!memcmp(pixels.rgba.data(), source, sizeof(source)));
         verify(frames == 3);
         sysO << StringView(u8"OK: renderer upload, crop readback, precision, bounds and drawing") << endL;
-        return 0;
     }
 }
 
 int main(int argc, char** argv) {
+    ObjPool::Ref pool = ObjPool::fromMemory();
+    int result;
     try {
         checkPacked();
         if (argc == 2 && StringView(argv[1]) == StringView(u8"--pixels")) {
@@ -121,9 +121,16 @@ int main(int argc, char** argv) {
         if (argc > 2 || (argc == 2 && StringView(argv[1]) != StringView(u8"--hdr"))) {
             fail(StringView(u8"usage: renderer_test [--pixels|--hdr]"));
         }
-        return runTool(StringView(u8"renderer-test"), checkRenderer, argc, argv);
+        UiOptions options{64_d, 64_d};
+        options.renderer.hdr = argc > 1;
+        Ui& ui = *Ui::create(*pool, StringView(u8"renderer-test"), options);
+        auto body = makeRunable([&] {
+            checkRenderer(*pool, ui, options.renderer.hdr);
+        });
+        result = ui.run(body);
     } catch (...) {
         sysE << Exception::current() << endL;
-        return 1;
+        result = 1;
     }
+    exit(result);
 }

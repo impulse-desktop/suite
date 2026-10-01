@@ -14,6 +14,7 @@
 #include <std/ios/out_fd.h>
 #include <std/lib/vector.h>
 #include <std/str/builder.h>
+#include <std/thr/runable.h>
 #include <std/ios/fs_utils.h>
 #include <std/mem/obj_pool.h>
 
@@ -860,7 +861,11 @@ bool Image::shared() const {
     return dmabuf;
 }
 
-int mainScreenshot(ObjPool& pool, Ui& ui, int, char** argv) {
+int mainScreenshot(ObjPool& pool, int argc, char** argv) {
+    if (argc < 2) {
+        sysE << StringView(u8"usage: im screenshot <path|fd:N>") << endL;
+        return 2;
+    }
     StringView path(argv[1]);
     Viewer view;
     Image img;
@@ -887,73 +892,74 @@ int mainScreenshot(ObjPool& pool, Ui& ui, int, char** argv) {
     options.renderer.hdr = loaded && img.color.hdr;
     options.renderer.sdrWhiteNits = (float)img.color.sdrWhiteNits;
     options.renderer.shared = img.native;
-    ui.open(options);
-    ui.trace(options.renderer.hdr ? StringView(u8"surface HDR10 PQ") : StringView(u8"surface sRGB"));
-    if (loaded) {
-        int w, h;
-        initialWindowSize(ui, img, w, h);
-        ui.requestResize((u32)w, (u32)h);
-        tex = img.shared() ? ui.importImage(pool, *img.native, img.color.hdr) : ui.uploadImage(pool, img.w, img.h, img.px, img.color.hdr);
-    }
-
-    auto edit = [&] {
-        UiEvent event;
-        while (ui.next(event)) {
-            if (event.kind == UiEvent::Kind::Close) {
-                return -1;
-            }
-            int result = errText.empty() ? drawUi(ui, img, *tex, view) : (ui.drawErrorPanel(StringView(errText)) ? -1 : 0);
-            if (result) {
-                return result;
-            }
-        }
-        return -1;
-    };
-
-    int action = 0;
-    StringView configuredAction(getenv("IM_SHOT_ACTION") ? getenv("IM_SHOT_ACTION") : "editor");
-
-    auto report = [&] {
-        if (!errText.empty()) {
-            sysE << StringView(u8"im screenshot: ") << StringView(errText) << endL;
-        }
-    };
-
-    if (loaded && configuredAction == StringView(u8"save")) {
-        action = 1;
-    } else {
-        report();
-        action = edit();
-    }
-
-    if (loaded && action == 1) {
-        try {
-            int x0, y0, x1, y1;
-
-            cropRegion(img, view.crop, x0, y0, x1, y1);
-
-            Buffer encoded;
-            bool png = getenv("IM_SHOT_FORMAT") && StringView(getenv("IM_SHOT_FORMAT")) == StringView(u8"png");
-
-            if (png) {
-                encodeSelection(chaos, img, *tex, x0, y0, x1, y1, encoded);
-            } else {
-                encodeJxlSelection(chaos, img, *tex, x0, y0, x1, y1, encoded);
-            }
-
-            Buffer dest = destPath();
-
-            saveFile(encoded, StringView(dest));
-            sysO << StringView(u8"im screenshot: saved ") << StringView(dest) << endL;
-        } catch (...) {
-            errText = Buffer(Exception::current());
+    Ui& ui = *Ui::create(pool, StringView(u8"screenshot"), options);
+    auto body = makeRunable([&] {
+        ui.trace(options.renderer.hdr ? StringView(u8"surface HDR10 PQ") : StringView(u8"surface sRGB"));
+        if (loaded) {
+            int w, h;
+            initialWindowSize(ui, img, w, h);
+            ui.requestResize((u32)w, (u32)h);
+            tex = img.shared() ? ui.importImage(pool, *img.native, img.color.hdr) : ui.uploadImage(pool, img.w, img.h, img.px, img.color.hdr);
         }
 
-        if (!errText.empty()) {
+        auto edit = [&] {
+            UiEvent event;
+            while (ui.next(event)) {
+                if (event.kind == UiEvent::Kind::Close) {
+                    return -1;
+                }
+                int result = errText.empty() ? drawUi(ui, img, *tex, view) : (ui.drawErrorPanel(StringView(errText)) ? -1 : 0);
+                if (result) {
+                    return result;
+                }
+            }
+            return -1;
+        };
+
+        int action = 0;
+        StringView configuredAction(getenv("IM_SHOT_ACTION") ? getenv("IM_SHOT_ACTION") : "editor");
+
+        auto report = [&] {
+            if (!errText.empty()) {
+                sysE << StringView(u8"im screenshot: ") << StringView(errText) << endL;
+            }
+        };
+
+        if (loaded && configuredAction == StringView(u8"save")) {
+            action = 1;
+        } else {
             report();
-            edit();
+            action = edit();
         }
-    }
 
-    return 0;
+        if (loaded && action == 1) {
+            try {
+                int x0, y0, x1, y1;
+
+                cropRegion(img, view.crop, x0, y0, x1, y1);
+
+                Buffer encoded;
+                bool png = getenv("IM_SHOT_FORMAT") && StringView(getenv("IM_SHOT_FORMAT")) == StringView(u8"png");
+
+                if (png) {
+                    encodeSelection(chaos, img, *tex, x0, y0, x1, y1, encoded);
+                } else {
+                    encodeJxlSelection(chaos, img, *tex, x0, y0, x1, y1, encoded);
+                }
+
+                Buffer dest = destPath();
+
+                saveFile(encoded, StringView(dest));
+                sysO << StringView(u8"im screenshot: saved ") << StringView(dest) << endL;
+            } catch (...) {
+                errText = Buffer(Exception::current());
+            }
+
+            if (!errText.empty()) {
+                report();
+                edit();
+            }
+        }
+    });
+    return ui.run(body);
 }

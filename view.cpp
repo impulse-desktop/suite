@@ -8,11 +8,15 @@
 #include <std/sys/fs.h>
 #include <std/ios/sys.h>
 #include <std/sys/crt.h>
+#include <std/alg/defer.h>
 #include <std/alg/qsort.h>
 #include <std/sys/throw.h>
 #include <std/alg/minmax.h>
 #include <std/lib/vector.h>
+#include <std/thr/thread.h>
 #include <std/str/builder.h>
+#include <std/thr/channel.h>
+#include <std/thr/runable.h>
 #include <std/ios/fs_utils.h>
 #include <std/mem/obj_pool.h>
 
@@ -44,6 +48,7 @@ namespace {
     constexpr float zoomMin = 0.02f;
     constexpr float zoomMax = 32.f;
     constexpr float zoomStep = 1.25f;
+    constexpr size_t workerCount = 4;
 
     enum class Load : u8 {
         None,
@@ -54,8 +59,7 @@ namespace {
     struct Entry {
         Buffer path;
         size_t nameAt = 0;
-        Buffer file;
-        Buffer error;
+        bool loading = false;
         Load thumb = Load::None;
         ImTextureRef thumbTex;
         u32 thumbW = 0;
@@ -85,26 +89,14 @@ namespace {
         return pool.make<ScaledImage>(*image, side);
     }
 
-    void readAll(Vector<Entry*>& entries) {
-        for (Entry* entry : entries) {
-            Buffer path(StringView(entry->path));
-
-            try {
-                readFileContent(path, entry->file);
-            } catch (...) {
-                entry->error = Buffer(Exception::current());
-            }
-        }
-    }
-
-    static Image* decodeEntry(ObjPool& pool, Ui& ui, const Entry& entry, u32 side) {
+    static Image* decodeFile(ObjPool& pool, Buffer& path, size_t nameAt, u32 side, Buffer& timing) {
         u64 began = monotonicNowUs();
+        Buffer file;
 
-        if (!entry.error.empty()) {
-            fail(StringView(entry.error));
-        }
-
-        Image* image = decode(pool, StringView(entry.file), entry.name());
+        readFileContent(path, file);
+        StringView whole(path);
+        StringView name(whole.begin() + nameAt, whole.end());
+        Image* image = decode(pool, StringView(file), name);
 
         u64 decoded = monotonicNowUs();
 
@@ -112,9 +104,9 @@ namespace {
 
         StringBuilder text;
 
-        text << StringView(u8"im decode ") << entry.name() << StringView(u8": decode ") << MS{decoded - began};
+        text << StringView(u8"im decode ") << name << StringView(u8": read/decode ") << MS{decoded - began};
         text << StringView(u8" shrink ") << MS{monotonicNowUs() - decoded};
-        ui.timing(StringView(text));
+        timing = Buffer(StringView(text));
         return image;
     }
 
@@ -223,7 +215,7 @@ namespace {
     }
 
     float rowHeightFor(const Entry& entry, float innerW) {
-        float aspect = entry.thumb == Load::Ready && entry.thumbW ? (float)entry.thumbH / (float)entry.thumbW : placeholderAspect;
+        float aspect = entry.thumbW ? (float)entry.thumbH / (float)entry.thumbW : placeholderAspect;
 
         return max(1.f, floorf(innerW * aspect + .5f));
     }
@@ -254,6 +246,13 @@ namespace {
 
     struct ViewApp {
         Ui* ui = nullptr;
+        Channel* jobs = nullptr;
+        Channel* results = nullptr;
+        size_t inFlight = 0;
+        u64 showRequest = 0;
+        bool showPending = false;
+        Vector<size_t> wantedThumbs;
+        u32 thumbSide = thumbTexelsMin;
         Vector<Entry*> entries;
         size_t current = 0;
         u32 maxSide = 0;
@@ -276,13 +275,15 @@ namespace {
         i64 fileBytes = -1;
         Buffer fileModified;
 
-        void loadThumb(size_t index, u32 side);
+        void startWorkers(ObjPool& pool);
+        void accept();
+        void submit();
+        void setThumb(size_t index, u32 side, Image& image);
         void show(size_t index);
         void dropShown();
         void step(long delta);
         void setZoom(float value);
         void fitView();
-        void statFile();
         void keys();
         void draw();
         void drawGallery();
@@ -290,18 +291,77 @@ namespace {
         void drawInfo();
     };
 
-    int showError(Ui& ui, StringView message) {
-        UiEvent event;
+    struct Worker final: Runable {
+        Channel* jobs;
 
-        ui.open({480_d, 180_d});
+        explicit Worker(Channel* jobs);
+        void run() override;
+    };
 
-        while (ui.next(event)) {
-            if (event.kind == UiEvent::Kind::Close || ui.drawErrorPanel(message)) {
-                return 0;
+    struct AcceptThumb final: Runable {
+        ObjPool* owner;
+        ViewApp* app;
+        size_t index;
+        u32 side;
+        Image* image = nullptr;
+        Buffer error;
+        Buffer timing;
+
+        AcceptThumb(ObjPool* owner, ViewApp* app, size_t index, u32 side);
+        void run() override;
+    };
+
+    struct AcceptShow final: Runable {
+        ObjPool* owner;
+        ViewApp* app;
+        size_t index;
+        u64 request;
+        u32 thumbSide;
+        Image* image = nullptr;
+        Image* thumb = nullptr;
+        Buffer error;
+        Buffer timing;
+        i64 fileBytes = -1;
+        Buffer fileModified;
+
+        AcceptShow(ObjPool* owner, ViewApp* app, size_t index);
+        void run() override;
+    };
+
+    struct LoadThumb final: Runable {
+        Buffer path;
+        size_t nameAt;
+        Channel* results;
+        Ui* wake;
+        AcceptThumb* reply;
+
+        explicit LoadThumb(AcceptThumb* reply);
+        void run() override;
+    };
+
+    struct LoadShow final: Runable {
+        Buffer path;
+        size_t nameAt;
+        u32 side;
+        Channel* results;
+        Ui* wake;
+        AcceptShow* reply;
+
+        explicit LoadShow(AcceptShow* reply);
+        void run() override;
+    };
+
+    static int showError(Ui& ui, StringView message) {
+        auto body = makeRunable([&] {
+            UiEvent event;
+
+            while (ui.next(event)) {
+                if (event.kind == UiEvent::Kind::Close || ui.drawErrorPanel(message)) {
+                    return;
+                }
             }
-        }
-
-        return 0;
+        });
+        return ui.run(body);
     }
 }
 
@@ -370,65 +430,251 @@ StringView Entry::name() const {
     return StringView(whole.begin() + nameAt, whole.end());
 }
 
-void ViewApp::loadThumb(size_t index, u32 side) {
-    Entry& entry = *entries[index];
-    ObjPool::Ref pool = ObjPool::fromMemory();
-    Image* image;
+Worker::Worker(Channel* jobs_)
+    : jobs(jobs_)
+{
+}
 
-    try {
-        image = decodeEntry(*pool, *ui, entry, side);
-    } catch (...) {
-        Buffer error(Exception::current());
+void Worker::run() {
+    void* item;
 
+    while (jobs->dequeue(&item)) {
+        ((Runable*)item)->run();
+    }
+}
+
+AcceptThumb::AcceptThumb(ObjPool* owner_, ViewApp* app_, size_t index_, u32 side_)
+    : owner(owner_)
+    , app(app_)
+    , index(index_)
+    , side(side_)
+{
+}
+
+void AcceptThumb::run() {
+    ScopedGuard cleanup = [pool = owner] {
+        delete pool;
+    };
+    Entry& entry = *app->entries[index];
+
+    entry.loading = false;
+    app->ui->timing(StringView(timing));
+
+    if (!error.empty()) {
         entry.thumb = Load::Failed;
-        ui->trace(StringView(StringBuilder() << StringView(u8"no thumbnail ") << entry.name() << StringView(u8": ") << StringView(error)));
-
+        app->ui->trace(StringView(StringBuilder() << StringView(u8"no thumbnail ") << entry.name() << StringView(u8": ") << StringView(error)));
         return;
     }
 
-    if (entry.thumb == Load::Ready) {
-        ui->releaseTexture(entry.thumbTex);
+    app->setThumb(index, side, *image);
+}
+
+AcceptShow::AcceptShow(ObjPool* owner_, ViewApp* app_, size_t index_)
+    : owner(owner_)
+    , app(app_)
+    , index(index_)
+    , request(app_->showRequest)
+    , thumbSide(app_->thumbSide)
+{
+}
+
+void AcceptShow::run() {
+    ScopedGuard cleanup = [pool = owner] {
+        delete pool;
+    };
+    Entry& entry = *app->entries[index];
+
+    entry.loading = false;
+    app->ui->timing(StringView(timing));
+
+    if (thumb) {
+        app->setThumb(index, thumbSide, *thumb);
+    } else if (!error.empty() && entry.thumb != Load::Ready) {
+        entry.thumb = Load::Failed;
+        app->ui->trace(StringView(StringBuilder() << StringView(u8"no thumbnail ") << entry.name() << StringView(u8": ") << StringView(error)));
     }
 
-    entry.thumbTex = ui->loadTexture(image->width(), image->height(), image->data());
-    entry.thumbW = image->width();
-    entry.thumbH = image->height();
+    if (request != app->showRequest) {
+        app->ui->trace(StringView(StringBuilder() << StringView(u8"discarded image ") << entry.name()));
+        return;
+    }
+
+    app->fileBytes = fileBytes;
+    app->fileModified.xchg(fileModified);
+    app->shownIndex = index;
+
+    if (!error.empty()) {
+        app->dropShown();
+        app->shown = Load::Failed;
+        app->shownError.xchg(error);
+        app->ui->trace(StringView(StringBuilder() << StringView(u8"cannot show ") << entry.name() << StringView(u8": ") << StringView(app->shownError)));
+        return;
+    }
+
+    ImTextureRef texture = app->ui->loadTexture(image->width(), image->height(), image->data());
+
+    app->dropShown();
+    app->tex = texture;
+    app->texW = image->width();
+    app->texH = image->height();
+    app->shown = Load::Ready;
+    app->shownError = Buffer();
+    app->ui->trace(StringView(StringBuilder() << StringView(u8"showing ") << entry.name() << StringView(u8" ") << (i64)app->texW << StringView(u8"x") << (i64)app->texH));
+}
+
+LoadThumb::LoadThumb(AcceptThumb* reply_)
+    : path(StringView(reply_->app->entries[reply_->index]->path))
+    , nameAt(reply_->app->entries[reply_->index]->nameAt)
+    , results(reply_->app->results)
+    , wake(reply_->app->ui)
+    , reply(reply_)
+{
+}
+
+void LoadThumb::run() {
+    Ui* notify = wake;
+
+    try {
+        reply->image = decodeFile(*reply->owner, path, nameAt, reply->side, reply->timing);
+    } catch (...) {
+        reply->error = Buffer(Exception::current());
+    }
+
+    // Publication transfers the entire pool, including this callback, to the UI.
+    results->enqueue(reply);
+    notify->requestFrame();
+}
+
+LoadShow::LoadShow(AcceptShow* reply_)
+    : path(StringView(reply_->app->entries[reply_->index]->path))
+    , nameAt(reply_->app->entries[reply_->index]->nameAt)
+    , side(reply_->app->maxSide)
+    , results(reply_->app->results)
+    , wake(reply_->app->ui)
+    , reply(reply_)
+{
+    const Entry& entry = *reply_->app->entries[reply_->index];
+
+    if (entry.thumb == Load::Ready && entry.thumbSide * 4 >= reply->thumbSide * 3) {
+        reply->thumbSide = 0;
+    }
+}
+
+void LoadShow::run() {
+    Ui* notify = wake;
+    struct stat st;
+
+    if (stat(path.cStr(), &st) == 0) {
+        reply->fileBytes = (i64)st.st_size;
+        struct tm tm;
+        char stamp[32];
+
+        localtime_r(&st.st_mtime, &tm);
+        if (strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M", &tm)) {
+            reply->fileModified = Buffer(StringView(stamp));
+        }
+    }
+
+    try {
+        reply->image = decodeFile(*reply->owner, path, nameAt, side, reply->timing);
+        if (reply->thumbSide) {
+            reply->thumb = shrinkToSide(*reply->owner, reply->image, reply->thumbSide);
+        }
+    } catch (...) {
+        reply->error = Buffer(Exception::current());
+    }
+
+    results->enqueue(reply);
+    notify->requestFrame();
+}
+
+void ViewApp::startWorkers(ObjPool& pool) {
+    jobs = Channel::create(&pool, workerCount);
+    results = Channel::create(&pool, workerCount);
+
+    for (size_t i = 0; i < workerCount; i++) {
+        Thread::create(&pool, *pool.make<Worker>(jobs));
+    }
+}
+
+void ViewApp::accept() {
+    void* item;
+
+    while (results->tryDequeue(&item)) {
+        --inFlight;
+        ((Runable*)item)->run();
+    }
+}
+
+void ViewApp::submit() {
+    if (showPending && inFlight < workerCount && !entries[current]->loading) {
+        ObjPool* owner = ObjPool::fromMemoryRaw();
+        auto* reply = owner->make<AcceptShow>(owner, this, current);
+        auto* load = owner->make<LoadShow>(reply);
+
+        entries[current]->loading = true;
+        showPending = false;
+        ++inFlight;
+        ui->trace(StringView(StringBuilder() << StringView(u8"loading image ") << entries[current]->name()));
+        jobs->enqueue(load);
+    }
+
+    // Missing visible images precede resolution upgrades. The list is rebuilt by drawGallery().
+    for (int pass = 0; pass < 2; pass++) {
+        for (size_t index : wantedThumbs) {
+            if (inFlight == workerCount) {
+                return;
+            }
+            Entry& entry = *entries[index];
+
+            if (entry.loading || entry.thumb == Load::Failed || (pass == 0) != (entry.thumb == Load::None)) {
+                continue;
+            }
+            if (entry.thumb == Load::Ready && entry.thumbSide * 4 >= thumbSide * 3) {
+                continue;
+            }
+            ObjPool* owner = ObjPool::fromMemoryRaw();
+            auto* reply = owner->make<AcceptThumb>(owner, this, index, thumbSide);
+            auto* load = owner->make<LoadThumb>(reply);
+
+            entry.loading = true;
+            ++inFlight;
+            ui->trace(StringView(StringBuilder() << StringView(u8"loading thumbnail ") << entry.name()));
+            jobs->enqueue(load);
+        }
+    }
+}
+
+void ViewApp::setThumb(size_t index, u32 side, Image& image) {
+    Entry& entry = *entries[index];
+
+    if (entry.thumbW && entry.thumbSide >= side) {
+        return;
+    }
+    ImTextureRef texture = ui->loadTexture(image.width(), image.height(), image.data());
+
+    if (entry.thumbW) {
+        ui->releaseTexture(entry.thumbTex);
+    }
+    entry.thumbTex = texture;
+    entry.thumbW = image.width();
+    entry.thumbH = image.height();
     entry.thumbSide = side;
     entry.thumb = Load::Ready;
     ui->trace(StringView(StringBuilder() << StringView(u8"thumbnail ") << entry.name()));
 }
 
 void ViewApp::show(size_t index) {
-    current = index;
-    ui->requestFrame();
-
-    Entry& entry = *entries[index];
-
-    ui->trace(StringView(StringBuilder() << StringView(u8"selected ") << entry.name()));
-    statFile();
-
-    ObjPool::Ref pool = ObjPool::fromMemory();
-    Image* image;
-
-    try {
-        image = decodeEntry(*pool, *ui, entry, maxSide);
-    } catch (...) {
-        dropShown();
-        shown = Load::Failed;
-        shownIndex = index;
-        shownError = Buffer(Exception::current());
-        ui->trace(StringView(StringBuilder() << StringView(u8"cannot show ") << entry.name() << StringView(u8": ") << StringView(shownError)));
-
+    if (index == current && showRequest != 0 && shown != Load::Failed) {
         return;
     }
-
-    dropShown();
-    tex = ui->loadTexture(image->width(), image->height(), image->data());
-    texW = image->width();
-    texH = image->height();
-    shown = Load::Ready;
-    shownIndex = index;
-    ui->trace(StringView(StringBuilder() << StringView(u8"showing ") << entry.name() << StringView(u8" ") << (i64)texW << StringView(u8"x") << (i64)texH));
+    current = index;
+    ++showRequest;
+    showPending = true;
+    fileBytes = -1;
+    fileModified = Buffer();
+    ui->requestFrame();
+    ui->trace(StringView(StringBuilder() << StringView(u8"selected ") << entries[index]->name()));
 }
 
 void ViewApp::dropShown() {
@@ -525,32 +771,10 @@ void ViewApp::keys() {
     }
 }
 
-void ViewApp::statFile() {
-    struct stat st;
-
-    fileBytes = -1;
-    fileModified = Buffer();
-
-    if (stat(entries[current]->path.cStr(), &st) != 0) {
-        return;
-    }
-
-    fileBytes = (i64)st.st_size;
-
-    struct tm tm;
-    char stamp[32];
-
-    localtime_r(&st.st_mtime, &tm);
-
-    if (strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M", &tm)) {
-        fileModified = Buffer(StringView(stamp));
-    }
-}
-
 void ViewApp::drawGallery() {
     float g = ui->px(gap);
     float innerW = max(1.f, ImGui::GetWindowWidth() - 2.f * g);
-    u32 side = thumbSideFor((innerW + 2.f * g) * (1.f + bulge));
+    thumbSide = thumbSideFor((innerW + 2.f * g) * (1.f + bulge));
     float viewH = ImGui::GetWindowHeight();
     size_t count = entries.length();
     ImVec2 origin = ImGui::GetCursorScreenPos();
@@ -616,8 +840,8 @@ void ViewApp::drawGallery() {
             lastBottom = bottom;
         }
 
-        if (inView && entry.thumb == Load::Ready && entry.thumbSide * 4 < side * 3) {
-            loadThumb(i, side);
+        if (inView) {
+            wantedThumbs.pushBack(i);
         }
 
         if (inView) {
@@ -657,7 +881,7 @@ void ViewApp::drawGallery() {
         ImVec2 p0(origin.x + g, origin.y + rowTop);
         ImVec2 p1(p0.x + innerW, p0.y + h);
 
-        if (entry.thumb != Load::Ready) {
+        if (!entry.thumbW) {
             const char* mark = entry.thumb == Load::Failed ? "?" : "\xe2\x80\xa6";
             ImVec2 extent = ImGui::CalcTextSize(mark);
 
@@ -923,6 +1147,7 @@ void ViewApp::drawCanvas() {
 }
 
 void ViewApp::draw() {
+    wantedThumbs.clear();
     ImGuiViewport* vp = ImGui::GetMainViewport();
 
     ImGui::SetNextWindowPos(vp->Pos);
@@ -963,7 +1188,7 @@ void ViewApp::draw() {
     ImGui::End();
 }
 
-int mainView(ObjPool& pool, Ui& ui, int argc, char** argv) {
+int mainView(ObjPool& pool, int argc, char** argv) {
     if (argc < 2) {
         sysE << StringView(u8"usage: im view <file|dir>...") << endL;
 
@@ -971,8 +1196,6 @@ int mainView(ObjPool& pool, Ui& ui, int argc, char** argv) {
     }
 
     ViewApp& app = *pool.make<ViewApp>();
-
-    app.ui = &ui;
 
     for (int i = 1; i < argc; i++) {
         StringView arg(argv[i]);
@@ -1024,6 +1247,9 @@ int mainView(ObjPool& pool, Ui& ui, int argc, char** argv) {
         }
     }
 
+    Ui& ui = *Ui::create(pool, StringView(u8"view"), app.entries.empty() ? UiOptions{480_d, 180_d} : UiOptions{windowWidth, windowHeight});
+
+    app.ui = &ui;
     ui.trace(StringView(StringBuilder() << StringView(u8"listed ") << (i64)app.entries.length()));
 
     if (app.entries.empty()) {
@@ -1032,33 +1258,28 @@ int mainView(ObjPool& pool, Ui& ui, int argc, char** argv) {
         return showError(ui, StringView(u8"no images to show"));
     }
 
-    readAll(app.entries);
-
-    ui.open({windowWidth, windowHeight});
     app.maxSide = ui.maxTextureSide();
-
-    u32 side = thumbSideFor(floorf(ui.px(windowWidth) * sideShare) * (1.f + bulge));
-
-    for (size_t i = 0; i < app.entries.length(); i++) {
-        app.loadThumb(i, side);
-    }
+    app.startWorkers(pool);
 
     app.show(app.current);
 
-    UiEvent event;
+    auto body = makeRunable([&] {
+        UiEvent event;
 
-    while (ui.next(event)) {
-        if (event.kind == UiEvent::Kind::Close) {
-            return 0;
+        while (ui.next(event)) {
+            if (event.kind == UiEvent::Kind::Close) {
+                return;
+            }
+
+            if (ImGui::IsKeyPressed(ImGuiKey_Escape) || ImGui::IsKeyPressed(ImGuiKey_Q)) {
+                return;
+            }
+
+            app.keys();
+            app.accept();
+            app.draw();
+            app.submit();
         }
-
-        if (ImGui::IsKeyPressed(ImGuiKey_Escape) || ImGui::IsKeyPressed(ImGuiKey_Q)) {
-            return 0;
-        }
-
-        app.keys();
-        app.draw();
-    }
-
-    return 0;
+    });
+    return ui.run(body);
 }

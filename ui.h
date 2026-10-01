@@ -9,6 +9,7 @@
 
 namespace stl {
     class ObjPool;
+    struct Runable;
 }
 
 struct Design {
@@ -42,9 +43,10 @@ struct Ui {
     virtual float px(Design d) = 0;
     ImVec2 px(Design w, Design h);
 
-    virtual void open(const UiOptions& options) = 0;
+    static Ui* create(stl::ObjPool& pool, stl::StringView name, const UiOptions& options = {});
+    virtual int run(stl::Runable& body) = 0;
     virtual bool next(UiEvent& event) = 0;
-    // May be called from a worker after open(); delivery is on the UI thread.
+    // May be called from a worker after create(); delivery is on the UI thread.
     virtual void requestFrame() = 0;
     virtual void requestFullscreen(bool on) = 0;
     virtual void requestResize(u32 width, u32 height) = 0;
@@ -61,5 +63,3 @@ struct Ui {
     virtual void trace(stl::StringView what) = 0;
     virtual void timing(stl::StringView line) = 0;
 };
-
-int runTool(stl::StringView name, int (*tool)(stl::ObjPool& pool, Ui& ui, int argc, char** argv), int argc, char** argv);

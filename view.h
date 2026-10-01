@@ -4,6 +4,4 @@ namespace stl {
     class ObjPool;
 }
 
-struct Ui;
-
-int mainView(stl::ObjPool& pool, Ui& ui, int argc, char** argv);
+int mainView(stl::ObjPool& pool, int argc, char** argv);

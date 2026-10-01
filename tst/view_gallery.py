@@ -1,4 +1,4 @@
-"""A long list: every thumbnail is decoded at the start, the wheel over
+"""A long list: visible thumbnails load on demand, the wheel over
 the list scrolls it, the selection moving to the end scrolls it there;
 a click on a row selects it."""
 
@@ -13,18 +13,23 @@ with Session("view_gallery", tool="view") as s:
     s.focus()
     s.said("listed 40")
     s.said("showing f00.png 8x8")
-    # every thumbnail at the start, in the list's order
-    for i in range(40):
+    for i in range(3):
         s.said(f"thumbnail f{i:02}.png")
+    assert "thumbnail f20.png" not in s.client_log(), "offscreen thumbnail loaded at startup"
     s.tap(KEY_END)
     s.said("selected f39.png")
     s.said("showing f39.png 8x8")
+    s.said("thumbnail f39.png")
     # the wheel over the list scrolls it (8x8 images make 192 px square
     # rows, 4 px apart)
     s.pointer(120, 300)
     s.scroll(-10)
     s.tap(KEY_HOME)
     s.said("selected f00.png")
+    s.said("showing f00.png", 2)
+    for i in range(1, 3):
+        assert s.client_log().count(f"im view: loading thumbnail f{i:02}.png") == 1, "cached thumbnail decoded again"
+    assert s.client_log().count("im view: thumbnail f00.png") == 1, "cached thumbnail uploaded again"
     # the third row spans 396..588 px
     s.click(100, 470)
     s.said("selected f02.png")

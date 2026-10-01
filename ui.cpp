@@ -346,9 +346,7 @@ namespace {
         ObjPool* pool = nullptr;
         plt::Platform* platform = nullptr;
         StringView name;
-        int (*main)(ObjPool& pool, Ui& ui, int argc, char** argv) = nullptr;
-        int argc = 0;
-        char** argv = nullptr;
+        Runable* body = nullptr;
         plt::Fiber* fiber = nullptr;
         int result = 1;
         Buffer error;
@@ -375,7 +373,8 @@ namespace {
 
         using Ui::px;
         float px(Design d) override;
-        void open(const UiOptions& options) override;
+        void init(const UiOptions& options);
+        int run(Runable& body) override;
         bool next(UiEvent& event) override;
         void requestFrame() override;
         void requestFullscreen(bool on) override;
@@ -540,15 +539,7 @@ float UiImpl::px(Design d) {
     return scaledPx(d, scale);
 }
 
-void UiImpl::open(const UiOptions& options) {
-    if (platform->scheduler()->current() == nullptr) {
-        fail(StringView(u8"a window opens from the tool's own fiber"));
-    }
-
-    if (window) {
-        fail(StringView(u8"one window per tool"));
-    }
-
+void UiImpl::init(const UiOptions& options) {
     int width = (int)px(options.width);
     int height = (int)px(options.height);
 
@@ -615,10 +606,6 @@ void UiImpl::requestFrame() {
 }
 
 bool UiImpl::next(UiEvent& event) {
-    if (!window) {
-        fail(StringView(u8"no window to take events from: open it first"));
-    }
-
     if (!shown) {
         shown = true;
         window->requestShow();
@@ -724,7 +711,8 @@ void UiImpl::timing(StringView line) {
 
 void UiImpl::run() {
     try {
-        result = main(*pool, *this, argc, argv);
+        body->run();
+        result = 0;
     } catch (...) {
         error = Buffer(Exception::current());
     }
@@ -865,32 +853,34 @@ void UiImpl::dropTextures() {
     textures.clear();
 }
 
-int runTool(StringView name, int (*main)(ObjPool& pool, Ui& ui, int argc, char** argv), int argc, char** argv) {
-    ObjPool::Ref pool = ObjPool::fromMemory();
-    UiImpl& ui = *pool->make<UiImpl>();
+Ui* Ui::create(ObjPool& pool, StringView name, const UiOptions& options) {
+    UiImpl& ui = *pool.make<UiImpl>();
 
-    ui.pool = &*pool;
-    ui.name = name;
-    ui.main = main;
-    ui.argc = argc;
-    ui.argv = argv;
+    ui.pool = &pool;
+    ui.name = pool.intern(name);
     ui.scale = scaleFromEnv();
     ui.traceFrames = getenv("IM_TRACE_FRAMES") != nullptr;
-    ui.platform = plt::Platform::create(*pool);
-    ui.fiber = ui.platform->scheduler()->create(*pool, ui, toolStack);
+    ui.platform = plt::Platform::create(pool);
+    ui.init(options);
+    return &ui;
+}
 
-    if (!ui.finished) {
-        ui.platform->run();
+int UiImpl::run(Runable& body_) {
+    body = &body_;
+    fiber = platform->scheduler()->create(*pool, *this, toolStack);
+
+    if (!finished) {
+        platform->run();
     }
 
-    if (!ui.finished && ui.window) {
-        ui.gone = true;
-        ui.fiber->wake();
+    if (!finished && window) {
+        gone = true;
+        fiber->wake();
     }
 
-    if (!ui.error.empty()) {
-        raiseError(StringView(ui.error));
+    if (!error.empty()) {
+        raiseError(StringView(error));
     }
 
-    return ui.result;
+    return result;
 }

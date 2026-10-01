@@ -1,4 +1,4 @@
-"""Three hundred files: every thumbnail is decoded at the start, and
+"""Three hundred files: visible thumbnails load on demand, and
 Down held walks the whole list by the client's own key repeat."""
 
 from session import KEY_DOWN, Session, write_png
@@ -20,4 +20,4 @@ with Session("view_many", tool="view") as s:
     s.said("showing f299.png 8x8")
     s.said("thumbnail f299.png")
     s.close()
-    print("OK: a long list walks by key repeat, and old thumbnails are dropped")
+    print("OK: a long list walks by key repeat and loads the final thumbnail")
