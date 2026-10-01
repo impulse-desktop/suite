@@ -133,9 +133,7 @@ namespace {
             fail(StringView(entry.error));
         }
 
-        ObjPool::Ref pool = ObjPool::fromMemory();
-
-        Decoder::create(*pool)->decode(StringView(entry.file), entry.name(), out);
+        decode(StringView(entry.file), entry.name(), out);
 
         u64 decoded = monotonicNowUs();
 
