@@ -46,12 +46,19 @@ library is not used, the vocabulary comes from
 
 ## Rendering
 
-`renderer.h` is the graphics boundary. `FrameDriver` drives ImGui and a
-`Renderer`; the renderer owns its device, presentation and resources. The
+`ui.h` is the tools’ window and event interface, shared by screenshot,
+view and ui. Its implementation in `ui.cpp` owns the frame loop and ImGui
+setup. `renderer.h` is the graphics boundary; the renderer owns its device,
+presentation and resources. The
 suite's Vulkan implementation, including dma-buf import, HDR pipelines,
 readback and GPU fault injection, lives in `renderer_vulkan.cpp`. No Vulkan
 types or backend calls enter the tools or public headers. The vendored
 ImGui backend and build-time GLSL shaders stay separate.
+
+`Ui::open` prepares the window; the first `Ui::next` shows it. This lets
+screenshot save directly without mapping a window, while still opening
+the error panel if saving fails. Resize requests use pixels and stay
+within 90% of the output size.
 
 Both renderers implement the same image operations: upload RGBA8 pixels,
 import a native shared image, draw it into an ImGui draw list, and read a

@@ -5,10 +5,11 @@ template that expands past the name limit, a directory that cannot be
 created because a regular file sits where it should be, and a disk that
 is full."""
 
+import errno
 import os
 import time
 
-from session import Session
+from session import Session, KEY_ENTER
 
 with Session("save_errors") as s:
     shot = s.capture_file("good.shot", 64, 48)
@@ -34,4 +35,12 @@ with Session("save_errors") as s:
     os.symlink("/dev/full", full / "disk.png")
     attempt("a full disk", IM_SHOT_DIR=str(full), IM_SHOT_NAME="disk")
     assert "saved" not in s.client_log(), "a write into a full disk was reported saved"
+
+    s.launch(str(shot), IM_SHOT_ACTION="editor", IM_SHOT_FORMAT="png",
+             IM_SHOT_DIR=str(full), IM_SHOT_NAME="disk")
+    s.focus()
+    s.tap(KEY_ENTER)
+    s.wait(lambda: f"(code {errno.ENOSPC}," in s.client_log(), "the editor's save error")
+    s.close()
+    assert "saved" not in s.client_log(), "an editor save into a full disk was reported saved"
     print("OK: a save that cannot write its file opens the tool on the error")

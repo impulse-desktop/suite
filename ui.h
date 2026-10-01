@@ -1,5 +1,7 @@
 #pragma once
 
+#include "renderer.h"
+
 #include <std/str/view.h>
 #include <std/sys/types.h>
 
@@ -24,6 +26,7 @@ constexpr Design operator""_d(unsigned long long v) {
 struct UiOptions {
     Design width = 640_d;
     Design height = 480_d;
+    RendererOptions renderer;
 };
 
 struct UiEvent {
@@ -42,6 +45,10 @@ struct Ui {
     virtual void open(const UiOptions& options) = 0;
     virtual bool next(UiEvent& event) = 0;
     virtual void requestFullscreen(bool on) = 0;
+    virtual void requestResize(u32 width, u32 height) = 0;
+
+    virtual RenderImage* uploadImage(stl::ObjPool& pool, u32 width, u32 height, const void* rgba, bool hdr) = 0;
+    virtual RenderImage* importImage(stl::ObjPool& pool, SharedImage& source, bool hdr) = 0;
 
     virtual ImTextureRef loadTexture(u32 width, u32 height, const void* rgba) = 0;
     virtual void releaseTexture(ImTextureRef texture) = 0;

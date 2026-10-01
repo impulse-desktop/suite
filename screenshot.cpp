@@ -2,10 +2,7 @@
 
 #include "ui.h"
 #include "util.h"
-#include "frame.h"
-#include "pooled.h"
 #include "renderer.h"
-#include "imgui_plt.h"
 #include "chaos_monkey.h"
 
 #include <std/sys/fd.h>
@@ -16,6 +13,7 @@
 #include <std/ios/out_fd.h>
 #include <std/lib/vector.h>
 #include <std/ios/fs_utils.h>
+#include <std/mem/obj_pool.h>
 
 #include <png.h>
 #include <math.h>
@@ -29,8 +27,6 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <jxl/encode.h>
-#include <plt/window.h>
-#include <plt/platform.h>
 #include <jxl/color_encoding.h>
 
 using namespace stl;
@@ -587,13 +583,13 @@ namespace {
 
     constexpr int kZoomMin = 10, kZoomMax = 400, kZoomStep = 10;
 
-    void initialWindowSize(const Image& img, const ImGuiStyle& style, float scale, int& w, int& h) {
+    void initialWindowSize(Ui& ui, const Image& img, int& w, int& h) {
         float zoom = (float)kInitialZoom / 100.f;
 
-        w = (int)ceilf(scaledPx(200_d, scale) + style.ItemSpacing.x + img.w * zoom);
+        w = (int)ceilf(ui.px(200_d) + ImGui::GetStyle().ItemSpacing.x + img.w * zoom);
         h = (int)ceilf(img.h * zoom);
 
-        int minH = (int)scaledPx(220_d, scale);
+        int minH = (int)ui.px(220_d);
 
         if (h < minH) {
             h = minH;
@@ -751,7 +747,7 @@ namespace {
         }
     }
 
-    int drawUi(float scale, plt::Window& window, const Image& img, RenderImage& tex, Viewer& v) {
+    int drawUi(Ui& ui, const Image& img, RenderImage& tex, Viewer& v) {
         ImGuiViewport* vp = ImGui::GetMainViewport();
 
         ImGui::SetNextWindowPos(vp->Pos);
@@ -763,7 +759,7 @@ namespace {
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
 
         ImGui::Begin("##shot", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoSavedSettings);
-        const float panelW = scaledPx(200_d, scale);
+        const float panelW = ui.px(200_d);
 
         if (ImGui::IsKeyPressed(ImGuiKey_Equal) || ImGui::IsKeyPressed(ImGuiKey_KeypadAdd)) {
             applyZoom(v, kZoomStep);
@@ -795,24 +791,12 @@ namespace {
         if (reset) {
             int w, h;
 
-            initialWindowSize(img, ImGui::GetStyle(), scale, w, h);
-            clampWindowSize(window.info(), w, h);
-            window.requestResize((u32)w, (u32)h);
+            initialWindowSize(ui, img, w, h);
+            ui.requestResize((u32)w, (u32)h);
         }
 
         return result;
     }
-
-    struct ScreenshotUi final: UiFrame {
-        float scale = 1.f;
-        plt::Window* window = nullptr;
-        const Image* img = nullptr;
-        RenderImage* tex = nullptr;
-        Viewer* view = nullptr;
-        const Buffer* error = nullptr;
-
-        int frame() override;
-    };
 
     void cropRegion(const Image& img, const Crop& c, int& x0, int& y0, int& x1, int& y1) {
         x0 = (int)(clampf(c.x0, 0, (float)img.w) + 0.5f);
@@ -866,18 +850,9 @@ bool Image::shared() const {
     return dmabuf;
 }
 
-int ScreenshotUi::frame() {
-    return error->empty() ? drawUi(scale, *window, *img, *tex, *view) : drawErrorPanel("screenshot"_sv, scale, sv(*error));
-}
-
-int mainScreenshot(StringView path) {
-    float scale = scaleFromEnv();
-    bool traceFrames = getenv("IM_TRACE_FRAMES") != nullptr;
-
-    FrameDriver driver;
-    ScreenshotUi ui;
+int mainScreenshot(ObjPool& pool, Ui& ui, int, char** argv) {
+    StringView path(argv[1]);
     Viewer view;
-    ObjPool::Ref shot = ObjPool::fromMemory();
     Image img;
     Buffer errText;
     bool loaded = false;
@@ -889,72 +864,41 @@ int mainScreenshot(StringView path) {
     };
 
     try {
-        loadImage(*shot, path, img);
+        loadImage(pool, path, img);
         loaded = true;
     } catch (...) {
         errText = Buffer(Exception::current());
     }
 
     RenderImage* tex = nullptr;
-    ChaosMonkey& chaos = *ChaosMonkey::create(*shot);
+    ChaosMonkey& chaos = *ChaosMonkey::create(pool);
 
-    plt::Platform& platform = *plt::Platform::create(*shot);
-    ImGuiPlt& imgui = *ImGuiPlt::create(*shot, scale, traceFrames);
-
-    int winW, winH;
-
+    UiOptions options{480_d, 180_d};
+    options.renderer.hdr = loaded && img.color.hdr;
+    options.renderer.sdrWhiteNits = (float)img.color.sdrWhiteNits;
+    options.renderer.shared = img.native;
+    ui.open(options);
+    ui.trace(options.renderer.hdr ? "surface HDR10 PQ"_sv : "surface sRGB"_sv);
     if (loaded) {
-        initialWindowSize(img, scaledStyle(scale), scale, winW, winH);
-    } else {
-        winW = (int)scaledPx(480_d, scale);
-        winH = (int)scaledPx(180_d, scale);
+        int w, h;
+        initialWindowSize(ui, img, w, h);
+        ui.requestResize((u32)w, (u32)h);
+        tex = img.shared() ? ui.importImage(pool, *img.native, img.color.hdr) : ui.uploadImage(pool, img.w, img.h, img.px, img.color.hdr);
     }
 
-    plt::WindowOptions options;
-
-    options.appId = "im-screenshot"_sv;
-    options.title = "im screenshot"_sv;
-    options.width = (u32)winW;
-    options.height = (u32)winH;
-    options.input = imgui.sink();
-    options.events = &driver;
-    options.frame = &driver;
-
-    plt::Window& window = *platform.createWindow(*shot, options);
-
-    plt::WindowInfo made = window.info();
-    int wantW = winW, wantH = winH;
-
-    clampWindowSize(made, wantW, wantH);
-
-    if (wantW != (int)made.width || wantH != (int)made.height) {
-        window.requestResize((u32)wantW, (u32)wantH);
-    }
-
-    RendererOptions wants;
-    wants.hdr = loaded && img.color.hdr;
-    wants.sdrWhiteNits = (float)img.color.sdrWhiteNits;
-    wants.shared = img.native;
-    setupImGuiContext(*shot, scale);
-    Renderer& renderer = *Renderer::create(*shot, window, wants);
-    traceTool("screenshot"_sv, wants.hdr ? "surface HDR10 PQ"_sv : "surface sRGB"_sv);
-    if (loaded) {
-        tex = img.shared() ? renderer.import(*shot, *img.native, img.color.hdr) : renderer.upload(*shot, img.w, img.h, img.px, img.color.hdr);
-    }
-
-    ui.scale = scale;
-    ui.window = &window;
-    ui.img = &img;
-    ui.tex = tex;
-    ui.view = &view;
-    ui.error = &errText;
-    driver.platform = &platform;
-    driver.window = &window;
-    driver.imgui = &imgui;
-    driver.renderer = &renderer;
-    driver.tool = "screenshot"_sv;
-    driver.traceFrames = traceFrames;
-    driver.ui = &ui;
+    auto edit = [&] {
+        UiEvent event;
+        while (ui.next(event)) {
+            if (event.kind == UiEvent::Kind::Close) {
+                return -1;
+            }
+            int result = errText.empty() ? drawUi(ui, img, *tex, view) : (ui.drawErrorPanel(sv(errText)) ? -1 : 0);
+            if (result) {
+                return result;
+            }
+        }
+        return -1;
+    };
 
     int action = 0;
     StringView configuredAction(getenv("IM_SHOT_ACTION") ? getenv("IM_SHOT_ACTION") : "editor");
@@ -969,7 +913,7 @@ int mainScreenshot(StringView path) {
         action = 1;
     } else {
         report();
-        action = runUi(driver);
+        action = edit();
     }
 
     if (loaded && action == 1) {
@@ -997,7 +941,7 @@ int mainScreenshot(StringView path) {
 
         if (!errText.empty()) {
             report();
-            runUi(driver);
+            edit();
         }
     }
 

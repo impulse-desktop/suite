@@ -1,5 +1,9 @@
 #pragma once
 
-#include <std/str/view.h>
+namespace stl {
+    class ObjPool;
+}
 
-int mainScreenshot(stl::StringView path);
+struct Ui;
+
+int mainScreenshot(stl::ObjPool& pool, Ui& ui, int argc, char** argv);

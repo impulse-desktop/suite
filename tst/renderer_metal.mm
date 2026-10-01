@@ -1,3 +1,4 @@
+#include "ui.h"
 #include "util.h"
 #include "renderer.h"
 
@@ -11,7 +12,7 @@
 
 using namespace stl;
 
-void checkMetalShared(ObjPool& pool, Renderer& renderer, bool hdr) {
+void checkMetalShared(ObjPool& pool, Ui& ui, bool hdr) {
     @autoreleasepool {
         NSDictionary* properties = @{
             (__bridge NSString*)kIOSurfaceWidth : @3,
@@ -37,7 +38,7 @@ void checkMetalShared(ObjPool& pool, Renderer& renderer, bool hdr) {
         }
         IOSurfaceUnlock(surface, 0, nullptr);
         SharedImage& shared = *SharedImage::create(pool, {}, (intptr_t)surface);
-        RenderImage& image = *renderer.import(pool, shared, hdr);
+        RenderImage& image = *ui.importImage(pool, shared, hdr);
         ImagePixels pixels;
         image.read(1, 1, 3, 2, pixels);
         const u16 expected[] = {hdr ? (u16)65535 : (u16)4369, hdr ? (u16)32800 : (u16)8738, hdr ? (u16)64 : (u16)13107};

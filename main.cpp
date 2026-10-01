@@ -33,7 +33,7 @@ namespace {
             return 2;
         }
 
-        return mainScreenshot(StringView(argv[1]));
+        return runTool("screenshot"_sv, mainScreenshot, argc, argv);
     }
 #endif
 
