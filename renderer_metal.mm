@@ -1,15 +1,17 @@
 #include "util.h"
-#include "frame.h"
 #include "pooled.h"
+#include "renderer.h"
 
 #include <std/mem/obj_pool.h>
 
-#include <imgui.h>
+#include <math.h>
+#include <string.h>
 #include <plt/window.h>
 #include <imgui_impl_metal.h>
 
 #import <Metal/Metal.h>
 #import <AppKit/AppKit.h>
+#import <IOSurface/IOSurface.h>
 #import <QuartzCore/CAMetalLayer.h>
 
 using namespace stl;
@@ -17,6 +19,32 @@ using namespace stl;
 namespace {
     constexpr u32 drawables = 3;
     constexpr u32 maxTextureSize = 16384;
+
+    struct MetalRenderer;
+
+    struct SurfaceImage final: SharedImage {
+        IOSurfaceRef surface = nullptr;
+        MTLPixelFormat format = MTLPixelFormatInvalid;
+        PixelLayout layout = PixelLayout::Rgba8;
+        ~SurfaceImage() noexcept;
+    };
+
+    struct MetalImage final: RenderImage {
+        MetalRenderer* renderer = nullptr;
+        id<MTLTexture> texture = nil;
+        PixelLayout layout = PixelLayout::Rgba8;
+        bool hdr = false;
+
+        ~MetalImage() noexcept;
+        void draw(ImDrawList& list, ImVec2 lo, ImVec2 hi) override;
+        void read(int x0, int y0, int x1, int y1, ImagePixels& out) override;
+    };
+
+    struct ImageDraw {
+        MetalImage* image;
+        ImVec2 lo;
+        ImVec2 hi;
+    };
 
     struct MetalRenderer final: Renderer {
         CAMetalLayer* layer = nil;
@@ -26,16 +54,315 @@ namespace {
         id<CAMetalDrawable> drawable = nil;
         MTLRenderPassDescriptor* pass = nil;
         id<MTLCommandBuffer> last = nil;
+        id<MTLRenderCommandEncoder> encoder = nil;
+        id<MTLRenderPipelineState> uiPipeline = nil;
+        id<MTLRenderPipelineState> imagePipeline = nil;
+        bool hdr = false;
+        float sdrWhiteNits = 203.f;
+        ImDrawData* drawing = nullptr;
 
         void beginFrame(u32 width, u32 height) override;
         bool endFrame(ImDrawData* draw) override;
         u32 maxTextureSide() override;
         u32 maxTextures() override;
+        RenderImage* upload(ObjPool& pool, u32 width, u32 height, const void* rgba, bool hdr) override;
+        RenderImage* import(ObjPool& pool, SharedImage& source, bool hdr) override;
+
+        void setupHdr();
+        void drawHdr(ImDrawData& draw);
+        bool clip(const ImDrawCmd& command);
+        void drawImage(const ImageDraw& image, const ImDrawCmd& command);
     };
+
+    static void checkCommand(id<MTLCommandBuffer> command) {
+        if (command.status == MTLCommandBufferStatusError) {
+            fail(sv(StringBuilder() << "metal command failed: "_sv << StringView(command.error.localizedDescription.UTF8String)));
+        }
+    }
+
+    static void drawImage(const ImDrawList*, const ImDrawCmd* command) {
+        const ImageDraw& draw = *(const ImageDraw*)command->UserCallbackData;
+        draw.image->renderer->drawImage(draw, *command);
+    }
+
+    static constexpr const char* hdrShaders = R"metal(
+#include <metal_stdlib>
+using namespace metal;
+struct Vertex {
+    float2 position [[attribute(0)]];
+    float2 uv [[attribute(1)]];
+    float4 color [[attribute(2)]];
+};
+struct Fragment {
+    float4 position [[position]];
+    float2 uv;
+    float4 color;
+};
+vertex Fragment uiVertex(Vertex v [[stage_in]], constant float4& transform [[buffer(1)]]) {
+    return {float4(v.position * transform.xy + transform.zw, 0, 1), v.uv, v.color};
+}
+float3 srgbToLinear(float3 c) {
+    return select(pow((c + 0.055) / 1.055, float3(2.4)), c / 12.92, c <= 0.04045);
+}
+float3 bt709ToBt2020(float3 c) {
+    return float3x3(float3(0.627404, 0.069097, 0.016391), float3(0.329283, 0.919540, 0.088013), float3(0.043313, 0.011362, 0.895595)) * c;
+}
+fragment float4 uiFragment(Fragment v [[stage_in]], texture2d<float> image [[texture(0)]]) {
+    constexpr sampler sampled(filter::linear, address::clamp_to_edge);
+    float4 pixel = image.sample(sampled, v.uv);
+    return float4(bt709ToBt2020(srgbToLinear(pixel.rgb) * srgbToLinear(v.color.rgb)), pixel.a * v.color.a);
+}
+vertex Fragment imageVertex(uint index [[vertex_id]], constant float4& transform [[buffer(0)]], constant float4& rect [[buffer(1)]]) {
+    const float2 corners[] = {float2(0,0), float2(1,0), float2(1,1), float2(0,0), float2(1,1), float2(0,1)};
+    float2 uv = corners[index];
+    return {float4(mix(rect.xy, rect.zw, uv) * transform.xy + transform.zw, 0, 1), uv, float4(1)};
+}
+fragment float4 imageFragment(Fragment v [[stage_in]], texture2d<float> image [[texture(0)]], constant float& white [[buffer(0)]]) {
+    constexpr sampler sampled(filter::linear, address::clamp_to_edge);
+    float3 p = pow(max(image.sample(sampled, v.uv).rgb, 0.0), float3(32.0 / 2523.0));
+    float3 nits = pow(max(p - 3424.0 / 4096.0, 0.0) / (2413.0 / 128.0 - 2392.0 / 128.0 * p), float3(16384.0 / 2610.0)) * 10000.0;
+    return float4(nits / white, 1);
+}
+)metal";
+}
+
+SurfaceImage::~SurfaceImage() noexcept {
+    if (surface) {
+        CFRelease(surface);
+    }
+}
+
+SharedImage* SharedImage::create(ObjPool& pool, StringView description, intptr_t handle) {
+    if (!description.empty() || !handle) {
+        fail("a shared Metal image needs an IOSurface handle"_sv);
+    }
+    SurfaceImage* source = pool.make<SurfaceImage>();
+    source->surface = (IOSurfaceRef)handle;
+    CFRetain(source->surface);
+    size_t width = IOSurfaceGetWidth(source->surface);
+    size_t height = IOSurfaceGetHeight(source->surface);
+    if (width > maxTextureSize || height > maxTextureSize || IOSurfaceGetPlaneCount(source->surface) > 1) {
+        fail("unsupported IOSurface dimensions"_sv);
+    }
+    source->width = (u32)width;
+    source->height = (u32)height;
+    checkImageSize(source->width, source->height, maxTextureSize);
+    switch (IOSurfaceGetPixelFormat(source->surface)) {
+        case 'RGBA': {
+            source->format = MTLPixelFormatRGBA8Unorm;
+            source->layout = PixelLayout::Rgba8;
+            break;
+        }
+        case 'BGRA': {
+            source->format = MTLPixelFormatBGRA8Unorm;
+            source->layout = PixelLayout::Bgra8;
+            break;
+        }
+        case 'l10r': {
+            source->format = MTLPixelFormatBGR10A2Unorm;
+            source->layout = PixelLayout::Bgr10A2;
+            break;
+        }
+        default: {
+            fail("unsupported IOSurface pixel format"_sv);
+        }
+    }
+    return source;
+}
+
+MetalImage::~MetalImage() noexcept {
+    [renderer->last waitUntilCompleted];
+}
+
+void MetalImage::draw(ImDrawList& list, ImVec2 lo, ImVec2 hi) {
+    if (hdr) {
+        ImageDraw draw{this, lo, hi};
+        list.AddCallback(drawImage, &draw, sizeof(draw));
+        list.AddCallback(ImDrawCallback_ResetRenderState, nullptr);
+    } else {
+        list.AddImage(ImTextureRef((ImTextureID)(__bridge void*)texture), lo, hi);
+    }
+}
+
+void MetalImage::read(int x0, int y0, int x1, int y1, ImagePixels& out) {
+    checkImageRegion((u32)texture.width, (u32)texture.height, x0, y0, x1, y1);
+    @autoreleasepool {
+        u32 width = (u32)(x1 - x0);
+        u32 height = (u32)(y1 - y0);
+        size_t stride = ((size_t)width * 4 + 255) & ~(size_t)255;
+        id<MTLBuffer> buffer = [renderer->device newBufferWithLength:stride * height options:MTLResourceStorageModeShared];
+        id<MTLCommandBuffer> command = [renderer->queue commandBuffer];
+        id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
+        if (!buffer || !command || !blit) {
+            fail("cannot allocate Metal readback"_sv);
+        }
+        [blit copyFromTexture:texture sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(x0, y0, 0) sourceSize:MTLSizeMake(width, height, 1) toBuffer:buffer destinationOffset:0 destinationBytesPerRow:stride destinationBytesPerImage:stride * height];
+        [blit endEncoding];
+        [command commit];
+        [command waitUntilCompleted];
+        checkCommand(command);
+        checkCommand(renderer->last);
+        unpackPixels(buffer.contents, width, height, stride, layout, out);
+    }
+}
+
+RenderImage* MetalRenderer::upload(ObjPool& pool, u32 width, u32 height, const void* rgba, bool imageHdr) {
+    checkImageSize(width, height, maxTextureSide());
+    if (!rgba || (imageHdr && !hdr)) {
+        fail("invalid renderer image source"_sv);
+    }
+    @autoreleasepool {
+        MetalImage* image = pool.make<MetalImage>();
+        image->renderer = this;
+        image->hdr = imageHdr;
+        MTLTextureDescriptor* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:width height:height mipmapped:NO];
+        descriptor.storageMode = MTLStorageModeManaged;
+        descriptor.usage = MTLTextureUsageShaderRead;
+        image->texture = [device newTextureWithDescriptor:descriptor];
+        if (!image->texture) {
+            fail("cannot allocate Metal image"_sv);
+        }
+        [image->texture replaceRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0 withBytes:rgba bytesPerRow:(size_t)width * 4];
+        return image;
+    }
+}
+
+RenderImage* MetalRenderer::import(ObjPool& pool, SharedImage& shared, bool imageHdr) {
+    SurfaceImage& source = static_cast<SurfaceImage&>(shared);
+    if (imageHdr && !hdr) {
+        fail("HDR image needs an HDR renderer"_sv);
+    }
+    @autoreleasepool {
+        MetalImage* image = pool.make<MetalImage>();
+        image->renderer = this;
+        image->hdr = imageHdr;
+        image->layout = source.layout;
+        MTLTextureDescriptor* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:source.format width:source.width height:source.height mipmapped:NO];
+        descriptor.storageMode = MTLStorageModeManaged;
+        descriptor.usage = MTLTextureUsageShaderRead;
+        image->texture = [device newTextureWithDescriptor:descriptor iosurface:source.surface plane:0];
+        if (!image->texture) {
+            fail("cannot import IOSurface into Metal"_sv);
+        }
+        return image;
+    }
+}
+
+void MetalRenderer::setupHdr() {
+    NSError* error = nil;
+    id<MTLLibrary> library = [device newLibraryWithSource:[NSString stringWithUTF8String:hdrShaders] options:nil error:&error];
+    if (!library) {
+        fail(sv(StringBuilder() << "Metal HDR shaders: "_sv << StringView(error.localizedDescription.UTF8String)));
+    }
+    MTLRenderPipelineDescriptor* descriptor = [[MTLRenderPipelineDescriptor alloc] init];
+    descriptor.vertexFunction = [library newFunctionWithName:@"uiVertex"];
+    descriptor.fragmentFunction = [library newFunctionWithName:@"uiFragment"];
+    MTLVertexDescriptor* vertex = [[MTLVertexDescriptor alloc] init];
+    vertex.attributes[0].format = MTLVertexFormatFloat2;
+    vertex.attributes[0].offset = offsetof(ImDrawVert, pos);
+    vertex.attributes[1].format = MTLVertexFormatFloat2;
+    vertex.attributes[1].offset = offsetof(ImDrawVert, uv);
+    vertex.attributes[2].format = MTLVertexFormatUChar4Normalized;
+    vertex.attributes[2].offset = offsetof(ImDrawVert, col);
+    vertex.layouts[0].stride = sizeof(ImDrawVert);
+    descriptor.vertexDescriptor = vertex;
+    MTLRenderPipelineColorAttachmentDescriptor* color = descriptor.colorAttachments[0];
+    color.pixelFormat = MTLPixelFormatRGBA16Float;
+    color.blendingEnabled = YES;
+    color.sourceRGBBlendFactor = MTLBlendFactorSourceAlpha;
+    color.destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+    color.sourceAlphaBlendFactor = MTLBlendFactorOne;
+    color.destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+    uiPipeline = [device newRenderPipelineStateWithDescriptor:descriptor error:&error];
+    if (!uiPipeline) {
+        fail(sv(StringBuilder() << "Metal HDR UI pipeline: "_sv << StringView(error.localizedDescription.UTF8String)));
+    }
+    descriptor.vertexDescriptor = nil;
+    descriptor.vertexFunction = [library newFunctionWithName:@"imageVertex"];
+    descriptor.fragmentFunction = [library newFunctionWithName:@"imageFragment"];
+    color.blendingEnabled = NO;
+    imagePipeline = [device newRenderPipelineStateWithDescriptor:descriptor error:&error];
+    if (!imagePipeline) {
+        fail(sv(StringBuilder() << "Metal HDR image pipeline: "_sv << StringView(error.localizedDescription.UTF8String)));
+    }
+}
+
+bool MetalRenderer::clip(const ImDrawCmd& command) {
+    ImVec2 offset = drawing->DisplayPos;
+    ImVec2 scale = drawing->FramebufferScale;
+    float x0 = fmaxf(0, (command.ClipRect.x - offset.x) * scale.x);
+    float y0 = fmaxf(0, (command.ClipRect.y - offset.y) * scale.y);
+    float x1 = fminf((float)drawable.texture.width, (command.ClipRect.z - offset.x) * scale.x);
+    float y1 = fminf((float)drawable.texture.height, (command.ClipRect.w - offset.y) * scale.y);
+    if (x1 <= x0 || y1 <= y0 || (NSUInteger)x1 <= (NSUInteger)x0 || (NSUInteger)y1 <= (NSUInteger)y0) {
+        return false;
+    }
+    [encoder setScissorRect:MTLScissorRect{(NSUInteger)x0, (NSUInteger)y0, (NSUInteger)x1 - (NSUInteger)x0, (NSUInteger)y1 - (NSUInteger)y0}];
+    return true;
+}
+
+void MetalRenderer::drawImage(const ImageDraw& image, const ImDrawCmd& command) {
+    if (!clip(command)) {
+        return;
+    }
+    float transform[] = {2.f / drawing->DisplaySize.x, -2.f / drawing->DisplaySize.y, -1.f - 2.f * drawing->DisplayPos.x / drawing->DisplaySize.x, 1.f + 2.f * drawing->DisplayPos.y / drawing->DisplaySize.y};
+    float rect[] = {image.lo.x, image.lo.y, image.hi.x, image.hi.y};
+    [encoder setRenderPipelineState:imagePipeline];
+    [encoder setVertexBytes:transform length:sizeof(transform) atIndex:0];
+    [encoder setVertexBytes:rect length:sizeof(rect) atIndex:1];
+    [encoder setFragmentBytes:&sdrWhiteNits length:sizeof(sdrWhiteNits) atIndex:0];
+    [encoder setFragmentTexture:image.image->texture atIndex:0];
+    [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+}
+
+void MetalRenderer::drawHdr(ImDrawData& draw) {
+    if (draw.Textures) {
+        for (ImTextureData* texture : *draw.Textures) {
+            if (texture->Status != ImTextureStatus_OK) {
+                ImGui_ImplMetal_UpdateTexture(texture);
+            }
+        }
+    }
+    if (draw.DisplaySize.x <= 0 || draw.DisplaySize.y <= 0) {
+        return;
+    }
+    drawing = &draw;
+    [encoder setCullMode:MTLCullModeNone];
+    [encoder setViewport:MTLViewport{0, 0, (double)drawable.texture.width, (double)drawable.texture.height, 0, 1}];
+    float transform[] = {2.f / draw.DisplaySize.x, -2.f / draw.DisplaySize.y, -1.f - 2.f * draw.DisplayPos.x / draw.DisplaySize.x, 1.f + 2.f * draw.DisplayPos.y / draw.DisplaySize.y};
+    for (const ImDrawList* list : draw.CmdLists) {
+        id<MTLBuffer> vertices = nil;
+        id<MTLBuffer> indices = nil;
+        if (list->VtxBuffer.Size && list->IdxBuffer.Size) {
+            vertices = [device newBufferWithBytes:list->VtxBuffer.Data length:(size_t)list->VtxBuffer.Size * sizeof(ImDrawVert) options:MTLResourceStorageModeShared];
+            indices = [device newBufferWithBytes:list->IdxBuffer.Data length:(size_t)list->IdxBuffer.Size * sizeof(ImDrawIdx) options:MTLResourceStorageModeShared];
+            if (!vertices || !indices) {
+                fail("cannot allocate Metal HDR draw buffers"_sv);
+            }
+        }
+        for (const ImDrawCmd& command : list->CmdBuffer) {
+            if (command.UserCallback) {
+                if (command.UserCallback != ImDrawCallback_ResetRenderState) {
+                    command.UserCallback(list, &command);
+                }
+                continue;
+            }
+            if (!command.ElemCount || !clip(command)) {
+                continue;
+            }
+            [encoder setRenderPipelineState:uiPipeline];
+            [encoder setVertexBuffer:vertices offset:command.VtxOffset * sizeof(ImDrawVert) atIndex:0];
+            [encoder setVertexBytes:transform length:sizeof(transform) atIndex:1];
+            [encoder setFragmentTexture:(__bridge id<MTLTexture>)(void*)(uintptr_t)command.GetTexID() atIndex:0];
+            [encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:command.ElemCount indexType:sizeof(ImDrawIdx) == 2 ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32 indexBuffer:indices indexBufferOffset:command.IdxOffset * sizeof(ImDrawIdx)];
+        }
+    }
+    drawing = nullptr;
 }
 
 void MetalRenderer::beginFrame(u32 width, u32 height) {
     @autoreleasepool {
+        checkCommand(last);
         layer.drawableSize = CGSizeMake(width, height);
         layer.presentsWithTransaction = window.inLiveResize;
         drawable = [layer nextDrawable];
@@ -50,12 +377,22 @@ void MetalRenderer::beginFrame(u32 width, u32 height) {
 
 bool MetalRenderer::endFrame(ImDrawData* draw) {
     @autoreleasepool {
+        if (!drawable) {
+            pass = nil;
+            return false;
+        }
         id<MTLCommandBuffer> command = [queue commandBuffer];
-        id<MTLRenderCommandEncoder> encoder = [command renderCommandEncoderWithDescriptor:pass];
-
-        ImGui_ImplMetal_RenderDrawData(draw, command, encoder);
+        encoder = [command renderCommandEncoderWithDescriptor:pass];
+        if (!command || !encoder) {
+            fail("cannot begin Metal frame"_sv);
+        }
+        if (hdr) {
+            drawHdr(*draw);
+        } else {
+            ImGui_ImplMetal_RenderDrawData(draw, command, encoder);
+        }
         [encoder endEncoding];
-
+        encoder = nil;
         if (layer.presentsWithTransaction) {
             [command commit];
             [command waitUntilScheduled];
@@ -64,12 +401,10 @@ bool MetalRenderer::endFrame(ImDrawData* draw) {
             [command presentDrawable:drawable];
             [command commit];
         }
-
         last = command;
         drawable = nil;
         pass = nil;
     }
-
     return true;
 }
 
@@ -81,39 +416,50 @@ u32 MetalRenderer::maxTextures() {
     return 0xffffffffu;
 }
 
-Renderer* Renderer::create(ObjPool& pool, plt::Window& window) {
+Renderer* Renderer::create(ObjPool& pool, plt::Window& window, const RendererOptions& options) {
+    if (!(options.sdrWhiteNits > 0.f) || options.sdrWhiteNits > 10000.f) {
+        fail("invalid SDR white level"_sv);
+    }
     plt::RenderContext context = window.renderContext();
     MetalRenderer* renderer = pool.make<MetalRenderer>();
-
     renderer->layer = (__bridge CAMetalLayer*)context.connection;
     renderer->window = (__bridge NSWindow*)context.window;
     renderer->device = MTLCreateSystemDefaultDevice();
-
+    renderer->hdr = options.hdr;
+    renderer->sdrWhiteNits = options.sdrWhiteNits;
     if (renderer->device == nil) {
         fail("no metal device"_sv);
     }
-
     renderer->queue = [renderer->device newCommandQueue];
-
+    if (!renderer->queue) {
+        fail("cannot create Metal queue"_sv);
+    }
     CAMetalLayer* layer = renderer->layer;
-
     layer.device = renderer->device;
-    layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+    layer.pixelFormat = options.hdr ? MTLPixelFormatRGBA16Float : MTLPixelFormatBGRA8Unorm;
     layer.framebufferOnly = YES;
     layer.maximumDrawableCount = drawables;
     layer.allowsNextDrawableTimeout = NO;
     layer.presentsWithTransaction = NO;
-
-    ImGui_ImplMetal_Init(renderer->device);
+    layer.wantsExtendedDynamicRangeContent = options.hdr;
+    CGColorSpaceRef color = CGColorSpaceCreateWithName(options.hdr ? kCGColorSpaceExtendedLinearITUR_2020 : kCGColorSpaceSRGB);
+    if (!color) {
+        fail("cannot create Metal color space"_sv);
+    }
+    layer.colorspace = color;
+    CGColorSpaceRelease(color);
+    if (options.hdr) {
+        renderer->setupHdr();
+    }
+    if (!ImGui_ImplMetal_Init(renderer->device)) {
+        fail("cannot initialize Metal ImGui backend"_sv);
+    }
     pooledGuard(pool, [renderer] {
         [renderer->last waitUntilCompleted];
         ImGui_ImplMetal_Shutdown();
     });
-
     ImGuiPlatformIO& pio = ImGui::GetPlatformIO();
-
     pio.Renderer_TextureMaxWidth = (int)maxTextureSize;
     pio.Renderer_TextureMaxHeight = (int)maxTextureSize;
-
     return renderer;
 }

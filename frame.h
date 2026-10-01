@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ui.h"
+#include "renderer.h"
 
 #include <std/str/view.h>
 #include <std/sys/types.h>
@@ -24,15 +25,6 @@ ImGuiStyle scaledStyle(float scale);
 void setupImGuiContext(stl::ObjPool& pool, float scale);
 int drawErrorPanel(stl::StringView tool, float scale, stl::StringView msg);
 void clampWindowSize(const plt::WindowInfo& info, int& w, int& h);
-
-struct Renderer {
-    virtual void beginFrame(u32 width, u32 height) = 0;
-    virtual bool endFrame(ImDrawData* draw) = 0;
-    virtual u32 maxTextureSide() = 0;
-    virtual u32 maxTextures() = 0;
-
-    static Renderer* create(stl::ObjPool& pool, plt::Window& window);
-};
 
 struct UiFrame {
     virtual int frame() = 0;

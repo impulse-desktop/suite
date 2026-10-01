@@ -1,0 +1,45 @@
+#include "renderer.h"
+
+#include "util.h"
+
+#include <string.h>
+
+void checkImageSize(u32 width, u32 height, u32 limit) {
+    if (!width || !height || width > limit || height > limit || (u64)width * height > (1u << 28)) {
+        fail("invalid renderer image size"_sv);
+    }
+}
+
+void checkImageRegion(u32 width, u32 height, int x0, int y0, int x1, int y1) {
+    if (x0 < 0 || y0 < 0 || x1 <= x0 || y1 <= y0 || (u32)x1 > width || (u32)y1 > height) {
+        fail("invalid renderer image region"_sv);
+    }
+}
+
+void unpackPixels(const void* data, u32 width, u32 height, size_t stride, PixelLayout layout, ImagePixels& out) {
+    out.width = width;
+    out.height = height;
+    out.rgba.zero((size_t)width * height * 4);
+    out.rgb16.zero((size_t)width * height * 3 * sizeof(u16));
+    u8* rgba = (u8*)out.rgba.mutData();
+    u16* rgb = (u16*)out.rgb16.mutData();
+    bool packed = layout == PixelLayout::Rgb10A2 || layout == PixelLayout::Bgr10A2;
+    bool reverse = layout == PixelLayout::Bgra8 || layout == PixelLayout::Bgr10A2;
+    u32 bits = packed ? 10 : 8;
+    u32 mask = (1u << bits) - 1;
+
+    for (u32 y = 0; y < height; y++) {
+        for (u32 x = 0; x < width; x++) {
+            u32 pixel;
+            memcpy(&pixel, (const u8*)data + y * stride + x * 4, 4);
+            size_t at = (size_t)y * width + x;
+            for (u32 c = 0; c < 3; c++) {
+                u32 channel = reverse ? 2 - c : c;
+                u32 value = (pixel >> (channel * bits)) & mask;
+                rgba[at * 4 + c] = (u8)((value * 255 + mask / 2) / mask);
+                rgb[at * 3 + c] = (u16)((value * 65535 + mask / 2) / mask);
+            }
+            rgba[at * 4 + 3] = packed ? (u8)((pixel >> 30) * 85) : (u8)(pixel >> 24);
+        }
+    }
+}

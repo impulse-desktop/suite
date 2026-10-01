@@ -6,9 +6,9 @@
 [![C++23](https://img.shields.io/badge/C%2B%2B-23-informational)](STYLE.md)
 
 The desktop tools of the impulse desktop, one binary: `im`. Each tool is a
-Wayland client drawn with the vendored ImGui on Vulkan, windowed through
-the vendored [plt](https://github.com/pg83/plt) platform layer, and lives
-in its own process.
+client drawn with the vendored ImGui, on Vulkan/Wayland on Linux or
+Metal/Cocoa on macOS, windowed through the vendored
+[plt](https://github.com/pg83/plt) platform layer, and lives in its own process.
 
 ```
 im screenshot fd:3      # the screenshot editor the compositor spawns
@@ -43,6 +43,38 @@ Single-threaded by design. Every object lives in a pool; the C++ standard
 library is not used, the vocabulary comes from
 [libstd](https://github.com/pg83/std). The codebase follows
 [STYLE.md](STYLE.md).
+
+## Rendering
+
+`renderer.h` is the graphics boundary. `FrameDriver` drives ImGui and a
+`Renderer`; the renderer owns its device, presentation and resources. The
+suite's Vulkan implementation, including dma-buf import, HDR pipelines,
+readback and GPU fault injection, lives in `renderer_vulkan.cpp`. No Vulkan
+types or backend calls enter the tools or public headers. The vendored
+ImGui backend and build-time GLSL shaders stay separate.
+
+Both renderers implement the same image operations: upload RGBA8 pixels,
+import a native shared image, draw it into an ImGui draw list, and read a
+rectangle back. Images belong to their supplied pool, which must be
+destroyed before the renderer's pool (or be the same pool). `read` returns
+RGBA8 and RGB16 in the source encoding; the latter preserves 10-bit source
+precision without passing through 8-bit pixels or display tone mapping.
+HDR images contain BT.2020/PQ samples and need an HDR renderer; ordinary
+images contain sRGB samples.
+
+`SharedImage::create` is the native input boundary: Linux takes the shell's
+layout description and a dma-buf fd, duplicates the descriptor and chooses
+the exporting GPU. Metal takes an empty description and an `IOSurfaceRef`
+cast to `intptr_t`, retains the surface, and supports RGBA8, BGRA8 and
+`l10r` packed 10-bit sources. The producer must finish writing before the
+image is imported or read. Screenshot's UI, crop and encoders use only
+these image operations.
+
+HDR rendering blends the image and UI in linear BT.2020. Vulkan encodes the
+result into a PQ swapchain; Metal presents RGBA16Float through an extended
+linear BT.2020 CoreAnimation layer with EDR enabled. Both use the configured
+SDR white level. The Metal HDR shaders and draw submission are local to its
+renderer; the upstream ImGui backend is unchanged.
 
 ## Building
 
@@ -91,6 +123,15 @@ IX_PATH=$PWD/dev/ix:{builtin} ix run set/suite/darwin -- sh -c \
 ./build test                      # every scenario, under its own headless Sway
 ./build test -Dfilter='save_*'    # some of them
 ```
+
+`./build renderer_test` builds a renderer contract check at
+`.build/e2e/renderer_test`. It checks upload, cropped readback, channel
+precision, bounds and drawing. The Linux scenario `renderer_pixels` runs
+it under Sway. On a Mac, run it directly, then with `--hdr` to exercise
+HDR shader compilation and submission; both modes also import and read an
+IOSurface. `--pixels` checks pixel conversion without a window or GPU.
+Cross-compilation checks the Metal host code, but executing its shaders
+and checking EDR output require a Mac.
 
 Each scenario in `tst/` runs `im_test` as a client of an isolated
 headless Sway (drawn by pixman), drives it through virtual input devices

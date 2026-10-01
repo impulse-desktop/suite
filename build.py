@@ -202,7 +202,7 @@ decode = library(
 
 
 # Linux builds every tool over Vulkan; macOS the runtime's tools over Metal
-wayland_only = ["gpu.cpp", "renderer_vulkan.cpp", "screenshot.cpp", "color.cpp", "chaos_monkey.cpp"]
+wayland_only = ["renderer_vulkan.cpp", "screenshot.cpp", "color.cpp", "chaos_monkey.cpp"]
 im_sources = [path for path in build.glob("$(S)/*.cpp") if not (darwin and os.path.basename(path) in wayland_only)]
 if darwin:
     im_sources.append("$(S)/renderer_metal.mm")
@@ -232,6 +232,14 @@ im_test = program(
     srcs=im_sources,
     cppflags=["-DIM_FOR_TESTS=1"],
     cflags=[*warning_flags, "-fno-omit-frame-pointer"],
+    deps=im_deps,
+)
+
+renderer_test = program(
+    name="renderer_test",
+    output="$(B)/e2e/renderer_test",
+    srcs=["$(S)/tst/renderer.cpp", "$(S)/renderer.cpp", "$(S)/frame.cpp", "$(S)/imgui_plt.cpp", "$(S)/util.cpp", *(["$(S)/renderer_metal.mm", "$(S)/tst/renderer_metal.mm"] if darwin else ["$(S)/renderer_vulkan.cpp"])],
+    cflags=warning_flags,
     deps=im_deps,
 )
 
@@ -307,7 +315,7 @@ if not darwin:
         srcs=["$(S)/tst/device_uuid.cpp"],
         deps=[vulkan],
     )
-    helpers = [devices, jxl_dump, device_uuid]
+    helpers = [devices, jxl_dump, device_uuid, renderer_test]
 
     # -Dshard=K/N splits the scenarios into N slices by a hash of the name, so
     # CI jobs can run them side by side; the slice a scenario falls in does not

@@ -1,11 +1,11 @@
 #include "screenshot.h"
 
 #include "ui.h"
-#include "gpu.h"
 #include "util.h"
 #include "color.h"
 #include "frame.h"
 #include "pooled.h"
+#include "renderer.h"
 #include "imgui_plt.h"
 #include "chaos_monkey.h"
 
@@ -32,7 +32,6 @@
 #include <jxl/encode.h>
 #include <plt/window.h>
 #include <plt/platform.h>
-#include <imgui_impl_vulkan.h>
 #include <jxl/color_encoding.h>
 
 using namespace stl;
@@ -43,12 +42,7 @@ namespace {
         u32 w = 0, h = 0;
         const u8* px = nullptr;
         int dmaFd = -1;
-        u32 format = 0;
-        u32 offset = 0;
-        u32 stride = 0;
-        u64 modifier = 0;
-        u64 allocationSize = 0;
-        u8 deviceUuid[VK_UUID_SIZE] = {};
+        SharedImage* native = nullptr;
         bool dmabuf = false;
         OutputColorState color;
         Buffer rgb16;
@@ -56,62 +50,19 @@ namespace {
         bool shared() const;
     };
 
-    void readTexture(Gpu& gpu, const Image& img, const Texture& tex, int x0, int y0, int x1, int y1, Image& out);
-
     constexpr u32 kMagic = 0x31574d49u;
 
-    bool parseShared(StringView spec, Image& img) {
-        u64 values[7] = {};
-        size_t pos = 0;
-
-        for (int i = 0; i < 7; i++) {
-            size_t begin = pos;
-
-            while (pos < spec.length() && spec[pos] >= '0' && spec[pos] <= '9') {
-                u64 digit = (u64)(spec[pos] - '0');
-
-                if (values[i] > (UINT64_MAX - digit) / 10) {
-                    return false;
-                }
-
-                values[i] = values[i] * 10 + digit;
-                pos++;
-            }
-
-            if (pos == begin || pos >= spec.length() || spec[pos] != ':') {
-                return false;
-            }
-
-            pos++;
-        }
-
-        if (spec.length() - pos != 2 * VK_UUID_SIZE) {
-            return false;
-        }
-
-        for (size_t i = 0; i < 2 * VK_UUID_SIZE; i++) {
-            char c = spec[pos + i];
-            int nibble = c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : -1;
-
-            if (nibble < 0) {
-                return false;
-            }
-
-            img.deviceUuid[i / 2] = (u8)(img.deviceUuid[i / 2] << 4 | nibble);
-        }
-
-        img.w = (u32)values[0];
-        img.h = (u32)values[1];
-        img.format = (u32)values[2];
-        img.offset = (u32)values[3];
-        img.stride = (u32)values[4];
-        img.modifier = values[5];
-        img.allocationSize = values[6];
-
-        return img.w && img.h && img.stride && img.allocationSize;
+    void readTexture(RenderImage& texture, int x0, int y0, int x1, int y1, Image& out) {
+        ImagePixels pixels;
+        texture.read(x0, y0, x1, y1, pixels);
+        out.w = pixels.width;
+        out.h = pixels.height;
+        out.file.xchg(pixels.rgba);
+        out.rgb16.xchg(pixels.rgb16);
+        out.px = (const u8*)out.file.data();
     }
 
-    void loadImage(StringView path, Image& img) {
+    void loadImage(ObjPool& pool, StringView path, Image& img) {
         bool inherited = path == "fd:3"_sv;
         Buffer p(inherited ? "/proc/self/fd/3"_sv : path);
 
@@ -141,16 +92,15 @@ namespace {
         }
 
         if (const char* spec = getenv("IM_SHOT_DMABUF")) {
-            if (!parseShared(StringView(spec), img)) {
-                fail("bad shared screenshot metadata"_sv);
-            }
-
             img.dmaFd = inherited ? fcntl(3, F_DUPFD_CLOEXEC, 0) : open(p.cStr(), O_RDONLY | O_CLOEXEC);
 
             if (img.dmaFd < 0) {
                 fail(sv(StringBuilder() << "cannot take the shared screenshot fd: "_sv << StringView(strerror(errno))));
             }
 
+            img.native = SharedImage::create(pool, StringView(spec), img.dmaFd);
+            img.w = img.native->width;
+            img.h = img.native->height;
             img.dmabuf = true;
 
             return;
@@ -377,11 +327,11 @@ namespace {
         JxlEncoderDestroy(enc);
     }
 
-    void encodeJxlSelection(Gpu& gpu, const Image& img, const Texture& tex, int x0, int y0, int x1, int y1, Buffer& out) {
+    void encodeJxlSelection(ChaosMonkey& chaos, const Image& img, RenderImage& tex, int x0, int y0, int x1, int y1, Buffer& out) {
         Image selected;
 
         if (img.shared()) {
-            readTexture(gpu, img, tex, x0, y0, x1, y1, selected);
+            readTexture(tex, x0, y0, x1, y1, selected);
         } else {
             selected.w = (u32)(x1 - x0);
             selected.h = (u32)(y1 - y0);
@@ -401,7 +351,7 @@ namespace {
         }
 
         selected.color = img.color;
-        encodeJxlPixels(*gpu.chaos, selected, (const u16*)selected.rgb16.data(), selected.w, selected.h, out);
+        encodeJxlPixels(chaos, selected, (const u16*)selected.rgb16.data(), selected.w, selected.h, out);
     }
 
     Buffer destPath() {
@@ -448,250 +398,18 @@ namespace {
         return Buffer(sv(StringBuilder() << sv(dir) << "/"_sv << StringView(stamp) << extension));
     }
 
-    void importTexture(Gpu& gpu, Image& img, Texture& tex) {
-        VkSubresourceLayout plane = {};
-
-        plane.offset = img.offset;
-        plane.rowPitch = img.stride;
-
-        VkImageDrmFormatModifierExplicitCreateInfoEXT modifier = {};
-
-        modifier.sType = VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT;
-        modifier.drmFormatModifier = img.modifier;
-        modifier.drmFormatModifierPlaneCount = 1;
-        modifier.pPlaneLayouts = &plane;
-
-        VkExternalMemoryImageCreateInfo external = {};
-
-        external.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
-        external.pNext = &modifier;
-        external.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
-
-        VkImageCreateInfo ici = {};
-
-        ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-        ici.pNext = &external;
-        ici.imageType = VK_IMAGE_TYPE_2D;
-        ici.format = (VkFormat)img.format;
-        ici.extent = {img.w, img.h, 1};
-        ici.mipLevels = 1;
-        ici.arrayLayers = 1;
-        ici.samples = VK_SAMPLE_COUNT_1_BIT;
-        ici.tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
-        ici.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-        ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        gpu.vkc(vkCreateImage(gpu.device, &ici, gpu.alloc, &tex.image));
-
-        VkMemoryRequirements req = {};
-
-        vkGetImageMemoryRequirements(gpu.device, tex.image, &req);
-
-        auto getFdProps = (PFN_vkGetMemoryFdPropertiesKHR)vkGetDeviceProcAddr(gpu.device, "vkGetMemoryFdPropertiesKHR");
-        VkMemoryFdPropertiesKHR fdProps{VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR};
-
-        if (!getFdProps || getFdProps(gpu.device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT, img.dmaFd, &fdProps) != VK_SUCCESS) {
-            fail("cannot query shared screenshot memory"_sv);
-        }
-
-        u32 memoryTypes = req.memoryTypeBits & fdProps.memoryTypeBits;
-
-        if (!memoryTypes) {
-            fail("shared screenshot memory is incompatible"_sv);
-        }
-
-        VkMemoryDedicatedAllocateInfo dedicated{VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO};
-
-        dedicated.image = tex.image;
-
-        VkImportMemoryFdInfoKHR import{VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR};
-
-        import.pNext = &dedicated;
-        import.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
-        import.fd = img.dmaFd;
-
-        VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-
-        mai.pNext = &import;
-        mai.allocationSize = img.allocationSize;
-        mai.memoryTypeIndex = gpu.findMemoryType(memoryTypes, 0);
-        gpu.vkc(vkAllocateMemory(gpu.device, &mai, gpu.alloc, &tex.memory));
-        img.dmaFd = -1;
-        gpu.vkc(vkBindImageMemory(gpu.device, tex.image, tex.memory, 0));
-
-        VkCommandPool pool = VK_NULL_HANDLE;
-        VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
-
-        pci.queueFamilyIndex = gpu.queueFamily;
-        pci.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
-        gpu.vkc(vkCreateCommandPool(gpu.device, &pci, gpu.alloc, &pool));
-
-        VkCommandBuffer cmd = VK_NULL_HANDLE;
-        VkCommandBufferAllocateInfo cai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-
-        cai.commandPool = pool;
-        cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        cai.commandBufferCount = 1;
-        gpu.vkc(vkAllocateCommandBuffers(gpu.device, &cai, &cmd));
-
-        VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-
-        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        gpu.vkc(vkBeginCommandBuffer(cmd, &begin));
-
-        VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-
-        barrier.srcAccessMask = 0;
-        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        barrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
-        barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL;
-        barrier.dstQueueFamilyIndex = gpu.queueFamily;
-        barrier.image = tex.image;
-        barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
-        gpu.vkc(vkEndCommandBuffer(cmd));
-
-        VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-
-        submit.commandBufferCount = 1;
-        submit.pCommandBuffers = &cmd;
-        gpu.vkc(vkQueueSubmit(gpu.queue, 1, &submit, VK_NULL_HANDLE));
-        gpu.vkc(vkQueueWaitIdle(gpu.queue));
-        vkDestroyCommandPool(gpu.device, pool, gpu.alloc);
-        gpu.finishTexture((VkFormat)img.format, tex);
-    }
-
-    void readTexture(Gpu& gpu, const Image& img, const Texture& tex, int x0, int y0, int x1, int y1, Image& out) {
-        out.w = (u32)(x1 - x0);
-        out.h = (u32)(y1 - y0);
-
-        VkDeviceSize bytes = (VkDeviceSize)out.w * out.h * sizeof(u32);
-        VkBuffer buffer = VK_NULL_HANDLE;
-        VkDeviceMemory memory = VK_NULL_HANDLE;
-        VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-
-        bci.size = bytes;
-        bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-        gpu.vkc(vkCreateBuffer(gpu.device, &bci, gpu.alloc, &buffer));
-
-        VkMemoryRequirements req = {};
-
-        vkGetBufferMemoryRequirements(gpu.device, buffer, &req);
-
-        VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-
-        mai.allocationSize = req.size;
-        mai.memoryTypeIndex = gpu.findMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-        gpu.vkc(vkAllocateMemory(gpu.device, &mai, gpu.alloc, &memory));
-        gpu.vkc(vkBindBufferMemory(gpu.device, buffer, memory, 0));
-
-        VkCommandPool pool = VK_NULL_HANDLE;
-        VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
-
-        pci.queueFamilyIndex = gpu.queueFamily;
-        pci.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
-        gpu.vkc(vkCreateCommandPool(gpu.device, &pci, gpu.alloc, &pool));
-
-        VkCommandBuffer cmd = VK_NULL_HANDLE;
-        VkCommandBufferAllocateInfo cai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-
-        cai.commandPool = pool;
-        cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        cai.commandBufferCount = 1;
-        gpu.vkc(vkAllocateCommandBuffers(gpu.device, &cai, &cmd));
-
-        VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-
-        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        gpu.vkc(vkBeginCommandBuffer(cmd, &begin));
-
-        VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-
-        barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-        barrier.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.image = tex.image;
-        barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
-
-        VkBufferImageCopy copy = {};
-
-        copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-        copy.imageOffset = {x0, y0, 0};
-        copy.imageExtent = {out.w, out.h, 1};
-        vkCmdCopyImageToBuffer(cmd, tex.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buffer, 1, &copy);
-
-        barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-        barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
-        gpu.vkc(vkEndCommandBuffer(cmd));
-
-        VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-
-        submit.commandBufferCount = 1;
-        submit.pCommandBuffers = &cmd;
-        gpu.vkc(vkQueueSubmit(gpu.queue, 1, &submit, VK_NULL_HANDLE));
-        gpu.vkc(vkQueueWaitIdle(gpu.queue));
-
-        void* map = nullptr;
-
-        gpu.vkc(vkMapMemory(gpu.device, memory, 0, bytes, 0, &map));
-        out.file.zero((size_t)bytes);
-        out.rgb16.zero((size_t)out.w * out.h * 3 * sizeof(u16));
-
-        const u32* source = (const u32*)map;
-        u32* dest = (u32*)out.file.mutData();
-        u16* rgb16 = (u16*)out.rgb16.mutData();
-
-        for (size_t i = 0; i < (size_t)out.w * out.h; i++) {
-            u32 pixel = source[i];
-
-            if ((VkFormat)img.format == VK_FORMAT_A2R10G10B10_UNORM_PACK32) {
-                u32 r = (pixel >> 20) & 1023;
-                u32 g = (pixel >> 10) & 1023;
-                u32 b = pixel & 1023;
-
-                dest[i] = unorm10To8(r) | (unorm10To8(g) << 8) | (unorm10To8(b) << 16) | 0xff000000u;
-                rgb16[i * 3 + 0] = (u16)((r * 65535 + 511) / 1023);
-                rgb16[i * 3 + 1] = (u16)((g * 65535 + 511) / 1023);
-                rgb16[i * 3 + 2] = (u16)((b * 65535 + 511) / 1023);
-            } else {
-                u32 r = (pixel >> 16) & 0xff;
-                u32 g = (pixel >> 8) & 0xff;
-                u32 b = pixel & 0xff;
-
-                dest[i] = r | (g << 8) | (b << 16) | 0xff000000u;
-                rgb16[i * 3 + 0] = (u16)(r * 257);
-                rgb16[i * 3 + 1] = (u16)(g * 257);
-                rgb16[i * 3 + 2] = (u16)(b * 257);
-            }
-        }
-
-        out.px = (const u8*)out.file.data();
-        vkUnmapMemory(gpu.device, memory);
-        vkDestroyCommandPool(gpu.device, pool, gpu.alloc);
-        vkDestroyBuffer(gpu.device, buffer, gpu.alloc);
-        vkFreeMemory(gpu.device, memory, gpu.alloc);
-    }
-
-    void encodeSelection(Gpu& gpu, const Image& img, const Texture& tex, int x0, int y0, int x1, int y1, Buffer& png) {
+    void encodeSelection(ChaosMonkey& chaos, const Image& img, RenderImage& tex, int x0, int y0, int x1, int y1, Buffer& png) {
         if (!img.shared()) {
-            encodePng(*gpu.chaos, img, x0, y0, x1, y1, png);
+            encodePng(chaos, img, x0, y0, x1, y1, png);
 
             return;
         }
 
         Image pixels;
 
-        readTexture(gpu, img, tex, x0, y0, x1, y1, pixels);
+        readTexture(tex, x0, y0, x1, y1, pixels);
         pixels.color = img.color;
-        encodePng(*gpu.chaos, pixels, 0, 0, (int)pixels.w, (int)pixels.h, png);
+        encodePng(chaos, pixels, 0, 0, (int)pixels.w, (int)pixels.h, png);
     }
 
     struct Crop {
@@ -800,7 +518,7 @@ namespace {
         ImGui::TextDisabled("scroll / +-: zoom, 0: reset");
     }
 
-    void drawCanvas(Gpu& gpu, const Image& img, Texture& tex, Viewer& v, bool reset) {
+    void drawCanvas(const Image& img, RenderImage& tex, Viewer& v, bool reset) {
         Crop& crop = v.crop;
 
         if (reset) {
@@ -816,14 +534,7 @@ namespace {
 
         ImDrawList* dl = ImGui::GetWindowDrawList();
 
-        if (img.color.hdr) {
-            ImageDraw draw{&gpu, tex.imageSet, origin.x, origin.y, origin.x + content.x, origin.y + content.y, (float)img.color.sdrWhiteNits};
-
-            dl->AddCallback(drawImage, &draw, sizeof(draw));
-            dl->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
-        } else {
-            dl->AddImage((ImTextureID)tex.ds, origin, ImVec2(origin.x + content.x, origin.y + content.y));
-        }
+        tex.draw(*dl, origin, ImVec2(origin.x + content.x, origin.y + content.y));
 
         ImVec2 mouse = ImGui::GetIO().MousePos;
         auto toScreen = [&](float px, float py) {
@@ -883,7 +594,7 @@ namespace {
         }
     }
 
-    int drawUi(Gpu& gpu, float scale, plt::Window& window, const Image& img, Texture& tex, Viewer& v) {
+    int drawUi(float scale, plt::Window& window, const Image& img, RenderImage& tex, Viewer& v) {
         ImGuiViewport* vp = ImGui::GetMainViewport();
 
         ImGui::SetNextWindowPos(vp->Pos);
@@ -917,7 +628,7 @@ namespace {
         ImGui::SameLine();
 
         ImGui::BeginChild("canvas", ImVec2(0, 0), ImGuiChildFlags_Borders, ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-        drawCanvas(gpu, img, tex, v, reset);
+        drawCanvas(img, tex, v, reset);
 
         ImGui::EndChild();
 
@@ -936,11 +647,10 @@ namespace {
     }
 
     struct ScreenshotUi final: UiFrame {
-        Gpu* gpu = nullptr;
         float scale = 1.f;
         plt::Window* window = nullptr;
         const Image* img = nullptr;
-        Texture* tex = nullptr;
+        RenderImage* tex = nullptr;
         Viewer* view = nullptr;
         const Buffer* error = nullptr;
 
@@ -976,13 +686,17 @@ bool Image::shared() const {
 }
 
 int ScreenshotUi::frame() {
-    return error->empty() ? drawUi(*gpu, scale, *window, *img, *tex, *view) : drawErrorPanel("screenshot"_sv, scale, sv(*error));
+    return error->empty() ? drawUi(scale, *window, *img, *tex, *view) : drawErrorPanel("screenshot"_sv, scale, sv(*error));
 }
 
 int mainScreenshot(StringView path) {
     float scale = scaleFromEnv();
     bool traceFrames = getenv("IM_TRACE_FRAMES") != nullptr;
 
+    FrameDriver driver;
+    ScreenshotUi ui;
+    Viewer view;
+    ObjPool::Ref shot = ObjPool::fromMemory();
     Image img;
     Buffer errText;
     bool loaded = false;
@@ -994,17 +708,13 @@ int mainScreenshot(StringView path) {
     };
 
     try {
-        loadImage(path, img);
+        loadImage(*shot, path, img);
         loaded = true;
     } catch (...) {
         errText = Buffer(Exception::current());
     }
 
-    Texture tex;
-    FrameDriver driver;
-    ScreenshotUi ui;
-    ObjPool::Ref shot = ObjPool::fromMemory();
-
+    RenderImage* tex = nullptr;
     ChaosMonkey& chaos = *ChaosMonkey::create(*shot);
 
     plt::Platform& platform = *plt::Platform::create(*shot);
@@ -1040,57 +750,21 @@ int mainScreenshot(StringView path) {
         window.requestResize((u32)wantW, (u32)wantH);
     }
 
-    GpuOptions wants;
-
-    wants.chaos = &chaos;
+    RendererOptions wants;
     wants.hdr = loaded && img.color.hdr;
-    wants.sharedBuffer = img.shared();
-    wants.deviceUuid = img.deviceUuid;
-
-    Gpu& gpu = *Gpu::create(*shot, wants);
-    VkSurfaceKHR surface = gpu.createSurface(window);
-
-    plt::WindowInfo bootInfo = window.info();
-    int fbw = (int)bootInfo.width;
-    int fbh = (int)bootInfo.height;
-
-    gpu.setupWindow(*shot, surface, fbw, fbh, loaded && img.color.hdr);
-    traceTool("screenshot"_sv, loaded && img.color.hdr ? "surface HDR10 PQ"_sv : "surface sRGB"_sv);
-
-    if (loaded && img.color.hdr) {
-        gpu.setupLinearHdr(*shot, (u32)fbw, (u32)fbh);
-    }
-
+    wants.sdrWhiteNits = (float)img.color.sdrWhiteNits;
+    wants.shared = img.native;
     setupImGuiContext(*shot, scale);
-    gpu.setupBackend(*shot, loaded && img.color.hdr);
-
-    Renderer& renderer = *createVulkanRenderer(*shot, gpu);
-
-    gpu.sdrWhiteNits = (float)img.color.sdrWhiteNits;
-
+    Renderer& renderer = *Renderer::create(*shot, window, wants);
+    traceTool("screenshot"_sv, wants.hdr ? "surface HDR10 PQ"_sv : "surface sRGB"_sv);
     if (loaded) {
-        pooledGuard(*shot, [g = &gpu, t = &tex] {
-            g->destroyTexture(*t);
-        });
-
-        if (img.shared()) {
-            importTexture(gpu, img, tex);
-        } else {
-            gpu.uploadTexture(img.w, img.h, img.px, tex);
-        }
+        tex = img.shared() ? renderer.import(*shot, *img.native, img.color.hdr) : renderer.upload(*shot, img.w, img.h, img.px, img.color.hdr);
     }
 
-    pooledGuard(*shot, [g = &gpu] {
-        vkDeviceWaitIdle(g->device);
-    });
-
-    Viewer view;
-
-    ui.gpu = &gpu;
     ui.scale = scale;
     ui.window = &window;
     ui.img = &img;
-    ui.tex = &tex;
+    ui.tex = tex;
     ui.view = &view;
     ui.error = &errText;
     driver.platform = &platform;
@@ -1127,9 +801,9 @@ int mainScreenshot(StringView path) {
             bool png = getenv("IM_SHOT_FORMAT") && StringView(getenv("IM_SHOT_FORMAT")) == "png"_sv;
 
             if (png) {
-                encodeSelection(gpu, img, tex, x0, y0, x1, y1, encoded);
+                encodeSelection(chaos, img, *tex, x0, y0, x1, y1, encoded);
             } else {
-                encodeJxlSelection(gpu, img, tex, x0, y0, x1, y1, encoded);
+                encodeJxlSelection(chaos, img, *tex, x0, y0, x1, y1, encoded);
             }
 
             Buffer dest = destPath();
