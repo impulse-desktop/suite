@@ -29,13 +29,15 @@ using namespace stl;
 // decoded from the bytes in memory when it is selected, on the one
 // thread, a fresh sandboxed ImageMagick every time.
 //
-// The viewer is a tool like any: it opens its window and loops over its
-// events, drawing with ImGui on each frame; its textures it loads and
-// releases through the window. What is behind the window is not its
-// business.
+// The viewer is a tool like any: it reads what it shows, opens its
+// window, decodes, and loops over the window's events, drawing with ImGui
+// on each frame; its textures it loads and releases through the window.
 
 namespace {
-    // each side panel takes this share of the window's width
+    // the window asked for, and the share of its width each side panel
+    // takes
+    constexpr Design windowWidth = 1000_d;
+    constexpr Design windowHeight = 700_d;
     constexpr float sideShare = .2f;
     // the gutter around thumbnails, a design length
     constexpr Design gap = 4_d;
@@ -348,11 +350,6 @@ namespace {
         bool panel = true;
         bool info = true;
         bool scrollToCurrent = true;
-        // the directory decoded, on the first frame: at the list's width
-        // then
-        bool started = false;
-        // q or Escape: the viewer is done
-        bool quit = false;
         // the list's scroll the frame trace last reported
         float tracedScrollY = 0.f;
         // the shown file's own facts, for the properties panel: its size
@@ -360,10 +357,6 @@ namespace {
         i64 fileBytes = -1;
         Buffer fileModified;
 
-        // a frame's ImGui calls; false once the viewer is done
-        bool frame();
-
-        void start();
         void loadThumb(size_t index, u32 side);
         void show(size_t index);
         void dropShown();
@@ -372,24 +365,11 @@ namespace {
         void fitView();
         void statFile();
         void keys();
+        void draw();
         void drawGallery();
         void drawCanvas();
         void drawInfo();
     };
-
-    // every thumbnail, at the width the list has on the first frame, and
-    // the selected image: all before that frame is shown
-    void ViewApp::start() {
-        float listW = floorf(ImGui::GetMainViewport()->Size.x * sideShare);
-        u32 side = thumbSideFor(listW * (1.f + bulge));
-
-        for (size_t i = 0; i < entries.length(); i++) {
-            loadThumb(i, side);
-        }
-
-        show(current);
-        started = true;
-    }
 
     // a row's thumbnail, decoded from the bytes in memory and loaded now,
     // kept by the row's index
@@ -488,10 +468,6 @@ namespace {
 
     void ViewApp::keys() {
         ImGuiIO& io = ImGui::GetIO();
-
-        if (ImGui::IsKeyPressed(ImGuiKey_Escape) || ImGui::IsKeyPressed(ImGuiKey_Q)) {
-            quit = true;
-        }
 
         if (ImGui::IsKeyPressed(ImGuiKey_RightArrow) || ImGui::IsKeyPressed(ImGuiKey_DownArrow) || ImGui::IsKeyPressed(ImGuiKey_Space) || ImGui::IsKeyPressed(ImGuiKey_PageDown) || ImGui::IsKeyPressed(ImGuiKey_J) || ImGui::IsKeyPressed(ImGuiKey_N)) {
             step(1);
@@ -990,14 +966,9 @@ namespace {
         }
     }
 
-    bool ViewApp::frame() {
+    // the window: the list, the canvas, the properties
+    void ViewApp::draw() {
         ImGuiViewport* vp = ImGui::GetMainViewport();
-
-        if (!started) {
-            start();
-        }
-
-        keys();
 
         ImGui::SetNextWindowPos(vp->Pos);
         ImGui::SetNextWindowSize(vp->Size);
@@ -1043,8 +1014,6 @@ namespace {
         }
 
         ImGui::End();
-
-        return !quit;
     }
 
     // the error panel in place of the viewer, when there is nothing to show
@@ -1052,9 +1021,9 @@ namespace {
         Ui& ui = Ui::open({480_d, 180_d});
         UiEvent event;
 
-        while (ui.next(event) && event.kind == UiEvent::Kind::Frame) {
-            if (drawErrorPanel(message) != 0) {
-                break;
+        while (ui.next(event)) {
+            if (event.kind == UiEvent::Kind::Close || drawErrorPanel(message) != 0) {
+                return 0;
             }
         }
 
@@ -1137,17 +1106,35 @@ int mainView(int argc, char** argv) {
     // the disk after
     readAll(app.entries);
 
-    // a texture per thumbnail, and the shown image's
-    Ui& ui = Ui::open({1000_d, 700_d, (u32)app.entries.length() + 1});
-    UiEvent event;
+    Ui& ui = Ui::open({windowWidth, windowHeight});
 
     app.ui = &ui;
     app.maxSide = ui.maxTextureSide();
 
-    while (ui.next(event) && event.kind == UiEvent::Kind::Frame) {
-        if (!app.frame()) {
-            break;
+    // every thumbnail at the list's width in the window asked for, and the
+    // selected image, before the first frame; a list grown much wider
+    // decodes its rows again as it draws them
+    u32 side = thumbSideFor(floorf(px(windowWidth) * sideShare) * (1.f + bulge));
+
+    for (size_t i = 0; i < app.entries.length(); i++) {
+        app.loadThumb(i, side);
+    }
+
+    app.show(app.current);
+
+    UiEvent event;
+
+    while (ui.next(event)) {
+        if (event.kind == UiEvent::Kind::Close) {
+            return 0;
         }
+
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape) || ImGui::IsKeyPressed(ImGuiKey_Q)) {
+            return 0;
+        }
+
+        app.keys();
+        app.draw();
     }
 
     return 0;

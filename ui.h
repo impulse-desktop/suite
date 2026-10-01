@@ -51,10 +51,6 @@ struct UiOptions {
     // the screen's limits are the runtime's business
     Design width = 640_d;
     Design height = 480_d;
-    // the most textures the tool holds at once: the device sets aside
-    // room for them up front, and as much again for those released and
-    // not yet torn down
-    u32 textures = 0;
 };
 
 struct UiEvent {
@@ -76,7 +72,8 @@ struct Ui {
 
     // a texture of these pixels, RGBA, 8 bits a channel, rows tightly
     // packed; copied, the tool's own may go at once. ImGui draws it by
-    // the reference (AddImage), from the next frame shown on
+    // the reference (AddImage), from the next frame shown on. Throws past
+    // the textures a window holds at once
     virtual ImTextureRef loadTexture(u32 width, u32 height, const void* rgba) = 0;
     // the tool is done with it: from here the reference is dead to the
     // tool, the device's copy goes once no frame in flight reads it

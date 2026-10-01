@@ -92,9 +92,10 @@ namespace {
     constexpr size_t toolStack = 16u << 20;
     // the texture side when the renderer names no limit
     constexpr u32 defaultTextureSide = 4096;
-    // released textures linger the frames in flight: room for a few
-    // released frame after frame over the tool's own budget
-    constexpr u32 releasedSlack = 16;
+    // the textures a window holds at once, the released ones still in
+    // flight among them: the renderer's descriptor pool is made for them
+    // up front
+    constexpr u32 maxTextures = 16384;
 
     struct ToolWindow;
 
@@ -190,6 +191,10 @@ namespace {
 
     // registered with ImGui, the renderer makes it on the next render
     ImTextureRef ToolWindow::loadTexture(u32 width, u32 height, const void* rgba) {
+        if (textures.length() >= maxTextures) {
+            fail(sv(StringBuilder() << "more than "_sv << (i64)maxTextures << " textures at once"_sv));
+        }
+
         ImTextureData* texture = IM_NEW(ImTextureData)();
 
         texture->Create(ImTextureFormat_RGBA32, (int)width, (int)height);
@@ -361,7 +366,7 @@ Ui& Ui::open(const UiOptions& options) {
 
     VulkanWants wants;
 
-    wants.textures = 2 * options.textures + releasedSlack;
+    wants.textures = maxTextures;
     // the textures are ImGui's objects and the tool's: they go after
     // ImGui and its renderer, which tear their device side down
     pooledGuard(pool, [w = &self] {
