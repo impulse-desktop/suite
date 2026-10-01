@@ -21,8 +21,10 @@
 #include <string.h>
 #include <plt/fiber.h>
 #include <plt/input.h>
+#include <plt/poller.h>
 #include <plt/window.h>
 #include <plt/platform.h>
+#include <plt/loop_wake.h>
 #include <imgui_internal.h>
 
 using namespace stl;
@@ -262,6 +264,8 @@ namespace {
         IMGUI_CHECKVERSION();
         ImGui::CreateContext();
         pooledGuard(pool, [] {
+            ImGui::GetIO().BackendPlatformUserData = nullptr;
+            ImGui::GetPlatformIO().ClearPlatformHandlers();
             ImGui::DestroyContext();
         });
 
@@ -326,6 +330,18 @@ namespace {
 
     constexpr size_t toolStack = 16u << 20;
 
+    struct UiImpl;
+
+    struct CallFrame final: public plt::TimerCallback {
+        UiImpl* ui;
+
+        explicit CallFrame(UiImpl* ui);
+        ~CallFrame() noexcept;
+        void ready() override;
+        void schedule(float seconds);
+        void cancel();
+    };
+
     struct UiImpl final: Ui, plt::InputSink, plt::FrameCallback, plt::WindowEvents, Runable {
         ObjPool* pool = nullptr;
         plt::Platform* platform = nullptr;
@@ -340,6 +356,7 @@ namespace {
         float scale = 1.f;
         bool traceFrames = false;
         plt::Window* window = nullptr;
+        plt::LoopWake* wake = nullptr;
         Renderer* renderer = nullptr;
         u64 frameUs = 0;
         plt::PointerIcon icon = plt::PointerIcon::Text;
@@ -360,6 +377,7 @@ namespace {
         float px(Design d) override;
         void open(const UiOptions& options) override;
         bool next(UiEvent& event) override;
+        void requestFrame() override;
         void requestFullscreen(bool on) override;
         void requestResize(u32 width, u32 height) override;
         RenderImage* uploadImage(ObjPool& pool, u32 width, u32 height, const void* rgba, bool hdr) override;
@@ -392,6 +410,33 @@ namespace {
     };
 }
 
+CallFrame::CallFrame(UiImpl* ui_)
+    : ui(ui_)
+{
+}
+
+CallFrame::~CallFrame() noexcept {
+    cancel();
+}
+
+void CallFrame::ready() {
+    if (!ui->finished && !ui->gone) {
+        ui->window->requestFrame();
+    }
+}
+
+void CallFrame::schedule(float seconds) {
+    // ImGui measures the delay from the current frame's time.
+    u64 delay = (u64)ceil((double)seconds * 1e6);
+    u64 elapsed = monotonicNowUs() - ui->frameUs;
+
+    ui->platform->poller()->timeout(delay > elapsed ? delay - elapsed : 0, *this);
+}
+
+void CallFrame::cancel() {
+    ui->platform->poller()->cancel(*this);
+}
+
 void UiImpl::beginInputFrame() {
     ImGuiIO& io = ImGui::GetIO();
     plt::WindowInfo info = window->info();
@@ -403,26 +448,19 @@ void UiImpl::beginInputFrame() {
 
     io.DeltaTime = frameUs && now > frameUs ? (float)(now - frameUs) / 1e6f : 1.f / 60.f;
     frameUs = now;
-
-    plt::PointerIcon wanted = pointerIcon(ImGui::GetMouseCursor());
-
-    if (wanted != icon) {
-        icon = wanted;
-        window->requestPointerIcon(icon);
-    }
 }
 
 void UiImpl::key(const plt::KeyInput& input) {
+    if (input.action == plt::InputAction::Repeat) {
+        return;
+    }
+
     ImGuiIO& io = ImGui::GetIO();
 
     io.AddKeyEvent(ImGuiMod_Ctrl, (input.modifiers & plt::InputControl) != 0);
     io.AddKeyEvent(ImGuiMod_Shift, (input.modifiers & plt::InputShift) != 0);
     io.AddKeyEvent(ImGuiMod_Alt, (input.modifiers & plt::InputAlt) != 0);
     io.AddKeyEvent(ImGuiMod_Super, (input.modifiers & plt::InputSuper) != 0);
-
-    if (input.action == plt::InputAction::Repeat) {
-        return;
-    }
 
     ImGuiKey key = input.key == plt::InputKey::Printable ? printableKey(input.baseCodepoint) : namedKeys[(int)input.key];
 
@@ -543,6 +581,37 @@ void UiImpl::open(const UiOptions& options) {
     renderer = Renderer::create(*pool, shown, options.renderer);
 
     window = &shown;
+    wake = platform->createLoopWake(*pool, *pool->make<CallFrame>(this));
+    ImGui::GetIO().BackendPlatformUserData = this;
+    ImGuiPlatformIO& pio = ImGui::GetPlatformIO();
+
+    pio.Platform_RequestFrameFn = [](ImGuiContext* ctx) {
+        ((UiImpl*)ctx->IO.BackendPlatformUserData)->window->requestFrame();
+    };
+    pio.Platform_CreateFrameTimerFn = [](ImGuiContext* ctx) -> void* {
+        UiImpl* ui = (UiImpl*)ctx->IO.BackendPlatformUserData;
+
+        return ui->pool->make<CallFrame>(ui);
+    };
+    pio.Platform_ScheduleFrameTimerFn = [](void* timer, float seconds) {
+        ((CallFrame*)timer)->schedule(seconds);
+    };
+    pio.Platform_CancelFrameTimerFn = [](void* timer) {
+        ((CallFrame*)timer)->cancel();
+    };
+    pio.Platform_SetMouseCursorFn = [](ImGuiContext* ctx, ImGuiMouseCursor cursor) {
+        UiImpl* ui = (UiImpl*)ctx->IO.BackendPlatformUserData;
+        plt::PointerIcon wanted = pointerIcon(cursor);
+
+        if (wanted != ui->icon) {
+            ui->icon = wanted;
+            ui->window->requestPointerIcon(wanted);
+        }
+    };
+}
+
+void UiImpl::requestFrame() {
+    wake->signal();
 }
 
 bool UiImpl::next(UiEvent& event) {
@@ -628,6 +697,7 @@ void UiImpl::releaseTexture(ImTextureRef ref) {
     texture->WantDestroyNextFrame = true;
     texture->SetStatus(ImTextureStatus_WantDestroy);
     texture->UnusedFrames = 0;
+    window->requestFrame();
 }
 
 u32 UiImpl::maxTextureSide() {
@@ -664,6 +734,10 @@ void UiImpl::run() {
 }
 
 bool UiImpl::frame(const plt::WindowInfo& info) {
+    if (info.iconified) {
+        return false;
+    }
+
     u64 began = monotonicNowUs();
     u64 gap = frameBegan ? began - frameBegan : 0;
 
@@ -709,8 +783,6 @@ bool UiImpl::frame(const plt::WindowInfo& info) {
 
     if (action != 0) {
         platform->stop();
-    } else {
-        window->requestFrame();
     }
 
     return presented;
@@ -774,6 +846,7 @@ void UiImpl::tendTextures() {
 
         if (texture->Status == ImTextureStatus_WantDestroy) {
             texture->UnusedFrames++;
+            window->requestFrame();
         } else if (texture->Status == ImTextureStatus_OK && texture->Pixels) {
             texture->DestroyPixels();
         }

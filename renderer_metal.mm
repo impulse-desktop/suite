@@ -50,6 +50,7 @@ namespace {
     };
 
     struct MetalRenderer final: Renderer {
+        plt::Window* host = nullptr;
         CAMetalLayer* layer = nil;
         NSWindow* window = nil;
         id<MTLDevice> device = nil;
@@ -382,6 +383,9 @@ bool MetalRenderer::endFrame(ImDrawData* draw) {
     @autoreleasepool {
         if (!drawable) {
             pass = nil;
+            if (window.isVisible && !window.isMiniaturized && (window.occlusionState & NSWindowOcclusionStateVisible)) {
+                host->requestFrame();
+            }
             return false;
         }
         id<MTLCommandBuffer> command = [queue commandBuffer];
@@ -422,6 +426,7 @@ u32 MetalRenderer::maxTextures() {
 Renderer* createMetalRenderer(ObjPool& pool, plt::Window& window, const RendererOptions& options) {
     plt::RenderContext context = window.renderContext();
     MetalRenderer* renderer = pool.make<MetalRenderer>();
+    renderer->host = &window;
     renderer->layer = (__bridge CAMetalLayer*)context.connection;
     renderer->window = (__bridge NSWindow*)context.window;
     renderer->device = MTLCreateSystemDefaultDevice();

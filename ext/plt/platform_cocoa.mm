@@ -188,6 +188,11 @@ void cocoaWakeReady(CFMachPortRef port, void* message, CFIndex size, void* owner
     cocoaInvalidateImpl(self.owner);
 }
 
+- (void)windowDidChangeOcclusionState:(NSNotification*)notification {
+    (void)notification;
+    cocoaInvalidateImpl(self.owner);
+}
+
 - (void)windowDidBecomeKey:(NSNotification*)notification {
     (void)notification;
     cocoaFocusImpl(self.owner, true);

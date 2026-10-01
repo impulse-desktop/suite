@@ -101,6 +101,7 @@ namespace {
             image.draw(list, viewport->Pos, ImVec2(viewport->Pos.x + viewport->Size.x, viewport->Pos.y + viewport->Size.y));
             list.AddRectFilled(ImVec2(8, 8), ImVec2(32, 32), IM_COL32(255, 0, 0, 128));
             frames++;
+            ui.requestFrame();
         }
         image.read(0, 0, 3, 2, pixels);
         verify(!memcmp(pixels.rgba.data(), source, sizeof(source)));

@@ -400,6 +400,7 @@ void ViewApp::loadThumb(size_t index, u32 side) {
 
 void ViewApp::show(size_t index) {
     current = index;
+    ui->requestFrame();
 
     Entry& entry = *entries[index];
 
@@ -453,10 +454,12 @@ void ViewApp::step(long delta) {
 void ViewApp::setZoom(float value) {
     zoom = clampf(value, zoomMin, zoomMax);
     fit = false;
+    ui->requestFrame();
     ui->trace(StringView(StringBuilder() << StringView(u8"zoom ") << (i64)(zoom * 100.f + .5f)));
 }
 
 void ViewApp::fitView() {
+    ui->requestFrame();
     fit = true;
     panX = 0.f;
     panY = 0.f;
@@ -889,13 +892,6 @@ void ViewApp::drawCanvas() {
     panY = dh <= size.y ? 0.f : clampf(panY, (size.y - dh) / 2.f, (dh - size.y) / 2.f);
 
     ImVec2 centre(origin.x + size.x / 2.f + panX, origin.y + size.y / 2.f + panY);
-    ImVec2 p0(centre.x - dw / 2.f, centre.y - dh / 2.f);
-    ImVec2 p1(centre.x + dw / 2.f, centre.y + dh / 2.f);
-    const ImVec2 uv[4] = {ImVec2(0, 0), ImVec2(1, 0), ImVec2(1, 1), ImVec2(0, 1)};
-    int r = rotation;
-
-    dl->AddImageQuad(tex, p0, ImVec2(p1.x, p0.y), p1, ImVec2(p0.x, p1.y), uv[(4 - r) & 3], uv[(5 - r) & 3], uv[(6 - r) & 3], uv[(7 - r) & 3]);
-
     ImGuiIO& io = ImGui::GetIO();
 
     if (hovered && io.MouseWheel != 0.f) {
@@ -913,6 +909,17 @@ void ViewApp::drawCanvas() {
         panX += io.MouseDelta.x;
         panY += io.MouseDelta.y;
     }
+    dw = rw * zoom;
+    dh = rh * zoom;
+    panX = dw <= size.x ? 0.f : clampf(panX, (size.x - dw) / 2.f, (dw - size.x) / 2.f);
+    panY = dh <= size.y ? 0.f : clampf(panY, (size.y - dh) / 2.f, (dh - size.y) / 2.f);
+    centre = ImVec2(origin.x + size.x / 2.f + panX, origin.y + size.y / 2.f + panY);
+    ImVec2 p0(centre.x - dw / 2.f, centre.y - dh / 2.f);
+    ImVec2 p1(centre.x + dw / 2.f, centre.y + dh / 2.f);
+    const ImVec2 uv[4] = {ImVec2(0, 0), ImVec2(1, 0), ImVec2(1, 1), ImVec2(0, 1)};
+    int r = rotation;
+
+    dl->AddImageQuad(tex, p0, ImVec2(p1.x, p0.y), p1, ImVec2(p0.x, p1.y), uv[(4 - r) & 3], uv[(5 - r) & 3], uv[(6 - r) & 3], uv[(7 - r) & 3]);
 }
 
 void ViewApp::draw() {

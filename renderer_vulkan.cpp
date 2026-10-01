@@ -1577,6 +1577,7 @@ namespace {
     constexpr u32 maxTextureCount = 16384;
 
     struct VulkanRenderer final: Renderer {
+        plt::Window* window = nullptr;
         Gpu* gpu = nullptr;
         RenderImage* upload(ObjPool& pool, u32 width, u32 height, const void* rgba, bool hdr) override;
         RenderImage* import(ObjPool& pool, SharedImage& source, bool hdr) override;
@@ -1605,6 +1606,10 @@ void VulkanRenderer::beginFrame(u32 width, u32 height) {
 bool VulkanRenderer::endFrame(ImDrawData* draw) {
     gpu->frameRender(draw);
     gpu->framePresent();
+
+    if (gpu->rebuild) {
+        window->requestFrame();
+    }
 
     return !gpu->rebuild;
 }
@@ -2044,5 +2049,6 @@ Renderer* createVulkanRenderer(ObjPool& pool, plt::Window& window, const Rendere
     gpu.present.clear.color.float32[3] = 1.f;
     VulkanRenderer* renderer = pool.make<VulkanRenderer>();
     renderer->gpu = &gpu;
+    renderer->window = &window;
     return renderer;
 }

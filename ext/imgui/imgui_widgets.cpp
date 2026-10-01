@@ -579,6 +579,8 @@ bool ImGui::ButtonBehavior(const ImRect& bb, ImGuiID id, bool* out_hovered, bool
         {
             hovered = true;
             SetHoveredID(id);
+            if (g.HoveredIdTimer < DRAGDROP_HOLD_TO_OPEN_TIMER)
+                g.DragHoldTimer.Schedule(DRAGDROP_HOLD_TO_OPEN_TIMER - g.HoveredIdTimer);
             if (g.HoveredIdTimer - g.IO.DeltaTime <= DRAGDROP_HOLD_TO_OPEN_TIMER && g.HoveredIdTimer >= DRAGDROP_HOLD_TO_OPEN_TIMER)
             {
                 pressed = true;
@@ -689,6 +691,7 @@ bool ImGui::ButtonBehavior(const ImRect& bb, ImGuiID id, bool* out_hovered, bool
             const ImGuiKeyData* key2 = GetKeyData(ImGuiKey_Enter);
             const ImGuiKeyData* key3 = GetKeyData(ImGuiKey_NavGamepadActivate);
             const float t1 = ImMax(ImMax(key1->DownDuration, key2->DownDuration), key3->DownDuration);
+            RequestRepeatFrame(g.NavActivateTimer, t1, g.IO.KeyRepeatDelay, g.IO.KeyRepeatRate);
             nav_activated_by_inputs = CalcTypematicRepeatAmount(t1 - g.IO.DeltaTime, t1, g.IO.KeyRepeatDelay, g.IO.KeyRepeatRate) > 0;
         }
         if (nav_activated_by_code || nav_activated_by_inputs)
@@ -1784,6 +1787,8 @@ bool ImGui::SplitterBehavior(const ImRect& bb, ImGuiID id, ImGuiAxis axis, float
     if (hovered)
         g.LastItemData.StatusFlags |= ImGuiItemStatusFlags_HoveredRect; // for IsItemHovered(), because bb_interact is larger than bb
 
+    if (hovered && g.HoveredIdTimer < hover_visibility_delay)
+        g.HoverFeedbackTimer.Schedule(hover_visibility_delay - g.HoveredIdTimer);
     if (held || (hovered && g.HoveredIdPreviousFrame == id && g.HoveredIdTimer >= hover_visibility_delay))
         SetMouseCursor(axis == ImGuiAxis_Y ? ImGuiMouseCursor_ResizeNS : ImGuiMouseCursor_ResizeEW);
 
@@ -4502,6 +4507,7 @@ void ImGui::InputTextDeactivateHook(ImGuiID id)
     ImGuiInputTextState* state = &g.InputTextState;
     if (id == 0 || state->ID != id)
         return;
+    state->CursorTimer.Cancel();
     g.InputTextDeactivatedState.ID = state->ID;
     if (state->Flags & ImGuiInputTextFlags_ReadOnly)
     {
@@ -4707,6 +4713,9 @@ bool ImGui::InputTextEx(const char* label, const char* hint, char* buf, int buf_
 
     // We are only allowed to access the state if we are already the active widget.
     ImGuiInputTextState* state = GetInputTextState(id);
+    // Advance before processing input: a reset below starts at this frame, even after a long idle.
+    if (state)
+        state->CursorAnim += io.DeltaTime;
 
     if (g.LastItemData.ItemFlags & ImGuiItemFlags_ReadOnly)
         flags |= ImGuiInputTextFlags_ReadOnly;
@@ -5532,7 +5541,13 @@ bool ImGui::InputTextEx(const char* label, const char* hint, char* buf, int buf_
     // Render blinking cursor
     if (render_cursor)
     {
-        state->CursorAnim += io.DeltaTime;
+        if (g.IO.ConfigInputTextCursorBlink && g.ActiveId == id && !g.IO.AppFocusLost)
+        {
+            float phase = state->CursorAnim <= 0.0f ? state->CursorAnim : ImFmod(state->CursorAnim, 1.20f);
+            state->CursorTimer.Schedule((phase <= 0.80f ? 0.80f : 1.20f) - phase + 0.0001f);
+        }
+        else
+            state->CursorTimer.Cancel();
         bool cursor_is_visible = (!g.IO.ConfigInputTextCursorBlink) || (state->CursorAnim <= 0.0f) || ImFmod(state->CursorAnim, 1.20f) <= 0.80f;
         ImVec2 cursor_screen_pos = ImTrunc(draw_pos + cursor_offset - draw_scroll);
         ImRect cursor_screen_rect(cursor_screen_pos.x, cursor_screen_pos.y - g.FontSize + 0.5f, cursor_screen_pos.x + 1.0f, cursor_screen_pos.y - 1.5f);
@@ -9261,6 +9276,8 @@ bool ImGui::BeginMenuEx(const char* label, const char* icon, bool enabled)
             want_open = true;
         else if (!menu_is_open && hovered && g.HoveredIdTimer >= 0.30f && g.MouseStationaryTimer >= 0.30f) // Hover to open (timer fallback)
             want_open = true;
+        if (!menu_is_open && hovered && moving_toward_child_menu)
+            g.HoverFeedbackTimer.Schedule(ImMax(0.30f - g.HoveredIdTimer, 0.30f - g.MouseStationaryTimer));
         if (g.NavId == id && g.NavMoveDir == ImGuiDir_Right) // Nav-Right to open
         {
             want_open = want_open_nav_init = true;
@@ -9932,6 +9949,8 @@ static void ImGui::TabBarLayout(ImGuiTabBar* tab_bar)
         tab_bar->ScrollingSpeed = ImMax(tab_bar->ScrollingSpeed, ImFabs(tab_bar->ScrollingTarget - tab_bar->ScrollingAnim) / 0.3f);
         const bool teleport = (tab_bar->PrevFrameVisible + 1 < g.FrameCount) || (tab_bar->ScrollingTargetDistToVisibility > 10.0f * g.FontSize);
         tab_bar->ScrollingAnim = teleport ? tab_bar->ScrollingTarget : ImLinearSweep(tab_bar->ScrollingAnim, tab_bar->ScrollingTarget, g.IO.DeltaTime * tab_bar->ScrollingSpeed);
+        if (tab_bar->ScrollingAnim != tab_bar->ScrollingTarget)
+            RequestFrame();
     }
     else
     {
@@ -10081,6 +10100,8 @@ static void ImGui::TabBarScrollToTab(ImGuiTabBar* tab_bar, ImGuiID tab_id, ImGui
 void ImGui::TabBarQueueFocus(ImGuiTabBar* tab_bar, ImGuiTabItem* tab)
 {
     tab_bar->NextSelectedTabId = tab->ID;
+    if (tab_bar->SelectedTabId != tab->ID)
+        RequestFrame();
 }
 
 void ImGui::TabBarQueueFocus(ImGuiTabBar* tab_bar, const char* tab_name)
@@ -10088,6 +10109,8 @@ void ImGui::TabBarQueueFocus(ImGuiTabBar* tab_bar, const char* tab_name)
     IM_ASSERT((tab_bar->Flags & ImGuiTabBarFlags_DockNode) == 0); // Only supported for manual/explicit tab bars
     ImGuiID tab_id = TabBarCalcTabID(tab_bar, tab_name, NULL);
     tab_bar->NextSelectedTabId = tab_id;
+    if (tab_bar->SelectedTabId != tab_id)
+        RequestFrame();
 }
 
 void ImGui::TabBarQueueReorder(ImGuiTabBar* tab_bar, ImGuiTabItem* tab, int offset)
@@ -10096,6 +10119,7 @@ void ImGui::TabBarQueueReorder(ImGuiTabBar* tab_bar, ImGuiTabItem* tab, int offs
     IM_ASSERT(tab_bar->ReorderRequestTabId == 0);
     tab_bar->ReorderRequestTabId = tab->ID;
     tab_bar->ReorderRequestOffset = (ImS16)offset;
+    RequestFrame();
 }
 
 void ImGui::TabBarQueueReorderFromMousePos(ImGuiTabBar* tab_bar, ImGuiTabItem* src_tab, ImVec2 mouse_pos)

@@ -395,6 +395,7 @@ namespace ImGui
     IMGUI_API ImGuiPlatformIO& GetPlatformIO();                         // access the ImGuiPlatformIO structure (mostly hooks/functions to connect to platform/renderer and OS Clipboard, IME etc.)
     IMGUI_API ImGuiStyle&   GetStyle();                                 // access the Style structure (colors, sizes). Always use PushStyleColor(), PushStyleVar() to modify style mid-frame!
     IMGUI_API void          NewFrame();                                 // start a new Dear ImGui frame, you can submit any command from this point until Render()/EndFrame().
+    IMGUI_API void          RequestFrame();                             // Optional on-demand rendering: request another frame through the platform backend.
     IMGUI_API void          EndFrame();                                 // ends the Dear ImGui frame. automatically called by Render(). If you don't need to render data (skipping rendering) you may call EndFrame() without Render()... but you'll have wasted CPU already! If you don't need to render, better to not create any windows and not call NewFrame() at all!
     IMGUI_API void          Render();                                   // ends the Dear ImGui frame, finalize the draw data. You can then get call GetDrawData().
     IMGUI_API ImDrawData*   GetDrawData();                              // valid after Render() and until the next call to NewFrame(). Call ImGui_ImplXXXX_RenderDrawData() function in your Renderer Backend to render.
@@ -3929,6 +3930,15 @@ struct ImGuiViewport
 struct ImGuiPlatformIO
 {
     IMGUI_API ImGuiPlatformIO();
+
+    // Optional on-demand rendering. Each timer has its own backend-owned handle,
+    // valid for the context's lifetime. Scheduling replaces only that timer.
+    // Delay is in seconds from the current frame's time; callbacks must not render synchronously.
+    void        (*Platform_RequestFrameFn)(ImGuiContext* ctx);
+    void*       (*Platform_CreateFrameTimerFn)(ImGuiContext* ctx);
+    void        (*Platform_ScheduleFrameTimerFn)(void* timer, float delay);
+    void        (*Platform_CancelFrameTimerFn)(void* timer);
+    void        (*Platform_SetMouseCursorFn)(ImGuiContext* ctx, ImGuiMouseCursor cursor);
 
     //------------------------------------------------------------------
     // Input - Interface with OS and Platform backend (most common stuff)

@@ -63,6 +63,14 @@ screenshot save directly without mapping a window, while still opening
 the error panel if saving fails. Resize requests use pixels and stay
 within 90% of the output size.
 
+Rendering sleeps between changes. Input and window events request frames;
+tools call `Ui::requestFrame()` when changing content outside the current
+draw (it also wakes the UI thread from a worker). Deferred layout and
+animations request their next frame inside ImGui. Caret, repeat and hover
+delays use independent pooled timer callbacks through `plt::Poller`; each
+source schedules and cancels its own timer. The UI does not inspect ImGui
+state to decide when to render.
+
 Both renderers implement the same image operations: upload RGBA8 pixels,
 import a native shared image, draw it into an ImGui draw list, and read a
 rectangle back. Images belong to their supplied pool, which must be

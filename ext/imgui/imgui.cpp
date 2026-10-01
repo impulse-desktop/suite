@@ -1604,6 +1604,7 @@ void ImGuiIO::AddInputCharacter(unsigned int c)
     e.EventId = g.InputEventsNextEventId++;
     e.Text.Char = c;
     g.InputEventsQueue.push_back(e);
+    ImGui::RequestFrame();
 }
 
 // UTF16 strings use surrogate pairs to encode codepoints >= 0x10000, so
@@ -1671,6 +1672,8 @@ void ImGuiIO::ClearInputKeys()
         if (ImGui::IsMouseKey((ImGuiKey)key))
             continue;
         ImGuiKeyData* key_data = &g.IO.KeysData[key - ImGuiKey_NamedKey_BEGIN];
+        for (ImGuiFrameTimer& timer : Ctx->KeyRepeatTimers[key - ImGuiKey_NamedKey_BEGIN])
+            timer.Cancel();
         key_data->Down = false;
         key_data->DownDuration = -1.0f;
         key_data->DownDurationPrev = -1.0f;
@@ -1685,6 +1688,8 @@ void ImGuiIO::ClearInputMouse()
     for (ImGuiKey key = ImGuiKey_Mouse_BEGIN; key < ImGuiKey_Mouse_END; key = (ImGuiKey)(key + 1))
     {
         ImGuiKeyData* key_data = &KeysData[key - ImGuiKey_NamedKey_BEGIN];
+        for (ImGuiFrameTimer& timer : Ctx->KeyRepeatTimers[key - ImGuiKey_NamedKey_BEGIN])
+            timer.Cancel();
         key_data->Down = false;
         key_data->DownDuration = -1.0f;
         key_data->DownDurationPrev = -1.0f;
@@ -1692,6 +1697,7 @@ void ImGuiIO::ClearInputMouse()
     MousePos = ImVec2(-FLT_MAX, -FLT_MAX);
     for (int n = 0; n < IM_ARRAYSIZE(MouseDown); n++)
     {
+        Ctx->MouseRepeatTimers[n].Cancel();
         MouseDown[n] = false;
         MouseDownDuration[n] = MouseDownDurationPrev[n] = -1.0f;
     }
@@ -1768,6 +1774,7 @@ void ImGuiIO::AddKeyAnalogEvent(ImGuiKey key, bool down, float analog_value)
     e.Key.Down = down;
     e.Key.AnalogValue = analog_value;
     g.InputEventsQueue.push_back(e);
+    ImGui::RequestFrame();
 }
 
 void ImGuiIO::AddKeyEvent(ImGuiKey key, bool down)
@@ -1823,6 +1830,7 @@ void ImGuiIO::AddMousePosEvent(float x, float y)
     e.MousePos.PosY = pos.y;
     e.MousePos.MouseSource = g.InputEventsNextMouseSource;
     g.InputEventsQueue.push_back(e);
+    ImGui::RequestFrame();
 }
 
 void ImGuiIO::AddMouseButtonEvent(int mouse_button, bool down)
@@ -1871,6 +1879,7 @@ void ImGuiIO::AddMouseButtonEvent(int mouse_button, bool down)
     e.MouseButton.Down = down;
     e.MouseButton.MouseSource = g.InputEventsNextMouseSource;
     g.InputEventsQueue.push_back(e);
+    ImGui::RequestFrame();
 }
 
 // Queue a mouse wheel event (some mouse/API may only have a Y component)
@@ -1891,6 +1900,7 @@ void ImGuiIO::AddMouseWheelEvent(float wheel_x, float wheel_y)
     e.MouseWheel.WheelY = wheel_y;
     e.MouseWheel.MouseSource = g.InputEventsNextMouseSource;
     g.InputEventsQueue.push_back(e);
+    ImGui::RequestFrame();
 }
 
 // This is not a real event, the data is latched in order to be stored in actual Mouse events.
@@ -1918,6 +1928,7 @@ void ImGuiIO::AddFocusEvent(bool focused)
     e.EventId = g.InputEventsNextEventId++;
     e.AppFocused.Focused = focused;
     g.InputEventsQueue.push_back(e);
+    ImGui::RequestFrame();
 }
 
 ImGuiPlatformIO::ImGuiPlatformIO()
@@ -4574,6 +4585,7 @@ void ImGui::SetActiveID(ImGuiID id, ImGuiWindow* window)
     g.ActiveIdIsJustActivated = (g.ActiveId != id);
     if (g.ActiveIdIsJustActivated)
     {
+        RequestFrame();
         IMGUI_DEBUG_LOG_ACTIVEID("SetActiveID() old:0x%08X (window \"%s\") -> new:0x%08X (window \"%s\")\n", g.ActiveId, g.ActiveIdWindow ? g.ActiveIdWindow->Name : "", id, window ? window->Name : "");
         g.ActiveIdTimer = 0.0f;
         g.ActiveIdHasBeenPressedBefore = false;
@@ -4616,7 +4628,12 @@ void ImGui::SetHoveredID(ImGuiID id)
     g.HoveredId = id;
     g.HoveredIdAllowOverlap = false;
     if (id != 0 && g.HoveredIdPreviousFrame != id)
+    {
         g.HoveredIdTimer = g.HoveredIdNotActiveTimer = 0.0f;
+        g.HoverFeedbackTimer.Cancel();
+        g.DragHoldTimer.Cancel();
+        RequestFrame();
+    }
 }
 
 ImGuiID ImGui::GetHoveredID()
@@ -4627,6 +4644,7 @@ ImGuiID ImGui::GetHoveredID()
 
 void ImGui::MarkItemEdited(ImGuiID id)
 {
+    RequestFrame();
     // This marking is to be able to provide info for IsItemDeactivatedAfterEdit().
     // ActiveId might have been released by the time we call this (as in the typical press/release button behavior) but still need to fill the data.
     ImGuiContext& g = *GImGui;
@@ -4784,10 +4802,17 @@ bool ImGui::IsItemHovered(ImGuiHoveredFlags flags)
         // but once unlocked on a given item we also moving.
         //if (g.HoverDelayTimer >= delay && (g.HoverDelayTimer - g.IO.DeltaTime < delay || g.MouseStationaryTimer - g.IO.DeltaTime < g.Style.HoverStationaryDelay)) { IMGUI_DEBUG_LOG("HoverDelayTimer = %f/%f, MouseStationaryTimer = %f\n", g.HoverDelayTimer, delay, g.MouseStationaryTimer); }
         if ((flags & ImGuiHoveredFlags_Stationary) != 0 && g.HoverItemUnlockedStationaryId != hover_delay_id)
+        {
+            g.HoverItemTimer.Schedule(ImMax(0.0f, g.Style.HoverStationaryDelay - g.MouseStationaryTimer) + 0.0001f);
             return false;
+        }
 
         if (g.HoverItemDelayTimer < delay)
+        {
+            g.HoverItemTimer.Schedule(delay - g.HoverItemDelayTimer + 0.0001f);
             return false;
+        }
+        g.HoverItemTimer.Cancel();
     }
 
     return true;
@@ -5360,6 +5385,41 @@ static void SetupDrawListSharedData()
     g.DrawListSharedData.InitialFringeScale = 1.0f; // FIXME-DPI: Change this for some DPI scaling experiments.
 }
 
+void ImGuiFrameTimer::Schedule(float delay)
+{
+    ImGuiContext& g = *GImGui;
+    if (!g.PlatformIO.Platform_CreateFrameTimerFn)
+        return;
+    if (Handle == NULL)
+        Handle = g.PlatformIO.Platform_CreateFrameTimerFn(&g);
+    g.PlatformIO.Platform_ScheduleFrameTimerFn(Handle, ImMax(delay, 0.0f));
+}
+
+void ImGuiFrameTimer::Cancel()
+{
+    if (Handle && GImGui->PlatformIO.Platform_CancelFrameTimerFn)
+        GImGui->PlatformIO.Platform_CancelFrameTimerFn(Handle);
+}
+
+void ImGui::RequestFrame()
+{
+    ImGuiContext& g = *GImGui;
+    if (g.PlatformIO.Platform_RequestFrameFn)
+        g.PlatformIO.Platform_RequestFrameFn(&g);
+}
+
+void ImGui::RequestRepeatFrame(ImGuiFrameTimer& timer, float t, float delay, float rate)
+{
+    if (t < 0.0f)
+        timer.Cancel();
+    else if (t < delay)
+        timer.Schedule(delay - t + 0.0001f);
+    else if (rate > 0.0f)
+        timer.Schedule(rate - ImFmod(t - delay, rate) + 0.0001f);
+    else
+        timer.Cancel();
+}
+
 void ImGui::NewFrame()
 {
     IM_ASSERT(GImGui != NULL && "No current context. Did you call ImGui::CreateContext() and ImGui::SetCurrentContext() ?");
@@ -5465,18 +5525,6 @@ void ImGui::NewFrame()
         g.DeactivatedItemData.ID = 0;
     g.DeactivatedItemData.IsAlive = false;
 
-    // Record when we have been stationary as this state is preserved while over same item.
-    // FIXME: The way this is expressed means user cannot alter HoverStationaryDelay during the frame to use varying values.
-    // To allow this we should store HoverItemMaxStationaryTime+ID and perform the >= check in IsItemHovered() function.
-    if (g.HoverItemDelayId != 0 && g.MouseStationaryTimer >= g.Style.HoverStationaryDelay)
-        g.HoverItemUnlockedStationaryId = g.HoverItemDelayId;
-    else if (g.HoverItemDelayId == 0)
-        g.HoverItemUnlockedStationaryId = 0;
-    if (g.HoveredWindow != NULL && g.MouseStationaryTimer >= g.Style.HoverStationaryDelay)
-        g.HoverWindowUnlockedStationaryId = g.HoveredWindow->ID;
-    else if (g.HoveredWindow == NULL)
-        g.HoverWindowUnlockedStationaryId = 0;
-
     // Update hover delay for IsItemHovered() with delays and tooltips
     g.HoverItemDelayIdPreviousFrame = g.HoverItemDelayId;
     if (g.HoverItemDelayId != 0)
@@ -5490,7 +5538,7 @@ void ImGui::NewFrame()
         // This gives a little bit of leeway before clearing the hover timer, allowing mouse to cross gaps
         // We could expose 0.25f as style.HoverClearDelay but I am not sure of the logic yet, this is particularly subtle.
         g.HoverItemDelayClearTimer += g.IO.DeltaTime;
-        if (g.HoverItemDelayClearTimer >= ImMax(0.25f, g.IO.DeltaTime * 2.0f)) // ~7 frames at 30 Hz + allow for low framerate
+        if (g.HoverItemDelayClearTimer >= 0.25f) // Idle time must also expire the grace period.
             g.HoverItemDelayTimer = g.HoverItemDelayClearTimer = 0.0f; // May want a decaying timer, in which case need to clamp at max first, based on max of caller last requested timer.
     }
 
@@ -5521,6 +5569,18 @@ void ImGui::NewFrame()
     // Update mouse input state
     UpdateMouseInputs();
 
+    // Record when we have been stationary as this state is preserved while over same item.
+    // FIXME: The way this is expressed means user cannot alter HoverStationaryDelay during the frame to use varying values.
+    // To allow this we should store HoverItemMaxStationaryTime+ID and perform the >= check in IsItemHovered() function.
+    if (g.HoverItemDelayIdPreviousFrame != 0 && g.MouseStationaryTimer >= g.Style.HoverStationaryDelay)
+        g.HoverItemUnlockedStationaryId = g.HoverItemDelayIdPreviousFrame;
+    else if (g.HoverItemDelayIdPreviousFrame == 0)
+        g.HoverItemUnlockedStationaryId = 0;
+    if (g.HoveredWindow != NULL && g.MouseStationaryTimer >= g.Style.HoverStationaryDelay)
+        g.HoverWindowUnlockedStationaryId = g.HoveredWindow->ID;
+    else if (g.HoveredWindow == NULL)
+        g.HoverWindowUnlockedStationaryId = 0;
+
     // Mark all windows as not visible and compact unused memory.
     IM_ASSERT(g.WindowsFocusOrder.Size <= g.Windows.Size);
     const float memory_compact_start_time = (g.GcCompactAll || g.IO.ConfigMemoryCompactTimer < 0.0f) ? FLT_MAX : (float)g.Time - g.IO.ConfigMemoryCompactTimer;
@@ -5550,6 +5610,8 @@ void ImGui::NewFrame()
         g.DimBgRatio = ImMin(g.DimBgRatio + g.IO.DeltaTime * 6.0f, 1.0f);
     else
         g.DimBgRatio = ImMax(g.DimBgRatio - g.IO.DeltaTime * 10.0f, 0.0f);
+    if (g.DimBgRatio > 0.0f && g.DimBgRatio < 1.0f)
+        RequestFrame();
 
     g.MouseCursor = ImGuiMouseCursor_Arrow;
     g.WantCaptureMouseNextFrame = g.WantCaptureKeyboardNextFrame = g.WantTextInputNextFrame = -1;
@@ -5915,12 +5977,24 @@ void ImGui::EndFrame()
     for (ImFontAtlas* atlas : g.FontAtlases)
         atlas->Locked = false;
 
+    if (g.HoverItemDelayId == 0)
+        g.HoverItemTimer.Cancel();
+    if (g.HoveredId == 0)
+    {
+        g.HoverFeedbackTimer.Cancel();
+        g.DragHoldTimer.Cancel();
+    }
+    if (!g.HoveredWindow)
+        g.HoverWindowTimer.Cancel();
+
     // Clear Input data for next frame
     g.IO.MousePosPrev = g.IO.MousePos;
     g.IO.AppFocusLost = false;
     g.IO.MouseWheel = g.IO.MouseWheelH = 0.0f;
     g.IO.InputQueueCharacters.resize(0);
 
+    if (g.PlatformIO.Platform_SetMouseCursorFn)
+        g.PlatformIO.Platform_SetMouseCursorFn(&g, g.MouseCursor);
     CallContextHooks(&g, ImGuiContextHookType_EndFramePost);
 }
 
@@ -6837,7 +6911,10 @@ static int ImGui::UpdateWindowManualResize(ImGuiWindow* window, const ImVec2& si
         ButtonBehavior(border_rect, border_id, &hovered, &held, ImGuiButtonFlags_FlattenChildren | ImGuiButtonFlags_NoNavFocus);
         //GetForegroundDrawList(window)->AddRect(border_rect.Min, border_rect.Max, IM_COL32(255, 255, 0, 255));
         if (hovered && g.HoveredIdTimer <= WINDOWS_RESIZE_FROM_EDGES_FEEDBACK_TIMER)
+        {
+            g.HoverFeedbackTimer.Schedule(WINDOWS_RESIZE_FROM_EDGES_FEEDBACK_TIMER - g.HoveredIdTimer + 0.0001f);
             hovered = false;
+        }
         if (hovered || held)
             SetMouseCursor((axis == ImGuiAxis_X) ? ImGuiMouseCursor_ResizeEW : ImGuiMouseCursor_ResizeNS);
         if (held && g.IO.MouseDoubleClicked[0])
@@ -8073,6 +8150,17 @@ void ImGui::End()
     if (window->DC.IsSetPos)
         ErrorCheckUsingSetCursorPosToExtendParentBoundaries();
 
+    if (!window->SkipRefresh)
+    {
+        ImVec2 content_size, content_size_ideal;
+        CalcWindowContentSizes(window, &content_size, &content_size_ideal);
+        if (content_size.x != window->ContentSize.x || content_size.y != window->ContentSize.y ||
+            content_size_ideal.x != window->ContentSizeIdeal.x || content_size_ideal.y != window->ContentSizeIdeal.y ||
+            window->AutoFitFramesX > 0 || window->AutoFitFramesY > 0 || window->HiddenFramesCannotSkipItems > 0 ||
+            window->HiddenFramesForRenderOnly > 0 || window->WantCollapseToggle)
+            RequestFrame();
+    }
+
     // Pop from window stack
     g.LastItemData = window_stack_data.ParentLastItemDataBackup;
     if (window->Flags & ImGuiWindowFlags_ChildMenu)
@@ -8303,7 +8391,10 @@ bool ImGui::IsWindowHovered(ImGuiHoveredFlags flags)
     if (flags & ImGuiHoveredFlags_ForTooltip)
         flags = ApplyHoverFlagsForTooltip(flags, g.Style.HoverFlagsForTooltipMouse);
     if ((flags & ImGuiHoveredFlags_Stationary) != 0 && g.HoverWindowUnlockedStationaryId != ref_window->ID)
+    {
+        g.HoverWindowTimer.Schedule(ImMax(0.0f, g.Style.HoverStationaryDelay - g.MouseStationaryTimer) + 0.0001f);
         return false;
+    }
 
     return true;
 }
@@ -8639,6 +8730,7 @@ void ImGui::FocusItem()
 
 void ImGui::ActivateItemByID(ImGuiID id)
 {
+    RequestFrame();
     ImGuiContext& g = *GImGui;
     g.NavNextActivateId = id;
     g.NavNextActivateFlags = ImGuiActivateFlags_None;
@@ -8778,6 +8870,8 @@ static void ImGui::UpdateTexturesEndFrame()
             // This means in practice that if N imgui contexts are created with a shared atlas, we assume all of them have a backend initialized.
             tex->RefCount = (unsigned short)atlas->RefCount;
             g.PlatformIO.Textures.push_back(tex);
+            if (tex->WantDestroyNextFrame && tex->Status != ImTextureStatus_Destroyed)
+                RequestFrame();
         }
     for (ImTextureData* tex : g.UserTextures)
         g.PlatformIO.Textures.push_back(tex);
@@ -9354,12 +9448,15 @@ int ImGui::GetKeyPressedAmount(ImGuiKey key, float repeat_delay, float repeat_ra
     if (!key_data->Down) // In theory this should already be encoded as (DownDuration < 0.0f), but testing this facilitates eating mechanism (until we finish work on key ownership)
         return 0;
     const float t = key_data->DownDuration;
+    RequestRepeatFrame(g.KeyRepeatTimers[key_data - g.IO.KeysData][0], t, repeat_delay, repeat_rate);
     return CalcTypematicRepeatAmount(t - g.IO.DeltaTime, t, repeat_delay, repeat_rate);
 }
 
 // Return 2D vector representing the combination of four cardinal direction, with analog value support (for e.g. ImGuiKey_GamepadLStick* values).
 ImVec2 ImGui::GetKeyMagnitude2d(ImGuiKey key_left, ImGuiKey key_right, ImGuiKey key_up, ImGuiKey key_down)
 {
+    if (IsKeyDown(key_left) || IsKeyDown(key_right) || IsKeyDown(key_up) || IsKeyDown(key_down))
+        RequestFrame();
     return ImVec2(
         GetKeyData(key_right)->AnalogValue - GetKeyData(key_left)->AnalogValue,
         GetKeyData(key_down)->AnalogValue - GetKeyData(key_up)->AnalogValue);
@@ -9666,31 +9763,30 @@ bool ImGui::IsKeyPressed(ImGuiKey key, ImGuiInputFlags flags, ImGuiID owner_id)
     if (flags & (ImGuiInputFlags_RepeatRateMask_ | ImGuiInputFlags_RepeatUntilMask_)) // Setting any _RepeatXXX option enables _Repeat
         flags |= ImGuiInputFlags_Repeat;
 
-    bool pressed = (t == 0.0f);
-    if (!pressed && (flags & ImGuiInputFlags_Repeat) != 0)
+    if (!TestKeyOwner(key, owner_id))
+        return false;
+    ImGuiContext& g = *GImGui;
+    const int mode = (flags & ImGuiInputFlags_RepeatRateNavMove) ? 1 : (flags & ImGuiInputFlags_RepeatRateNavTweak) ? 2 : 0;
+    ImGuiFrameTimer& timer = g.KeyRepeatTimers[key_data - g.IO.KeysData][mode];
+    if ((flags & ImGuiInputFlags_RepeatUntilMask_) && t > 0.0f)
+    {
+        double key_pressed_time = g.Time - t + 0.00001f;
+        if (((flags & ImGuiInputFlags_RepeatUntilKeyModsChange) && g.LastKeyModsChangeTime > key_pressed_time) ||
+            ((flags & ImGuiInputFlags_RepeatUntilKeyModsChangeFromNone) && g.LastKeyModsChangeFromNoneTime > key_pressed_time) ||
+            ((flags & ImGuiInputFlags_RepeatUntilOtherKeyPress) && g.LastKeyboardKeyPressTime > key_pressed_time))
+        {
+            timer.Cancel();
+            return false;
+        }
+    }
+    if (flags & ImGuiInputFlags_Repeat)
     {
         float repeat_delay, repeat_rate;
         GetTypematicRepeatRate(flags, &repeat_delay, &repeat_rate);
-        pressed = (t > repeat_delay) && GetKeyPressedAmount(key, repeat_delay, repeat_rate) > 0;
-        if (pressed && (flags & ImGuiInputFlags_RepeatUntilMask_))
-        {
-            // Slightly bias 'key_pressed_time' as DownDuration is an accumulation of DeltaTime which we compare to an absolute time value.
-            // Ideally we'd replace DownDuration with KeyPressedTime but it would break user's code.
-            ImGuiContext& g = *GImGui;
-            double key_pressed_time = g.Time - t + 0.00001f;
-            if ((flags & ImGuiInputFlags_RepeatUntilKeyModsChange) && (g.LastKeyModsChangeTime > key_pressed_time))
-                pressed = false;
-            if ((flags & ImGuiInputFlags_RepeatUntilKeyModsChangeFromNone) && (g.LastKeyModsChangeFromNoneTime > key_pressed_time))
-                pressed = false;
-            if ((flags & ImGuiInputFlags_RepeatUntilOtherKeyPress) && (g.LastKeyboardKeyPressTime > key_pressed_time))
-                pressed = false;
-        }
+        RequestRepeatFrame(timer, t, repeat_delay, repeat_rate);
+        return t == 0.0f || (t > repeat_delay && CalcTypematicRepeatAmount(t - g.IO.DeltaTime, t, repeat_delay, repeat_rate) > 0);
     }
-    if (!pressed)
-        return false;
-    if (!TestKeyOwner(key, owner_id))
-        return false;
-    return true;
+    return t == 0.0f;
 }
 
 bool ImGui::IsKeyReleased(ImGuiKey key)
@@ -9738,7 +9834,11 @@ bool ImGui::IsMouseClicked(ImGuiMouseButton button, ImGuiInputFlags flags, ImGui
         return false;
     IM_ASSERT((flags & ~ImGuiInputFlags_SupportedByIsMouseClicked) == 0); // Passing flags not supported by this function! // FIXME: Could support RepeatRate and RepeatUntil flags here.
 
+    if (!TestKeyOwner(MouseButtonToKey(button), owner_id))
+        return false;
     const bool repeat = (flags & ImGuiInputFlags_Repeat) != 0;
+    if (repeat)
+        RequestRepeatFrame(g.MouseRepeatTimers[button], t, g.IO.KeyRepeatDelay, g.IO.KeyRepeatRate);
     const bool pressed = (t == 0.0f) || (repeat && t > g.IO.KeyRepeatDelay && CalcTypematicRepeatAmount(t - g.IO.DeltaTime, t, g.IO.KeyRepeatDelay, g.IO.KeyRepeatRate) > 0);
     if (!pressed)
         return false;
@@ -9983,6 +10083,9 @@ static void ImGui::UpdateKeyboardInputs()
     for (int key = ImGuiKey_NamedKey_BEGIN; key < ImGuiKey_NamedKey_END; key++)
     {
         ImGuiKeyData* key_data = &io.KeysData[key - ImGuiKey_NamedKey_BEGIN];
+        if (!key_data->Down)
+            for (ImGuiFrameTimer& timer : g.KeyRepeatTimers[key - ImGuiKey_NamedKey_BEGIN])
+                timer.Cancel();
         key_data->DownDurationPrev = key_data->DownDuration;
         key_data->DownDuration = key_data->Down ? (key_data->DownDuration < 0.0f ? 0.0f : key_data->DownDuration + io.DeltaTime) : -1.0f;
         if (key_data->DownDuration == 0.0f)
@@ -10031,6 +10134,14 @@ static void ImGui::UpdateMouseInputs()
     else
         io.MouseDelta = ImVec2(0.0f, 0.0f);
 
+    if (io.MouseDelta.x != 0.0f || io.MouseDelta.y != 0.0f || !IsMousePosValid(&io.MousePos))
+    {
+        g.HoverItemTimer.Cancel();
+        g.HoverWindowTimer.Cancel();
+        g.HoverFeedbackTimer.Cancel();
+        g.DragHoldTimer.Cancel();
+    }
+
     // Update stationary timer.
     // FIXME: May need to rework again to have some tolerance for occasional small movement, while being functional on high-framerates.
     const float mouse_stationary_threshold = (io.MouseSource == ImGuiMouseSource_Mouse) ? 2.0f : 3.0f; // Slightly higher threshold for ImGuiMouseSource_TouchScreen/ImGuiMouseSource_Pen, may need rework.
@@ -10049,6 +10160,8 @@ static void ImGui::UpdateMouseInputs()
         io.MouseReleased[i] = !io.MouseDown[i] && io.MouseDownDuration[i] >= 0.0f;
         if (io.MouseReleased[i])
             io.MouseReleasedTime[i] = g.Time;
+        if (!io.MouseDown[i])
+            g.MouseRepeatTimers[i].Cancel();
         io.MouseDownDurationPrev[i] = io.MouseDownDuration[i];
         io.MouseDownDuration[i] = io.MouseDown[i] ? (io.MouseDownDuration[i] < 0.0f ? 0.0f : io.MouseDownDuration[i] + io.DeltaTime) : -1.0f;
         if (io.MouseClicked[i])
@@ -10138,6 +10251,7 @@ static ImGuiWindow* FindBestWheelingWindow(const ImVec2& wheel)
     if ((g.WheelingWindowStartFrame == g.FrameCount && wheel.x != 0.0f && wheel.y != 0.0f) || (g.WheelingAxisAvg.x == g.WheelingAxisAvg.y))
     {
         g.WheelingWindowWheelRemainder = wheel;
+        ImGui::RequestFrame();
         return NULL;
     }
     return (g.WheelingAxisAvg.x > g.WheelingAxisAvg.y) ? windows[0] : windows[1];
@@ -10400,7 +10514,10 @@ void ImGui::UpdateInputEvents(bool trickle_fast_inputs)
     if (event_n == g.InputEventsQueue.Size)
         g.InputEventsQueue.resize(0);
     else
+    {
         g.InputEventsQueue.erase(g.InputEventsQueue.Data, g.InputEventsQueue.Data + event_n);
+        RequestFrame();
+    }
 
     // Clear buttons state when focus is lost
     // - this is useful so e.g. releasing Alt after focus loss on Alt-Tab doesn't trigger the Alt menu toggle.
@@ -11749,6 +11866,7 @@ float ImGui::GetScrollMaxY()
 
 void ImGui::SetScrollX(ImGuiWindow* window, float scroll_x)
 {
+    RequestFrame();
     window->ScrollTarget.x = scroll_x;
     window->ScrollTargetCenterRatio.x = 0.0f;
     window->ScrollTargetEdgeSnapDist.x = 0.0f;
@@ -11756,6 +11874,7 @@ void ImGui::SetScrollX(ImGuiWindow* window, float scroll_x)
 
 void ImGui::SetScrollY(ImGuiWindow* window, float scroll_y)
 {
+    RequestFrame();
     window->ScrollTarget.y = scroll_y;
     window->ScrollTargetCenterRatio.y = 0.0f;
     window->ScrollTargetEdgeSnapDist.y = 0.0f;
@@ -11785,6 +11904,7 @@ void ImGui::SetScrollY(float scroll_y)
 // We store a target position so centering and clamping can occur on the next frame when we are guaranteed to have a known window size
 void ImGui::SetScrollFromPosX(ImGuiWindow* window, float local_x, float center_x_ratio)
 {
+    RequestFrame();
     IM_ASSERT(center_x_ratio >= 0.0f && center_x_ratio <= 1.0f);
     window->ScrollTarget.x = IM_TRUNC(local_x - window->DecoOuterSizeX1 - window->DecoInnerSizeX1 + window->Scroll.x); // Convert local position to scroll offset
     window->ScrollTargetCenterRatio.x = center_x_ratio;
@@ -11793,6 +11913,7 @@ void ImGui::SetScrollFromPosX(ImGuiWindow* window, float local_x, float center_x
 
 void ImGui::SetScrollFromPosY(ImGuiWindow* window, float local_y, float center_y_ratio)
 {
+    RequestFrame();
     IM_ASSERT(center_y_ratio >= 0.0f && center_y_ratio <= 1.0f);
     window->ScrollTarget.y = IM_TRUNC(local_y - window->DecoOuterSizeY1 - window->DecoInnerSizeY1 + window->Scroll.y); // Convert local position to scroll offset
     window->ScrollTargetCenterRatio.y = center_y_ratio;
@@ -12083,6 +12204,7 @@ void ImGui::OpenPopupEx(ImGuiID id, ImGuiPopupFlags popup_flags)
     if (g.OpenPopupStack.Size < current_stack_size + 1)
     {
         g.OpenPopupStack.push_back(popup_ref);
+        RequestFrame();
     }
     else
     {
@@ -12104,6 +12226,7 @@ void ImGui::OpenPopupEx(ImGuiID id, ImGuiPopupFlags popup_flags)
             // Reopen: close child popups if any, then flag popup for open/reopen (set position, focus, init navigation)
             ClosePopupToLevel(current_stack_size, true);
             g.OpenPopupStack.push_back(popup_ref);
+            RequestFrame();
         }
 
         // When reopening a popup we first refocus its parent, otherwise if its parent is itself a popup it would get closed by ClosePopupsOverWindow().
@@ -12178,6 +12301,7 @@ void ImGui::ClosePopupsExceptModals()
 
 void ImGui::ClosePopupToLevel(int remaining, bool restore_focus_to_window_under_popup)
 {
+    RequestFrame();
     ImGuiContext& g = *GImGui;
     IMGUI_DEBUG_LOG_POPUP("[popup] ClosePopupToLevel(%d), restore_under=%d\n", remaining, restore_focus_to_window_under_popup);
     IM_ASSERT(remaining >= 0 && remaining < g.OpenPopupStack.Size);
@@ -12874,6 +12998,7 @@ void ImGui::NavHighlightActivated(ImGuiID id)
     ImGuiContext& g = *GImGui;
     g.NavHighlightActivatedId = id;
     g.NavHighlightActivatedTimer = NAV_ACTIVATE_HIGHLIGHT_TIMER;
+    g.NavHighlightTimer.Schedule(g.NavHighlightActivatedTimer);
 }
 
 void ImGui::NavClearPreferredPosForAxis(ImGuiAxis axis)
@@ -13270,6 +13395,7 @@ void ImGui::NavMoveRequestSubmit(ImGuiDir move_dir, ImGuiDir clip_dir, ImGuiNavM
         move_flags |= ImGuiNavMoveFlags_AllowCurrentNavId;
 
     g.NavMoveSubmitted = g.NavMoveScoringItems = true;
+    RequestFrame();
     g.NavMoveDir = move_dir;
     g.NavMoveDirForDebug = move_dir;
     g.NavMoveClipDir = clip_dir;
@@ -13320,6 +13446,7 @@ void ImGui::NavMoveRequestForward(ImGuiDir move_dir, ImGuiDir clip_dir, ImGuiNav
     IM_ASSERT(g.NavMoveForwardToNextFrame == false);
     NavMoveRequestCancel();
     g.NavMoveForwardToNextFrame = true;
+    RequestFrame();
     g.NavMoveDir = move_dir;
     g.NavMoveClipDir = clip_dir;
     g.NavMoveFlags = move_flags | ImGuiNavMoveFlags_Forwarded;
@@ -13411,6 +13538,7 @@ void ImGui::NavInitWindow(ImGuiWindow* window, bool force_reinit)
     {
         SetNavID(0, g.NavLayer, window->NavRootFocusScopeId, ImRect());
         g.NavInitRequest = true;
+        RequestFrame();
         g.NavInitRequestFromMove = false;
         g.NavInitResult.ID = 0;
         NavUpdateAnyRequestFlag();
@@ -13595,6 +13723,8 @@ static void ImGui::NavUpdate()
         g.NavCursorVisible = false;
     else if (g.IO.ConfigNavCursorVisibleAlways && g.NavCursorHideFrames == 0)
         g.NavCursorVisible = true;
+    if (g.NavActivateDownId == 0)
+        g.NavActivateTimer.Cancel();
     if (g.NavActivateId != 0)
         IM_ASSERT(g.NavActivateDownId == g.NavActivateId);
 
@@ -14277,6 +14407,8 @@ static void ImGui::NavUpdateWindowing()
     if (g.NavWindowingTargetAnim && g.NavWindowingTarget == NULL)
     {
         g.NavWindowingHighlightAlpha = ImMax(g.NavWindowingHighlightAlpha - io.DeltaTime * 10.0f, 0.0f);
+        if (g.NavWindowingHighlightAlpha > 0.0f)
+            RequestFrame();
         if (g.DimBgRatio <= 0.0f && g.NavWindowingHighlightAlpha <= 0.0f)
             g.NavWindowingTargetAnim = NULL;
     }
@@ -14358,6 +14490,21 @@ static void ImGui::NavUpdateWindowing()
             NavUpdateWindowingTarget(keyboard_next_window ? -1 : +1);
         else if ((io.KeyMods & shared_mods) != shared_mods)
             apply_focus_window = g.NavWindowingTarget;
+    }
+
+    if (g.NavWindowingTarget)
+    {
+        if (g.NavWindowingTimer < NAV_WINDOWING_HIGHLIGHT_DELAY)
+            g.NavWindowingTimerWake.Schedule(NAV_WINDOWING_HIGHLIGHT_DELAY - g.NavWindowingTimer);
+        else if (g.NavWindowingHighlightAlpha < 1.0f)
+            RequestFrame();
+        if (g.NavWindowingTimer < NAV_WINDOWING_LIST_APPEAR_DELAY)
+            g.NavWindowingListTimer.Schedule(NAV_WINDOWING_LIST_APPEAR_DELAY - g.NavWindowingTimer);
+    }
+    else
+    {
+        g.NavWindowingTimerWake.Cancel();
+        g.NavWindowingListTimer.Cancel();
     }
 
     // Keyboard: Press and Release ALT to toggle menu layer
@@ -15197,15 +15344,16 @@ void ImGui::MarkIniSettingsDirty()
 {
     ImGuiContext& g = *GImGui;
     if (g.SettingsDirtyTimer <= 0.0f)
+    {
         g.SettingsDirtyTimer = g.IO.IniSavingRate;
+        g.SettingsTimer.Schedule(g.SettingsDirtyTimer);
+    }
 }
 
 void ImGui::MarkIniSettingsDirty(ImGuiWindow* window)
 {
-    ImGuiContext& g = *GImGui;
     if (!(window->Flags & ImGuiWindowFlags_NoSavedSettings))
-        if (g.SettingsDirtyTimer <= 0.0f)
-            g.SettingsDirtyTimer = g.IO.IniSavingRate;
+        MarkIniSettingsDirty();
 }
 
 void ImGui::AddSettingsHandler(const ImGuiSettingsHandler* handler)
@@ -15524,6 +15672,11 @@ void ImGui::LocalizeRegisterEntries(const ImGuiLocEntry* entries, int count)
 
 void ImGuiPlatformIO::ClearPlatformHandlers()
 {
+    Platform_RequestFrameFn = NULL;
+    Platform_CreateFrameTimerFn = NULL;
+    Platform_ScheduleFrameTimerFn = NULL;
+    Platform_CancelFrameTimerFn = NULL;
+    Platform_SetMouseCursorFn = NULL;
     Platform_GetClipboardTextFn = NULL;
     Platform_SetClipboardTextFn = NULL;
     Platform_ClipboardUserData = NULL;

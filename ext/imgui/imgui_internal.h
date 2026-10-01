@@ -1218,10 +1218,19 @@ struct IMGUI_API ImGuiInputTextDeactivatedState
 namespace ImStb { struct STB_TexteditState; }
 typedef ImStb::STB_TexteditState ImStbTexteditState;
 
+// One independent timer. Its source schedules/cancels it; the backend owns its storage.
+struct ImGuiFrameTimer
+{
+    void* Handle = NULL;
+    IMGUI_API void Schedule(float delay);
+    IMGUI_API void Cancel();
+};
+
 // Internal state of the currently focused/edited text input box
 // For a given item ID, access with ImGui::GetInputTextState()
 struct IMGUI_API ImGuiInputTextState
 {
+    ImGuiFrameTimer          CursorTimer;
     ImGuiContext*           Ctx;                    // parent UI context (needs to be set explicitly by parent).
     ImStbTexteditState*     Stb;                    // State for stb_textedit.h
     ImGuiInputTextFlags     Flags;                  // copy of InputText() flags. may be used to check if e.g. ImGuiInputTextFlags_Password is set.
@@ -2162,6 +2171,11 @@ struct ImGuiContextHook
 
 struct ImGuiContext
 {
+    ImGuiFrameTimer          KeyRepeatTimers[ImGuiKey_NamedKey_COUNT][3]; // Default, navigation move, navigation tweak.
+    ImGuiFrameTimer          MouseRepeatTimers[5];
+    ImGuiFrameTimer          HoverItemTimer, HoverWindowTimer, HoverFeedbackTimer, DragHoldTimer;
+    ImGuiFrameTimer          NavActivateTimer, NavHighlightTimer, NavWindowingTimerWake, NavWindowingListTimer;
+    ImGuiFrameTimer          SettingsTimer;
     bool                    Initialized;
     ImGuiIO                 IO;
     ImGuiPlatformIO         PlatformIO;
@@ -3350,6 +3364,7 @@ namespace ImGui
     IMGUI_API ImVec2        GetKeyMagnitude2d(ImGuiKey key_left, ImGuiKey key_right, ImGuiKey key_up, ImGuiKey key_down);
     IMGUI_API float         GetNavTweakPressedAmount(ImGuiAxis axis);
     IMGUI_API int           CalcTypematicRepeatAmount(float t0, float t1, float repeat_delay, float repeat_rate);
+    IMGUI_API void          RequestRepeatFrame(ImGuiFrameTimer& timer, float t, float delay, float rate);
     IMGUI_API void          GetTypematicRepeatRate(ImGuiInputFlags flags, float* repeat_delay, float* repeat_rate);
     IMGUI_API void          TeleportMousePos(const ImVec2& pos);
     IMGUI_API void          SetActiveIdUsingAllKeyboardKeys();

@@ -616,6 +616,7 @@ namespace {
 
         if (z != v.zoom) {
             v.zoom = z;
+            ImGui::RequestFrame();
             v.crop.clear();
             traceView(StringView(u8"zoomed"), v);
         }
@@ -727,6 +728,9 @@ namespace {
         }
 
         if (crop.dragging) {
+            if (ImGui::GetIO().MouseDelta.x != 0.f || ImGui::GetIO().MouseDelta.y != 0.f || ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+                ImGui::RequestFrame();
+            }
             ImVec2 p = toImg(mouse);
 
             crop.x0 = crop.dragOx < p.x ? crop.dragOx : p.x;

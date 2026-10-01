@@ -44,6 +44,8 @@ struct Ui {
 
     virtual void open(const UiOptions& options) = 0;
     virtual bool next(UiEvent& event) = 0;
+    // May be called from a worker after open(); delivery is on the UI thread.
+    virtual void requestFrame() = 0;
     virtual void requestFullscreen(bool on) = 0;
     virtual void requestResize(u32 width, u32 height) = 0;
 

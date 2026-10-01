@@ -243,6 +243,15 @@ renderer_test = program(
     deps=im_deps,
 )
 
+imgui_frames_test = program(
+    name="imgui_frames_test",
+    output="$(B)/e2e/imgui_frames_test",
+    srcs=["$(S)/tst/imgui_frames.cpp"],
+    cflags=warning_flags,
+    deps=[imgui, *platform_deps, system],
+)
+
+
 tools = ["view", "ui"] if darwin else ["screenshot", "view", "ui"]
 
 links = command(
@@ -315,7 +324,7 @@ if not darwin:
         srcs=["$(S)/tst/device_uuid.cpp"],
         deps=[vulkan],
     )
-    helpers = [devices, jxl_dump, device_uuid, renderer_test]
+    helpers = [devices, jxl_dump, device_uuid, renderer_test, imgui_frames_test]
 
     # -Dshard=K/N splits the scenarios into N slices by a hash of the name, so
     # CI jobs can run them side by side; the slice a scenario falls in does not
