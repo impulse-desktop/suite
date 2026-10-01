@@ -38,6 +38,7 @@ namespace {
         char** argv = nullptr;
         plt::Fiber* fiber = nullptr;
         int result = 1;
+        Buffer error;
         bool finished = false;
         float scale = 1.f;
         bool traceFrames = false;
@@ -228,8 +229,7 @@ void UiImpl::run() {
     try {
         result = main(*pool, *this, argc, argv);
     } catch (...) {
-        sysE << "im "_sv << name << ": "_sv << Exception::current() << endL;
-        result = 1;
+        error = Buffer(Exception::current());
     }
 
     finished = true;
@@ -313,34 +313,32 @@ void UiImpl::dropTextures() {
 }
 
 int runTool(StringView name, int (*main)(ObjPool& pool, Ui& ui, int argc, char** argv), int argc, char** argv) {
-    try {
-        ObjPool::Ref pool = ObjPool::fromMemory();
-        UiImpl& ui = *pool->make<UiImpl>();
+    ObjPool::Ref pool = ObjPool::fromMemory();
+    UiImpl& ui = *pool->make<UiImpl>();
 
-        ui.pool = &*pool;
-        ui.name = name;
-        ui.main = main;
-        ui.argc = argc;
-        ui.argv = argv;
-        ui.scale = scaleFromEnv();
-        ui.traceFrames = getenv("IM_TRACE_FRAMES") != nullptr;
-        ui.chaos = ChaosMonkey::create(*pool);
-        ui.platform = plt::Platform::create(*pool);
-        ui.fiber = ui.platform->scheduler()->create(*pool, ui, toolStack);
+    ui.pool = &*pool;
+    ui.name = name;
+    ui.main = main;
+    ui.argc = argc;
+    ui.argv = argv;
+    ui.scale = scaleFromEnv();
+    ui.traceFrames = getenv("IM_TRACE_FRAMES") != nullptr;
+    ui.chaos = ChaosMonkey::create(*pool);
+    ui.platform = plt::Platform::create(*pool);
+    ui.fiber = ui.platform->scheduler()->create(*pool, ui, toolStack);
 
-        if (!ui.finished) {
-            ui.platform->run();
-        }
-
-        if (!ui.finished && ui.window) {
-            ui.gone = true;
-            ui.fiber->wake();
-        }
-
-        return ui.result;
-    } catch (...) {
-        sysE << "im "_sv << name << ": "_sv << Exception::current() << endL;
-
-        return 1;
+    if (!ui.finished) {
+        ui.platform->run();
     }
+
+    if (!ui.finished && ui.window) {
+        ui.gone = true;
+        ui.fiber->wake();
+    }
+
+    if (!ui.error.empty()) {
+        throw ToolError(Buffer(sv(ui.error)));
+    }
+
+    return ui.result;
 }

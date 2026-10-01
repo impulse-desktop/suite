@@ -10,6 +10,7 @@
 
 #include <std/sys/fd.h>
 #include <std/ios/sys.h>
+#include <std/alg/defer.h>
 #include <std/sys/throw.h>
 #include <std/sys/types.h>
 #include <std/ios/out_fd.h>
@@ -984,168 +985,159 @@ int mainScreenshot(StringView path) {
     Buffer errText;
     bool loaded = false;
 
+    STD_DEFER {
+        if (img.dmaFd >= 0) {
+            close(img.dmaFd);
+        }
+    };
+
     try {
         loadImage(path, img);
         loaded = true;
-    } catch (ToolError& e) {
-        errText = Buffer(e.description());
     } catch (...) {
         errText = Buffer(Exception::current());
     }
 
-    int rc = 0;
+    Texture tex;
+    FrameDriver driver;
+    ScreenshotUi ui;
+    ObjPool::Ref shot = ObjPool::fromMemory();
 
-    try {
-        Texture tex;
-        FrameDriver driver;
-        ScreenshotUi ui;
-        ObjPool::Ref shot = ObjPool::fromMemory();
+    ChaosMonkey& chaos = *ChaosMonkey::create(*shot);
 
-        ChaosMonkey& chaos = *ChaosMonkey::create(*shot);
+    plt::Platform& platform = *plt::Platform::create(*shot);
+    ImGuiPlt& imgui = *ImGuiPlt::create(*shot, scale, traceFrames);
 
-        plt::Platform& platform = *plt::Platform::create(*shot);
-        ImGuiPlt& imgui = *ImGuiPlt::create(*shot, scale, traceFrames);
+    int winW, winH;
 
-        int winW, winH;
+    if (loaded) {
+        initialWindowSize(img, scaledStyle(scale), scale, winW, winH);
+    } else {
+        winW = (int)scaledPx(480_d, scale);
+        winH = (int)scaledPx(180_d, scale);
+    }
 
-        if (loaded) {
-            initialWindowSize(img, scaledStyle(scale), scale, winW, winH);
-        } else {
-            winW = (int)scaledPx(480_d, scale);
-            winH = (int)scaledPx(180_d, scale);
-        }
+    plt::WindowOptions options;
 
-        plt::WindowOptions options;
+    options.appId = "im-screenshot"_sv;
+    options.title = "im screenshot"_sv;
+    options.width = (u32)winW;
+    options.height = (u32)winH;
+    options.input = imgui.sink();
+    options.events = &driver;
+    options.frame = &driver;
 
-        options.appId = "im-screenshot"_sv;
-        options.title = "im screenshot"_sv;
-        options.width = (u32)winW;
-        options.height = (u32)winH;
-        options.input = imgui.sink();
-        options.events = &driver;
-        options.frame = &driver;
+    plt::Window& window = *platform.createWindow(*shot, options);
 
-        plt::Window& window = *platform.createWindow(*shot, options);
+    plt::WindowInfo made = window.info();
+    int wantW = winW, wantH = winH;
 
-        plt::WindowInfo made = window.info();
-        int wantW = winW, wantH = winH;
+    clampWindowSize(made, wantW, wantH);
 
-        clampWindowSize(made, wantW, wantH);
+    if (wantW != (int)made.width || wantH != (int)made.height) {
+        window.requestResize((u32)wantW, (u32)wantH);
+    }
 
-        if (wantW != (int)made.width || wantH != (int)made.height) {
-            window.requestResize((u32)wantW, (u32)wantH);
-        }
+    GpuOptions wants;
 
-        GpuOptions wants;
+    wants.tool = "screenshot"_sv;
+    wants.scale = scale;
+    wants.chaos = &chaos;
+    wants.traceFrames = traceFrames;
+    wants.hdr = loaded && img.color.hdr;
+    wants.sharedBuffer = img.shared();
+    wants.deviceUuid = img.deviceUuid;
 
-        wants.tool = "screenshot"_sv;
-        wants.scale = scale;
-        wants.chaos = &chaos;
-        wants.traceFrames = traceFrames;
-        wants.hdr = loaded && img.color.hdr;
-        wants.sharedBuffer = img.shared();
-        wants.deviceUuid = img.deviceUuid;
+    Gpu& gpu = *Gpu::create(*shot, wants);
+    VkSurfaceKHR surface = gpu.createSurface(window);
 
-        Gpu& gpu = *Gpu::create(*shot, wants);
-        VkSurfaceKHR surface = gpu.createSurface(window);
+    plt::WindowInfo bootInfo = window.info();
+    int fbw = (int)bootInfo.width;
+    int fbh = (int)bootInfo.height;
 
-        plt::WindowInfo bootInfo = window.info();
-        int fbw = (int)bootInfo.width;
-        int fbh = (int)bootInfo.height;
+    gpu.setupWindow(*shot, surface, fbw, fbh, loaded && img.color.hdr);
 
-        gpu.setupWindow(*shot, surface, fbw, fbh, loaded && img.color.hdr);
+    if (loaded && img.color.hdr) {
+        gpu.setupLinearHdr(*shot, (u32)fbw, (u32)fbh);
+    }
 
-        if (loaded && img.color.hdr) {
-            gpu.setupLinearHdr(*shot, (u32)fbw, (u32)fbh);
-        }
+    gpu.setupImGui(*shot, loaded && img.color.hdr);
+    gpu.sdrWhiteNits = (float)img.color.sdrWhiteNits;
 
-        gpu.setupImGui(*shot, loaded && img.color.hdr);
-        gpu.sdrWhiteNits = (float)img.color.sdrWhiteNits;
-
-        if (loaded) {
-            pooledGuard(*shot, [g = &gpu, t = &tex] {
-                g->destroyTexture(*t);
-            });
-
-            if (img.shared()) {
-                importTexture(gpu, img, tex);
-            } else {
-                gpu.uploadTexture(img.w, img.h, img.px, tex);
-            }
-        }
-
-        pooledGuard(*shot, [g = &gpu] {
-            vkDeviceWaitIdle(g->device);
+    if (loaded) {
+        pooledGuard(*shot, [g = &gpu, t = &tex] {
+            g->destroyTexture(*t);
         });
 
-        Viewer view;
-
-        ui.gpu = &gpu;
-        ui.window = &window;
-        ui.img = &img;
-        ui.tex = &tex;
-        ui.view = &view;
-        ui.error = &errText;
-        driver.platform = &platform;
-        driver.window = &window;
-        driver.imgui = &imgui;
-        driver.gpu = &gpu;
-        driver.ui = &ui;
-
-        int action = 0;
-        StringView configuredAction(getenv("IM_SHOT_ACTION") ? getenv("IM_SHOT_ACTION") : "editor");
-
-        auto report = [&] {
-            if (!errText.empty()) {
-                sysE << "im screenshot: "_sv << sv(errText) << endL;
-            }
-        };
-
-        if (loaded && configuredAction == "save"_sv) {
-            action = 1;
+        if (img.shared()) {
+            importTexture(gpu, img, tex);
         } else {
+            gpu.uploadTexture(img.w, img.h, img.px, tex);
+        }
+    }
+
+    pooledGuard(*shot, [g = &gpu] {
+        vkDeviceWaitIdle(g->device);
+    });
+
+    Viewer view;
+
+    ui.gpu = &gpu;
+    ui.window = &window;
+    ui.img = &img;
+    ui.tex = &tex;
+    ui.view = &view;
+    ui.error = &errText;
+    driver.platform = &platform;
+    driver.window = &window;
+    driver.imgui = &imgui;
+    driver.gpu = &gpu;
+    driver.ui = &ui;
+
+    int action = 0;
+    StringView configuredAction(getenv("IM_SHOT_ACTION") ? getenv("IM_SHOT_ACTION") : "editor");
+
+    auto report = [&] {
+        if (!errText.empty()) {
+            sysE << "im screenshot: "_sv << sv(errText) << endL;
+        }
+    };
+
+    if (loaded && configuredAction == "save"_sv) {
+        action = 1;
+    } else {
+        report();
+        action = runUi(driver);
+    }
+
+    if (loaded && action == 1) {
+        try {
+            int x0, y0, x1, y1;
+
+            cropRegion(img, view.crop, x0, y0, x1, y1);
+
+            Buffer encoded;
+            bool png = getenv("IM_SHOT_FORMAT") && StringView(getenv("IM_SHOT_FORMAT")) == "png"_sv;
+
+            if (png) {
+                encodeSelection(gpu, img, tex, x0, y0, x1, y1, encoded);
+            } else {
+                encodeJxlSelection(gpu, img, tex, x0, y0, x1, y1, encoded);
+            }
+
+            Buffer dest = destPath();
+
+            saveFile(encoded, sv(dest));
+            sysO << "im screenshot: saved "_sv << sv(dest) << endL;
+        } catch (...) {
+            errText = Buffer(Exception::current());
+        }
+
+        if (!errText.empty()) {
             report();
-            action = runUi(driver);
+            runUi(driver);
         }
-
-        if (loaded && action == 1) {
-            try {
-                int x0, y0, x1, y1;
-
-                cropRegion(img, view.crop, x0, y0, x1, y1);
-
-                Buffer encoded;
-                bool png = getenv("IM_SHOT_FORMAT") && StringView(getenv("IM_SHOT_FORMAT")) == "png"_sv;
-
-                if (png) {
-                    encodeSelection(gpu, img, tex, x0, y0, x1, y1, encoded);
-                } else {
-                    encodeJxlSelection(gpu, img, tex, x0, y0, x1, y1, encoded);
-                }
-
-                Buffer dest = destPath();
-
-                saveFile(encoded, sv(dest));
-                sysO << "im screenshot: saved "_sv << sv(dest) << endL;
-            } catch (ToolError& e) {
-                errText = Buffer(e.description());
-            } catch (...) {
-                errText = Buffer(Exception::current());
-            }
-
-            if (!errText.empty()) {
-                report();
-                runUi(driver);
-            }
-        }
-    } catch (...) {
-        sysE << "im screenshot: "_sv << Exception::current() << endL;
-        rc = 1;
     }
 
-    if (img.dmaFd >= 0) {
-        close(img.dmaFd);
-    }
-
-    return rc;
+    return 0;
 }

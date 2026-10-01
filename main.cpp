@@ -6,6 +6,7 @@
 
 #include <std/ios/sys.h>
 #include <std/str/view.h>
+#include <std/sys/throw.h>
 
 #include <string.h>
 
@@ -82,18 +83,30 @@ int main(int argc, char** argv) {
 #endif
 
     StringView self = baseName(argv[0]);
+    const Tool* tool = nullptr;
 
     if (self.length() > 2 && self.startsWith("im"_sv)) {
-        if (const Tool* tool = find(StringView(self.begin() + 2, self.end()))) {
-            return tool->run(argc, argv);
+        tool = find(StringView(self.begin() + 2, self.end()));
+    }
+
+    if (!tool && argc >= 2) {
+        tool = find(StringView(argv[1]));
+
+        if (tool) {
+            argc--;
+            argv++;
         }
     }
 
-    if (argc >= 2) {
-        if (const Tool* tool = find(StringView(argv[1]))) {
-            return tool->run(argc - 1, argv + 1);
-        }
+    if (!tool) {
+        return usage();
     }
 
-    return usage();
+    try {
+        return tool->run(argc, argv);
+    } catch (...) {
+        sysE << "im "_sv << StringView(tool->name) << ": "_sv << Exception::current() << endL;
+
+        return 1;
+    }
 }
