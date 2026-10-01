@@ -16,6 +16,11 @@ operating-system headers. Objects are allocated in caller-owned `stl::ObjPool`
 instances. The platform owns the event loop; clients register one-shot
 file-descriptor callbacks and replaceable timer callbacks through `Poller`.
 
+Window content sizes in `WindowOptions`, `WindowInfo` and `requestResize()`
+use buffer pixels. Backends convert to native logical coordinates internally.
+Wayland may round a requested size up to a representable logical size.
+`contentScale` reports buffer pixels per logical unit.
+
 Build with:
 
 ```sh

@@ -1124,8 +1124,10 @@ WindowImpl::WindowImpl(PlatformImpl& platform_, const WindowOptions& options)
             }
         }
     }
-    const NSRect frame = NSMakeRect(0, 0, max(1u, options.width), max(1u, options.height));
-    window = [[PltWindow alloc] initWithContentRect:frame styleMask:(NSWindowStyleMask)cocoaWindowStyleMask(options.decorations) backing:NSBackingStoreBuffered defer:NO];
+    NSScreen* const screen = [NSScreen mainScreen];
+    const CGFloat scale = screen != nil ? screen.backingScaleFactor : 1.0;
+    const NSRect frame = NSMakeRect(0, 0, max(1u, options.width) / scale, max(1u, options.height) / scale);
+    window = [[PltWindow alloc] initWithContentRect:frame styleMask:(NSWindowStyleMask)cocoaWindowStyleMask(options.decorations) backing:NSBackingStoreBuffered defer:NO screen:screen];
     delegate = [PltWindowDelegate new];
     delegate.owner = this;
     window.delegate = delegate;

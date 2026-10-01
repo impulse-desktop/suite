@@ -64,6 +64,8 @@ Desktop::Desktop()
         .frame = this,
         .appName = StringView(u8"PLT E2E"),
     });
+    const WindowInfo initial = window->info();
+    STD_INSIST(initial.width == 400 && initial.height == 280);
     canvas = MetalCanvas::create(*owner, window->renderContext());
     pipe = ::open(getenv("PLT_COMMAND_PIPE"), O_RDWR | O_NONBLOCK | O_CLOEXEC);
     STD_INSIST(pipe >= 0);

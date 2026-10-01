@@ -45,6 +45,8 @@ with tempfile.TemporaryDirectory(prefix="plt-cocoa-") as temp:
             return (out / "client.log").read_text()
 
         wait(lambda: "FRAME " in text(), "first Metal frame")
+        first = re.search(r"FRAME (\d+) (\d+) ", text())
+        assert tuple(map(int, first.groups())) == (400, 280), text()
         with fifo.open("w", buffering=1) as commands:
             def command(value):
                 before = len(text())

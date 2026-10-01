@@ -157,6 +157,7 @@ namespace plt::test {
         wl_global* fractionalScaleGlobal = nullptr;
         wl_global* cursorShapeGlobal = nullptr;
         i32 outputScale = 1;
+        u32 initialScale = 120;
         u32 selectionSerial = 0;
         Surface* window = nullptr;
         Vector<wl_resource*> frameCallbacks;
@@ -624,6 +625,9 @@ namespace plt::test {
         auto* const surface = static_cast<Surface*>(wl_resource_get_user_data(wlSurface));
         surface->fractionalScale = wl_resource_create(client, &wp_fractional_scale_v1_interface, 1, id);
         wl_resource_set_implementation(surface->fractionalScale, &fractionalScaleImplementation, surface, nullptr);
+        if (surface->server->initialScale != 0) {
+            wp_fractional_scale_v1_send_preferred_scale(surface->fractionalScale, surface->server->initialScale);
+        }
     },
     };
 
@@ -903,6 +907,12 @@ namespace plt::test {
             case Command::DeferInitialConfigure:
                 deferInitialConfigure = true;
                 reply.count = 1;
+                break;
+            case Command::DeferInitialScale:
+                initialScale = 0;
+                break;
+            case Command::InitialFractionalScale:
+                initialScale = 150;
                 break;
             case Command::ReleaseInitialConfigure:
                 deferInitialConfigure = false;
@@ -1710,6 +1720,8 @@ int main() {
     success = runScenario("poller API", pollerApi) && success;
     success = runScenario("deferred clipboard", deferredClipboard) && success;
     success = runScenario("fractional rounding", fractionalRounding) && success;
+    success = runScenario("initial fractional size", initialFractionalSize) && success;
+    success = runScenario("late initial scale", lateInitialScale) && success;
     success = runScenario("minimum after scale", minimumAfterScale) && success;
     success = runScenario("asynchronous clipboard read", asynchronousRead) && success;
     success = runScenario("asynchronous primary selection", asynchronousPrimary) && success;

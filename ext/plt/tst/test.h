@@ -15,6 +15,8 @@
 namespace plt::test {
     enum class Command : u32 {
         DeferInitialConfigure,
+        DeferInitialScale,
+        InitialFractionalScale,
         ReleaseInitialConfigure,
         QueryInitialConfigure,
         PointerEnter,
@@ -392,6 +394,8 @@ namespace plt::test {
     bool pollerApi(int fd);
     bool deferredClipboard(int fd);
     bool fractionalRounding(int fd);
+    bool initialFractionalSize(int fd);
+    bool lateInitialScale(int fd);
     bool minimumAfterScale(int fd);
     bool asynchronousRead(int fd);
     bool asynchronousPrimary(int fd);

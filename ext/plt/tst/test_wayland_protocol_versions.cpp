@@ -15,13 +15,8 @@ namespace plt::test {
             return false;
         }
         pump(*client.platform);
-        if (events.lastInfo.contentScale != 2.0f || events.lastInfo.width != 1600) {
-            fprintf(
-                stderr,
-                "integer scale fallback: scale=%g width=%u, expected 2/1600\n",
-                static_cast<double>(events.lastInfo.contentScale),
-                events.lastInfo.width
-            );
+        if (events.lastInfo.contentScale != 2.0f || events.lastInfo.width != 800 || events.lastInfo.height != 600) {
+            fprintf(stderr, "integer scale fallback: scale=%g width=%u, expected 2/800\n", static_cast<double>(events.lastInfo.contentScale), events.lastInfo.width);
             return false;
         }
         // The compositor's own integer preference takes the same path
