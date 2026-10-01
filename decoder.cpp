@@ -2,6 +2,7 @@
 
 #include "error.h"
 
+#include <std/alg/defer.h>
 #include <std/str/builder.h>
 #include <std/mem/obj_pool.h>
 
@@ -25,28 +26,22 @@ namespace {
     constexpr u32 maxSide = 65535;
     constexpr u64 maxBytes = 1u << 30;
 
-    struct Instance {
+    struct ImageImpl final: Image {
         w2c_decode wasm;
-
-        Instance();
-        ~Instance() noexcept;
-
-        u8* at(u64 offset, u64 length);
-    };
-
-    struct Impl final: Image {
-        Instance instance;
-        const void* data_;
+        const void* data_ = nullptr;
         size_t length_;
         u32 width_;
         u32 height_;
 
-        Impl(StringView file, StringView name);
+        ImageImpl(StringView file, StringView name);
+        ~ImageImpl() noexcept;
 
         const void* data() const override;
         size_t length() const override;
         u32 width() const override;
         u32 height() const override;
+
+        u8* at(u64 offset, u64 length);
     };
 }
 
@@ -54,42 +49,31 @@ extern "C" void decodeTrapHandler(wasm_rt_trap_t code) {
     fail(StringView(StringBuilder() << StringView(u8"the decoder trapped: ") << StringView(wasm_rt_strerror(code))));
 }
 
-Instance::Instance() {
-    wasm2c_decode_instantiate(&wasm);
-}
-
-Instance::~Instance() noexcept {
-    wasm2c_decode_free(&wasm);
-}
-
-u8* Instance::at(u64 offset, u64 length) {
-    wasm_rt_memory_t* memory = w2c_decode_memory(&wasm);
-
-    if (offset + length > memory->size) {
-        fail(StringView(u8"the decoder answered out of its memory"));
-    }
-
-    return (u8*)memory->data + offset;
-}
-
-Impl::Impl(StringView file, StringView name) {
+ImageImpl::ImageImpl(StringView file, StringView name) {
     if (file.length() > 0xffffffffu - name.length()) {
         fail(StringView(u8"the file is too large for the decoder"));
     }
 
+    wasm2c_decode_instantiate(&wasm);
+    ScopedGuard cleanup = [&] {
+        if (data_ == nullptr) {
+            wasm2c_decode_free(&wasm);
+        }
+    };
+
     u32 total = (u32)(file.length() + name.length());
-    u32 in = w2c_decode_malloc(&instance.wasm, total);
+    u32 in = w2c_decode_malloc(&wasm, total);
 
     if (!in) {
         fail(StringView(u8"the decoder is out of memory"));
     }
 
-    memcpy(instance.at(in, total), file.data(), file.length());
-    memcpy(instance.at(in + file.length(), name.length()), name.data(), name.length());
+    memcpy(at(in, total), file.data(), file.length());
+    memcpy(at(in + file.length(), name.length()), name.data(), name.length());
 
-    u32 res = w2c_decode_decode(&instance.wasm, in, (u32)file.length(), in + (u32)file.length(), (u32)name.length());
+    u32 res = w2c_decode_decode(&wasm, in, (u32)file.length(), in + (u32)file.length(), (u32)name.length());
 
-    w2c_decode_free(&instance.wasm, in);
+    w2c_decode_free(&wasm, in);
 
     if (!res) {
         fail(StringView(u8"not an image the decoder reads"));
@@ -97,7 +81,7 @@ Impl::Impl(StringView file, StringView name) {
 
     u32 header[2];
 
-    memcpy(header, instance.at(res, sizeof(header)), sizeof(header));
+    memcpy(header, at(res, sizeof(header)), sizeof(header));
 
     u32 width = header[0];
     u32 height = header[1];
@@ -107,28 +91,42 @@ Impl::Impl(StringView file, StringView name) {
         fail(StringView(StringBuilder() << StringView(u8"the decoder answered an image of ") << (i64)width << StringView(u8"x") << (i64)height));
     }
 
-    data_ = instance.at((u64)res + 8, bytes);
     length_ = (size_t)bytes;
     width_ = width;
     height_ = height;
+    data_ = at((u64)res + 8, bytes);
 }
 
-const void* Impl::data() const {
+ImageImpl::~ImageImpl() noexcept {
+    wasm2c_decode_free(&wasm);
+}
+
+const void* ImageImpl::data() const {
     return data_;
 }
 
-size_t Impl::length() const {
+size_t ImageImpl::length() const {
     return length_;
 }
 
-u32 Impl::width() const {
+u32 ImageImpl::width() const {
     return width_;
 }
 
-u32 Impl::height() const {
+u32 ImageImpl::height() const {
     return height_;
 }
 
+u8* ImageImpl::at(u64 offset, u64 length) {
+    wasm_rt_memory_t* memory = w2c_decode_memory(&wasm);
+
+    if (offset + length > memory->size) {
+        fail(StringView(u8"the decoder answered out of its memory"));
+    }
+
+    return (u8*)memory->data + offset;
+}
+
 Image* decode(ObjPool& pool, StringView file, StringView name) {
-    return pool.make<Impl>(file, name);
+    return pool.make<ImageImpl>(file, name);
 }
