@@ -10,30 +10,17 @@ inline stl::StringView operator""_sv(const char* s, size_t len) {
     return {(const u8*)s, len};
 }
 
-// the tool is single threaded: one shared scratch builder serves all
-// transient formatting. sb() resets it on every acquire — never hold the
-// reference across a call that may format too; overlapping lifetimes get
-// their own local StringBuilder
-stl::StringBuilder& sb();
-
 inline stl::StringView sv(const stl::Buffer& b) {
     return {(const u8*)b.data(), b.used()};
 }
 
 double parseFloat(stl::StringView s);
 
-// the tool's name, as its trace lines and panels say it: `im <tool>`
-extern stl::StringView gTool;
+// the test build's account of a step, `im <tool>: <what>`, for the
+// scenarios to wait on; in the ordinary build nothing
+void traceTool(stl::StringView tool, stl::StringView what);
 
-// the test build's account of a step, for the scenarios to wait on; in
-// the ordinary build nothing
-void traceText(stl::StringView what);
-void traceSize(stl::StringView what, int w, int h);
-
-// IM_TRACE_FRAMES: a line per frame on stderr with the gap since the last
-// one and the time of each phase, and one per decode; to see where a
-// jerk comes from
-extern bool gTraceFrames;
+// the monotonic clock, for the frame trace
 u64 nowNs();
 // "12.3", milliseconds to a tenth
 void appendMs(stl::StringBuilder& text, u64 ns);

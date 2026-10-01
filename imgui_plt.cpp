@@ -158,6 +158,8 @@ namespace {
         void pointerPresence(bool present) override;
         void flush() override;
 
+        float scale = 1.f;
+        bool traceFrames = false;
         u64 frameNs = 0;
         // plt windows start with the Text icon; the first newFrame pushes
         // the ImGui choice (normally Default) by differing from it
@@ -314,7 +316,7 @@ namespace {
     void ImGuiPltImpl::pointerMotion(const plt::PointerMotionInput& input) {
         traceInput("pointer"_sv, input.pixelX, input.pixelY);
 
-        if (gTraceFrames) {
+        if (traceFrames) {
             sysE << "im pointer: "_sv << (i64)input.pixelX << " "_sv << (i64)input.pixelY << endL;
         }
 
@@ -337,7 +339,7 @@ namespace {
     void ImGuiPltImpl::scroll(const plt::ScrollInput& input) {
         // the frame trace: every wheel event as plt hands it over, between
         // the frames' lines
-        if (gTraceFrames) {
+        if (traceFrames) {
             sysE << "im wheel: y/100 "_sv << (i64)(input.y * 100.0) << " precise "_sv << (i64)input.precise << " momentum "_sv << (i64)input.momentum << " phase "_sv << (i64)input.phase << endL;
         }
 
@@ -351,7 +353,7 @@ namespace {
         float y = (float)input.y;
 
         if (input.precise && ImGui::GetFontSize() > 0.f) {
-            float unit = 10.f * uiScale() / (5.f * ImGui::GetFontSize());
+            float unit = 10.f * scale / (5.f * ImGui::GetFontSize());
 
             x *= unit;
             y *= unit;
@@ -377,6 +379,11 @@ namespace {
     }
 }
 
-ImGuiPlt* ImGuiPlt::create(ObjPool& pool) {
-    return pool.make<ImGuiPltImpl>();
+ImGuiPlt* ImGuiPlt::create(ObjPool& pool, float scale, bool traceFrames) {
+    ImGuiPltImpl* imgui = pool.make<ImGuiPltImpl>();
+
+    imgui->scale = scale;
+    imgui->traceFrames = traceFrames;
+
+    return imgui;
 }

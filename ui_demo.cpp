@@ -10,9 +10,10 @@ using namespace stl;
 // The tool as every tool is now: a window opened, then a loop over its
 // events. A frame is one of them: on it the tool draws its ImGui windows,
 // and what it drew is shown when it asks for the next event.
-int mainUiDemo(ObjPool& pool, int, char**) {
-    Ui& ui = *Ui::create(pool, {320_d, 120_d});
+int mainUiDemo(ObjPool&, Ui& ui, int, char**) {
     UiEvent event;
+
+    ui.open({320_d, 120_d});
 
     while (ui.next(event)) {
         if (event.kind == UiEvent::Kind::Close) {
@@ -21,7 +22,7 @@ int mainUiDemo(ObjPool& pool, int, char**) {
 
         // the whole window one ImGui window, the button in its middle
         ImGuiViewport* vp = ImGui::GetMainViewport();
-        ImVec2 button(px(96_d), ImGui::GetFrameHeight());
+        ImVec2 button(ui.px(96_d), ImGui::GetFrameHeight());
 
         ImGui::SetNextWindowPos(vp->Pos);
         ImGui::SetNextWindowSize(vp->Size);
@@ -33,7 +34,7 @@ int mainUiDemo(ObjPool& pool, int, char**) {
         ImGui::End();
 
         if (ok) {
-            traceText("ok"_sv);
+            ui.trace("ok"_sv);
 
             return 0;
         }

@@ -21,5 +21,7 @@ struct ImGuiPlt {
     // call inside the plt frame callback, before ImGui::NewFrame
     virtual void newFrame(plt::Window& window) = 0;
 
-    static ImGuiPlt* create(stl::ObjPool& pool);
+    // at the ui scale, which a finger's scroll is measured in; with
+    // IM_TRACE_FRAMES' lines for every pointer and wheel event
+    static ImGuiPlt* create(stl::ObjPool& pool, float scale, bool traceFrames);
 };

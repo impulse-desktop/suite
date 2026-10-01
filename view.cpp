@@ -158,7 +158,7 @@ namespace {
     // decoder, and a module grown to a large image's pixel cache never
     // shrinks. A failure is thrown, the decoder's own words, or the
     // reader's
-    void decodeEntry(const Entry& entry, u32 side, DecodedImage& out) {
+    void decodeEntry(Ui& ui, const Entry& entry, u32 side, DecodedImage& out) {
         u64 began = nowNs();
 
         if (!entry.error.empty()) {
@@ -173,15 +173,13 @@ namespace {
 
         shrinkToSide(out, side);
 
-        if (gTraceFrames) {
-            auto& text = sb();
+        StringBuilder text;
 
-            text << "im decode "_sv << entry.name() << ": decode "_sv;
-            appendMs(text, decoded - began);
-            text << " shrink "_sv;
-            appendMs(text, nowNs() - decoded);
-            sysE << sv(text) << endL;
-        }
+        text << "im decode "_sv << entry.name() << ": decode "_sv;
+        appendMs(text, decoded - began);
+        text << " shrink "_sv;
+        appendMs(text, nowNs() - decoded);
+        ui.timing(sv(text));
     }
 
     bool imageName(StringView name) {
@@ -378,12 +376,12 @@ namespace {
         DecodedImage image;
 
         try {
-            decodeEntry(entry, side, image);
+            decodeEntry(*ui, entry, side, image);
         } catch (...) {
             Buffer error(Exception::current());
 
             entry.thumb = Load::Failed;
-            traceText(sv(StringBuilder() << "no thumbnail "_sv << entry.name() << ": "_sv << sv(error)));
+            ui->trace(sv(StringBuilder() << "no thumbnail "_sv << entry.name() << ": "_sv << sv(error)));
 
             return;
         }
@@ -397,7 +395,7 @@ namespace {
         entry.thumbH = image.height;
         entry.thumbSide = side;
         entry.thumb = Load::Ready;
-        traceText(sv(StringBuilder() << "thumbnail "_sv << entry.name()));
+        ui->trace(sv(StringBuilder() << "thumbnail "_sv << entry.name()));
     }
 
     // the selected image, decoded and loaded now
@@ -407,19 +405,19 @@ namespace {
 
         Entry& entry = *entries[index];
 
-        traceText(sv(StringBuilder() << "selected "_sv << entry.name()));
+        ui->trace(sv(StringBuilder() << "selected "_sv << entry.name()));
         statFile();
 
         DecodedImage image;
 
         try {
-            decodeEntry(entry, maxSide, image);
+            decodeEntry(*ui, entry, maxSide, image);
         } catch (...) {
             dropShown();
             shown = Load::Failed;
             shownIndex = index;
             shownError = Buffer(Exception::current());
-            traceText(sv(StringBuilder() << "cannot show "_sv << entry.name() << ": "_sv << sv(shownError)));
+            ui->trace(sv(StringBuilder() << "cannot show "_sv << entry.name() << ": "_sv << sv(shownError)));
 
             return;
         }
@@ -430,7 +428,7 @@ namespace {
         texH = image.height;
         shown = Load::Ready;
         shownIndex = index;
-        traceText(sv(StringBuilder() << "showing "_sv << entry.name() << " "_sv << (i64)texW << "x"_sv << (i64)texH));
+        ui->trace(sv(StringBuilder() << "showing "_sv << entry.name() << " "_sv << (i64)texW << "x"_sv << (i64)texH));
     }
 
     // the image shown so far goes, whatever comes instead
@@ -456,14 +454,14 @@ namespace {
     void ViewApp::setZoom(float value) {
         zoom = clampf(value, zoomMin, zoomMax);
         fit = false;
-        traceText(sv(StringBuilder() << "zoom "_sv << (i64)(zoom * 100.f + .5f)));
+        ui->trace(sv(StringBuilder() << "zoom "_sv << (i64)(zoom * 100.f + .5f)));
     }
 
     void ViewApp::fitView() {
         fit = true;
         panX = 0.f;
         panY = 0.f;
-        traceText("fit"_sv);
+        ui->trace("fit"_sv);
     }
 
     void ViewApp::keys() {
@@ -506,22 +504,22 @@ namespace {
         if (ImGui::IsKeyPressed(ImGuiKey_F) || ImGui::IsKeyPressed(ImGuiKey_F11)) {
             fullscreen = !fullscreen;
             ui->requestFullscreen(fullscreen);
-            traceText(fullscreen ? "fullscreen on"_sv : "fullscreen off"_sv);
+            ui->trace(fullscreen ? "fullscreen on"_sv : "fullscreen off"_sv);
         }
 
         if (ImGui::IsKeyPressed(ImGuiKey_R)) {
             rotation = (rotation + (io.KeyShift ? 3 : 1)) % 4;
-            traceText(sv(StringBuilder() << "rotated "_sv << (i64)(rotation * 90)));
+            ui->trace(sv(StringBuilder() << "rotated "_sv << (i64)(rotation * 90)));
         }
 
         if (ImGui::IsKeyPressed(ImGuiKey_Tab)) {
             panel = !panel;
-            traceText(panel ? "panel on"_sv : "panel off"_sv);
+            ui->trace(panel ? "panel on"_sv : "panel off"_sv);
         }
 
         if (ImGui::IsKeyPressed(ImGuiKey_I)) {
             info = !info;
-            traceText(info ? "info on"_sv : "info off"_sv);
+            ui->trace(info ? "info on"_sv : "info off"_sv);
         }
     }
 
@@ -556,7 +554,7 @@ namespace {
     // above it top down, the rows below it bottom up (their centres share
     // an x, so the nearest in height is the nearest)
     void ViewApp::drawGallery() {
-        float g = px(gap);
+        float g = ui->px(gap);
         float innerW = max(1.f, ImGui::GetWindowWidth() - 2.f * g);
         // the texels for a bulged thumbnail's width: what it is drawn at
         // is then a reduction at every scale
@@ -571,7 +569,7 @@ namespace {
         ImGuiViewport* vp = ImGui::GetMainViewport();
         // the pointer anywhere over the window counts
         bool pointed = mouse.x >= vp->Pos.x && mouse.x < vp->Pos.x + vp->Size.x && mouse.y >= vp->Pos.y && mouse.y < vp->Pos.y + vp->Size.y;
-        float reach = px(bulgeReach);
+        float reach = ui->px(bulgeReach);
         float total = g;
         float currentTop = g;
         float currentH = 0.f;
@@ -599,11 +597,11 @@ namespace {
 
         // the frame trace: how far the list moved this frame, and what the
         // wheel said
-        if (gTraceFrames && scrollY != tracedScrollY) {
-            auto& text = sb();
+        if (scrollY != tracedScrollY) {
+            StringBuilder text;
 
             text << "im scroll: y "_sv << (i64)scrollY << " dy "_sv << (i64)(scrollY - tracedScrollY) << " wheel/100 "_sv << (i64)(ImGui::GetIO().MouseWheel * 100.f);
-            sysE << sv(text) << endL;
+            ui->timing(sv(text));
             tracedScrollY = scrollY;
         }
         size_t first = count;
@@ -786,7 +784,7 @@ namespace {
             }
 
             if (ready) {
-                auto& text = sb();
+                StringBuilder text;
                 // megapixels to a tenth
                 i64 tenths = ((i64)texW * (i64)texH + 50000) / 100000;
 
@@ -820,7 +818,7 @@ namespace {
                 key("Zoom");
 
                 {
-                    auto& text = sb();
+                    StringBuilder text;
 
                     text << (i64)(zoom * 100.f + .5f) << "%"_sv;
 
@@ -838,7 +836,7 @@ namespace {
                         static const int presets[] = {25, 50, 100, 200, 400, 800};
 
                         for (int preset : presets) {
-                            auto& label = sb();
+                            StringBuilder label;
 
                             label << (i64)preset << "%"_sv;
 
@@ -854,7 +852,7 @@ namespace {
                 }
 
                 {
-                    auto& text = sb();
+                    StringBuilder text;
 
                     text << (i64)(rotation * 90) << "\xc2\xb0"_sv;
                     row("Rotation", sv(text));
@@ -862,7 +860,7 @@ namespace {
             }
 
             {
-                auto& text = sb();
+                StringBuilder text;
 
                 text << (i64)(current + 1) << " / "_sv << (i64)entries.length();
                 row("Position", sv(text));
@@ -884,7 +882,7 @@ namespace {
             row("Folder", entry.nameAt == 0 ? "."_sv : entry.nameAt == 1 ? "/"_sv : StringView(whole.begin(), whole.begin() + entry.nameAt - 1));
 
             if (fileBytes >= 0) {
-                auto& text = sb();
+                StringBuilder text;
 
                 appendBytes(text, fileBytes);
                 row("Size", sv(text));
@@ -1017,12 +1015,13 @@ namespace {
     }
 
     // the error panel in place of the viewer, when there is nothing to show
-    int showError(ObjPool& pool, StringView message) {
-        Ui& ui = *Ui::create(pool, {480_d, 180_d});
+    int showError(Ui& ui, StringView message) {
         UiEvent event;
 
+        ui.open({480_d, 180_d});
+
         while (ui.next(event)) {
-            if (event.kind == UiEvent::Kind::Close || drawErrorPanel(message) != 0) {
+            if (event.kind == UiEvent::Kind::Close || ui.drawErrorPanel(message)) {
                 return 0;
             }
         }
@@ -1031,7 +1030,7 @@ namespace {
     }
 }
 
-int mainView(ObjPool& pool, int argc, char** argv) {
+int mainView(ObjPool& pool, Ui& ui, int argc, char** argv) {
     if (argc < 2) {
         sysE << "usage: im view <file|dir>..."_sv << endL;
 
@@ -1039,6 +1038,8 @@ int mainView(ObjPool& pool, int argc, char** argv) {
     }
 
     ViewApp& app = *pool.make<ViewApp>();
+
+    app.ui = &ui;
 
     // the list: a directory's images, or the named files; one file
     // selects itself among its directory's
@@ -1093,27 +1094,25 @@ int mainView(ObjPool& pool, int argc, char** argv) {
         }
     }
 
-    traceText(sv(StringBuilder() << "listed "_sv << (i64)app.entries.length()));
+    ui.trace(sv(StringBuilder() << "listed "_sv << (i64)app.entries.length()));
 
     if (app.entries.empty()) {
         sysE << "im view: no images to show"_sv << endL;
 
-        return showError(pool, "no images to show"_sv);
+        return showError(ui, "no images to show"_sv);
     }
 
     // the whole directory into memory before the window: nothing reads
     // the disk after
     readAll(app.entries);
 
-    Ui& ui = *Ui::create(pool, {windowWidth, windowHeight});
-
-    app.ui = &ui;
+    ui.open({windowWidth, windowHeight});
     app.maxSide = ui.maxTextureSide();
 
     // every thumbnail at the list's width in the window asked for, and the
     // selected image, before the first frame; a list grown much wider
     // decodes its rows again as it draws them
-    u32 side = thumbSideFor(floorf(px(windowWidth) * sideShare) * (1.f + bulge));
+    u32 side = thumbSideFor(floorf(ui.px(windowWidth) * sideShare) * (1.f + bulge));
 
     for (size_t i = 0; i < app.entries.length(); i++) {
         app.loadThumb(i, side);

@@ -26,14 +26,6 @@ void fail(StringView m, const char* file, int line) {
     throw ToolError(Buffer(sv(StringBuilder() << StringView(base ? base + 1 : file) << ":"_sv << (long)line << ": "_sv << m)));
 }
 
-StringBuilder& sb() {
-    static StringBuilder b(512);
-
-    b.reset();
-
-    return b;
-}
-
 double parseFloat(StringView s) {
     bool neg = s.startsWith("-"_sv);
 
@@ -63,27 +55,14 @@ double parseFloat(StringView s) {
     return neg ? -r : r;
 }
 
-StringView gTool = "im"_sv;
-
-void traceText(StringView what) {
+void traceTool(StringView tool, StringView what) {
 #ifdef IM_FOR_TESTS
-    sysO << "im "_sv << gTool << ": "_sv << what << endL;
+    sysO << "im "_sv << tool << ": "_sv << what << endL;
 #else
+    (void)tool;
     (void)what;
 #endif
 }
-
-void traceSize(StringView what, int w, int h) {
-#ifdef IM_FOR_TESTS
-    sysO << "im "_sv << gTool << ": "_sv << what << " "_sv << w << "x"_sv << h << endL;
-#else
-    (void)what;
-    (void)w;
-    (void)h;
-#endif
-}
-
-bool gTraceFrames = false;
 
 u64 nowNs() {
     struct timespec ts;

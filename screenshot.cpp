@@ -64,7 +64,7 @@ namespace {
         bool shared() const;
     };
 
-    void readTexture(const Image& img, const Texture& tex, int x0, int y0, int x1, int y1, Image& out);
+    void readTexture(Gpu& gpu, const Image& img, const Texture& tex, int x0, int y0, int x1, int y1, Image& out);
 
     constexpr u32 kMagic = 0x31574d49u; // 'IMW1' little-endian
 
@@ -240,9 +240,9 @@ namespace {
 
     // encode the [x0,y0,x1,y1) region of img (image px, already clamped) as an
     // RGBA png into out; throws on failure
-    void encodePng(const Image& img, int x0, int y0, int x1, int y1, Buffer& out) {
-        png_structp png = gChaos->encoderAlloc(true) ? png_create_write_struct(PNG_LIBPNG_VER_STRING, nullptr, nullptr, nullptr) : nullptr;
-        png_infop info = png && gChaos->encoderAlloc(true) ? png_create_info_struct(png) : nullptr;
+    void encodePng(ChaosMonkey& chaos, const Image& img, int x0, int y0, int x1, int y1, Buffer& out) {
+        png_structp png = chaos.encoderAlloc(true) ? png_create_write_struct(PNG_LIBPNG_VER_STRING, nullptr, nullptr, nullptr) : nullptr;
+        png_infop info = png && chaos.encoderAlloc(true) ? png_create_info_struct(png) : nullptr;
 
         if (!png || !info || setjmp(png_jmpbuf(png))) {
             if (png) {
@@ -315,8 +315,8 @@ namespace {
         out.flush();
     }
 
-    void encodeJxlPixels(const Image& img, const u16* pixels, u32 w, u32 h, Buffer& out) {
-        JxlEncoder* enc = gChaos->encoderAlloc(true) ? JxlEncoderCreate(nullptr) : nullptr;
+    void encodeJxlPixels(ChaosMonkey& chaos, const Image& img, const u16* pixels, u32 w, u32 h, Buffer& out) {
+        JxlEncoder* enc = chaos.encoderAlloc(true) ? JxlEncoderCreate(nullptr) : nullptr;
 
         if (!enc) {
             fail("jxl encoder allocation failed"_sv);
@@ -350,7 +350,7 @@ namespace {
             JxlColorEncodingSetToSRGB(&color, JXL_FALSE);
         }
 
-        JxlEncoderFrameSettings* frame = gChaos->encoderAlloc(true) ? JxlEncoderFrameSettingsCreate(enc, nullptr) : nullptr;
+        JxlEncoderFrameSettings* frame = chaos.encoderAlloc(true) ? JxlEncoderFrameSettingsCreate(enc, nullptr) : nullptr;
         JxlPixelFormat format{3, JXL_TYPE_UINT16, JXL_NATIVE_ENDIAN, 0};
         size_t bytes = (size_t)w * h * 3 * sizeof(u16);
         bool lossless = !getenv("IM_SHOT_LOSSLESS") || StringView(getenv("IM_SHOT_LOSSLESS")) != "0"_sv;
@@ -391,7 +391,7 @@ namespace {
 
             out.append(chunk, sizeof(chunk) - available);
 
-            if (!gChaos->encoderOutput(status == JXL_ENC_SUCCESS || status == JXL_ENC_NEED_MORE_OUTPUT)) {
+            if (!chaos.encoderOutput(status == JXL_ENC_SUCCESS || status == JXL_ENC_NEED_MORE_OUTPUT)) {
                 JxlEncoderDestroy(enc);
                 fail("jxl encode failed"_sv);
             }
@@ -403,11 +403,11 @@ namespace {
         JxlEncoderDestroy(enc);
     }
 
-    void encodeJxlSelection(const Image& img, const Texture& tex, int x0, int y0, int x1, int y1, Buffer& out) {
+    void encodeJxlSelection(Gpu& gpu, const Image& img, const Texture& tex, int x0, int y0, int x1, int y1, Buffer& out) {
         Image selected;
 
         if (img.shared()) {
-            readTexture(img, tex, x0, y0, x1, y1, selected);
+            readTexture(gpu, img, tex, x0, y0, x1, y1, selected);
         } else {
             selected.w = (u32)(x1 - x0);
             selected.h = (u32)(y1 - y0);
@@ -427,7 +427,7 @@ namespace {
         }
 
         selected.color = img.color;
-        encodeJxlPixels(selected, (const u16*)selected.rgb16.data(), selected.w, selected.h, out);
+        encodeJxlPixels(*gpu.chaos, selected, (const u16*)selected.rgb16.data(), selected.w, selected.h, out);
     }
 
     // User directory/template, falling back to
@@ -476,7 +476,7 @@ namespace {
         return Buffer(sv(StringBuilder() << sv(dir) << "/"_sv << StringView(stamp) << extension));
     }
 
-    void importTexture(Image& img, Texture& tex) {
+    void importTexture(Gpu& gpu, Image& img, Texture& tex) {
         VkSubresourceLayout plane = {};
 
         plane.offset = img.offset;
@@ -509,16 +509,16 @@ namespace {
         ici.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
         ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
         ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        vkc(vkCreateImage(gDevice, &ici, gAlloc, &tex.image));
+        gpu.vkc(vkCreateImage(gpu.device, &ici, gpu.alloc, &tex.image));
 
         VkMemoryRequirements req = {};
 
-        vkGetImageMemoryRequirements(gDevice, tex.image, &req);
+        vkGetImageMemoryRequirements(gpu.device, tex.image, &req);
 
-        auto getFdProps = (PFN_vkGetMemoryFdPropertiesKHR)vkGetDeviceProcAddr(gDevice, "vkGetMemoryFdPropertiesKHR");
+        auto getFdProps = (PFN_vkGetMemoryFdPropertiesKHR)vkGetDeviceProcAddr(gpu.device, "vkGetMemoryFdPropertiesKHR");
         VkMemoryFdPropertiesKHR fdProps{VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR};
 
-        if (!getFdProps || getFdProps(gDevice, VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT, img.dmaFd, &fdProps) != VK_SUCCESS) {
+        if (!getFdProps || getFdProps(gpu.device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT, img.dmaFd, &fdProps) != VK_SUCCESS) {
             fail("cannot query shared screenshot memory"_sv);
         }
 
@@ -542,17 +542,17 @@ namespace {
 
         mai.pNext = &import;
         mai.allocationSize = img.allocationSize;
-        mai.memoryTypeIndex = findMemoryType(memoryTypes, 0);
-        vkc(vkAllocateMemory(gDevice, &mai, gAlloc, &tex.memory));
+        mai.memoryTypeIndex = gpu.findMemoryType(memoryTypes, 0);
+        gpu.vkc(vkAllocateMemory(gpu.device, &mai, gpu.alloc, &tex.memory));
         img.dmaFd = -1;
-        vkc(vkBindImageMemory(gDevice, tex.image, tex.memory, 0));
+        gpu.vkc(vkBindImageMemory(gpu.device, tex.image, tex.memory, 0));
 
         VkCommandPool pool = VK_NULL_HANDLE;
         VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
 
-        pci.queueFamilyIndex = gQueueFamily;
+        pci.queueFamilyIndex = gpu.queueFamily;
         pci.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
-        vkc(vkCreateCommandPool(gDevice, &pci, gAlloc, &pool));
+        gpu.vkc(vkCreateCommandPool(gpu.device, &pci, gpu.alloc, &pool));
 
         VkCommandBuffer cmd = VK_NULL_HANDLE;
         VkCommandBufferAllocateInfo cai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
@@ -560,12 +560,12 @@ namespace {
         cai.commandPool = pool;
         cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
         cai.commandBufferCount = 1;
-        vkc(vkAllocateCommandBuffers(gDevice, &cai, &cmd));
+        gpu.vkc(vkAllocateCommandBuffers(gpu.device, &cai, &cmd));
 
         VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
 
         begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        vkc(vkBeginCommandBuffer(cmd, &begin));
+        gpu.vkc(vkBeginCommandBuffer(cmd, &begin));
 
         VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
 
@@ -574,23 +574,23 @@ namespace {
         barrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
         barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL;
-        barrier.dstQueueFamilyIndex = gQueueFamily;
+        barrier.dstQueueFamilyIndex = gpu.queueFamily;
         barrier.image = tex.image;
         barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
         vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
-        vkc(vkEndCommandBuffer(cmd));
+        gpu.vkc(vkEndCommandBuffer(cmd));
 
         VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
 
         submit.commandBufferCount = 1;
         submit.pCommandBuffers = &cmd;
-        vkc(vkQueueSubmit(gQueue, 1, &submit, VK_NULL_HANDLE));
-        vkc(vkQueueWaitIdle(gQueue));
-        vkDestroyCommandPool(gDevice, pool, gAlloc);
-        finishTexture((VkFormat)img.format, tex);
+        gpu.vkc(vkQueueSubmit(gpu.queue, 1, &submit, VK_NULL_HANDLE));
+        gpu.vkc(vkQueueWaitIdle(gpu.queue));
+        vkDestroyCommandPool(gpu.device, pool, gpu.alloc);
+        gpu.finishTexture((VkFormat)img.format, tex);
     }
 
-    void readTexture(const Image& img, const Texture& tex, int x0, int y0, int x1, int y1, Image& out) {
+    void readTexture(Gpu& gpu, const Image& img, const Texture& tex, int x0, int y0, int x1, int y1, Image& out) {
         out.w = (u32)(x1 - x0);
         out.h = (u32)(y1 - y0);
 
@@ -601,25 +601,25 @@ namespace {
 
         bci.size = bytes;
         bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-        vkc(vkCreateBuffer(gDevice, &bci, gAlloc, &buffer));
+        gpu.vkc(vkCreateBuffer(gpu.device, &bci, gpu.alloc, &buffer));
 
         VkMemoryRequirements req = {};
 
-        vkGetBufferMemoryRequirements(gDevice, buffer, &req);
+        vkGetBufferMemoryRequirements(gpu.device, buffer, &req);
 
         VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
 
         mai.allocationSize = req.size;
-        mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-        vkc(vkAllocateMemory(gDevice, &mai, gAlloc, &memory));
-        vkc(vkBindBufferMemory(gDevice, buffer, memory, 0));
+        mai.memoryTypeIndex = gpu.findMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        gpu.vkc(vkAllocateMemory(gpu.device, &mai, gpu.alloc, &memory));
+        gpu.vkc(vkBindBufferMemory(gpu.device, buffer, memory, 0));
 
         VkCommandPool pool = VK_NULL_HANDLE;
         VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
 
-        pci.queueFamilyIndex = gQueueFamily;
+        pci.queueFamilyIndex = gpu.queueFamily;
         pci.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
-        vkc(vkCreateCommandPool(gDevice, &pci, gAlloc, &pool));
+        gpu.vkc(vkCreateCommandPool(gpu.device, &pci, gpu.alloc, &pool));
 
         VkCommandBuffer cmd = VK_NULL_HANDLE;
         VkCommandBufferAllocateInfo cai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
@@ -627,12 +627,12 @@ namespace {
         cai.commandPool = pool;
         cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
         cai.commandBufferCount = 1;
-        vkc(vkAllocateCommandBuffers(gDevice, &cai, &cmd));
+        gpu.vkc(vkAllocateCommandBuffers(gpu.device, &cai, &cmd));
 
         VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
 
         begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        vkc(vkBeginCommandBuffer(cmd, &begin));
+        gpu.vkc(vkBeginCommandBuffer(cmd, &begin));
 
         VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
 
@@ -658,18 +658,18 @@ namespace {
         barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
         barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
-        vkc(vkEndCommandBuffer(cmd));
+        gpu.vkc(vkEndCommandBuffer(cmd));
 
         VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
 
         submit.commandBufferCount = 1;
         submit.pCommandBuffers = &cmd;
-        vkc(vkQueueSubmit(gQueue, 1, &submit, VK_NULL_HANDLE));
-        vkc(vkQueueWaitIdle(gQueue));
+        gpu.vkc(vkQueueSubmit(gpu.queue, 1, &submit, VK_NULL_HANDLE));
+        gpu.vkc(vkQueueWaitIdle(gpu.queue));
 
         void* map = nullptr;
 
-        vkc(vkMapMemory(gDevice, memory, 0, bytes, 0, &map));
+        gpu.vkc(vkMapMemory(gpu.device, memory, 0, bytes, 0, &map));
         out.file.zero((size_t)bytes);
         out.rgb16.zero((size_t)out.w * out.h * 3 * sizeof(u16));
 
@@ -702,24 +702,24 @@ namespace {
         }
 
         out.px = (const u8*)out.file.data();
-        vkUnmapMemory(gDevice, memory);
-        vkDestroyCommandPool(gDevice, pool, gAlloc);
-        vkDestroyBuffer(gDevice, buffer, gAlloc);
-        vkFreeMemory(gDevice, memory, gAlloc);
+        vkUnmapMemory(gpu.device, memory);
+        vkDestroyCommandPool(gpu.device, pool, gpu.alloc);
+        vkDestroyBuffer(gpu.device, buffer, gpu.alloc);
+        vkFreeMemory(gpu.device, memory, gpu.alloc);
     }
 
-    void encodeSelection(const Image& img, const Texture& tex, int x0, int y0, int x1, int y1, Buffer& png) {
+    void encodeSelection(Gpu& gpu, const Image& img, const Texture& tex, int x0, int y0, int x1, int y1, Buffer& png) {
         if (!img.shared()) {
-            encodePng(img, x0, y0, x1, y1, png);
+            encodePng(*gpu.chaos, img, x0, y0, x1, y1, png);
 
             return;
         }
 
         Image pixels;
 
-        readTexture(img, tex, x0, y0, x1, y1, pixels);
+        readTexture(gpu, img, tex, x0, y0, x1, y1, pixels);
         pixels.color = img.color;
-        encodePng(pixels, 0, 0, (int)pixels.w, (int)pixels.h, png);
+        encodePng(*gpu.chaos, pixels, 0, 0, (int)pixels.w, (int)pixels.h, png);
     }
 
     // ---- crop interaction ----
@@ -752,13 +752,13 @@ namespace {
 
     constexpr int kZoomMin = 10, kZoomMax = 400, kZoomStep = 10;
 
-    void initialWindowSize(const Image& img, const ImGuiStyle& style, int& w, int& h) {
+    void initialWindowSize(const Image& img, const ImGuiStyle& style, float scale, int& w, int& h) {
         float zoom = (float)kInitialZoom / 100.f;
 
-        w = (int)ceilf(px(200_d) + style.ItemSpacing.x + img.w * zoom);
+        w = (int)ceilf(scaledPx(200_d, scale) + style.ItemSpacing.x + img.w * zoom);
         h = (int)ceilf(img.h * zoom);
 
-        int minH = pxi(220_d);
+        int minH = (int)scaledPx(220_d, scale);
 
         if (h < minH) {
             h = minH;
@@ -835,7 +835,7 @@ namespace {
         if (crop.empty()) {
             ImGui::TextDisabled("whole frame");
         } else {
-            auto& text = sb();
+            StringBuilder text;
 
             text << "selection "_sv << (i64)(crop.x1 - crop.x0 + 0.5f) << " x "_sv << (i64)(crop.y1 - crop.y0 + 0.5f);
             ImGui::TextUnformatted(text.cStr());
@@ -848,7 +848,7 @@ namespace {
 
     // right canvas: the image at v.zoom in a scrollable viewport. left-drag
     // draws the crop selection; middle-drag pans and wipes the selection.
-    void drawCanvas(const Image& img, Texture& tex, Viewer& v, bool reset) {
+    void drawCanvas(Gpu& gpu, const Image& img, Texture& tex, Viewer& v, bool reset) {
         Crop& crop = v.crop;
 
         if (reset) {
@@ -869,7 +869,7 @@ namespace {
         if (img.color.hdr) {
             // the screenshot draws itself, PQ decoded into the scene's
             // linear light by its own pipeline; ImGui's state comes back after
-            ImageDraw draw{tex.imageSet, origin.x, origin.y, origin.x + content.x, origin.y + content.y, (float)img.color.sdrWhiteNits};
+            ImageDraw draw{&gpu, tex.imageSet, origin.x, origin.y, origin.x + content.x, origin.y + content.y, (float)img.color.sdrWhiteNits};
 
             dl->AddCallback(drawImage, &draw, sizeof(draw));
             dl->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
@@ -940,7 +940,7 @@ namespace {
     }
 
     // draw the whole cropper; returns 1 = save, -1 = cancel, 0 = keep going
-    int drawUi(plt::Window& window, const Image& img, Texture& tex, Viewer& v) {
+    int drawUi(Gpu& gpu, plt::Window& window, const Image& img, Texture& tex, Viewer& v) {
         ImGuiViewport* vp = ImGui::GetMainViewport();
 
         ImGui::SetNextWindowPos(vp->Pos);
@@ -955,7 +955,7 @@ namespace {
         // window that cannot collapse, and a child of one, is shown every
         // frame, and drawing into a hidden one would only be wasted
         ImGui::Begin("##shot", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoSavedSettings);
-        const float panelW = px(200_d);
+        const float panelW = scaledPx(200_d, gpu.scale);
 
         // +/- zoom, handled before the panel so the slider reflects it
         if (ImGui::IsKeyPressed(ImGuiKey_Equal) || ImGui::IsKeyPressed(ImGuiKey_KeypadAdd)) {
@@ -978,7 +978,7 @@ namespace {
         ImGui::SameLine();
 
         ImGui::BeginChild("canvas", ImVec2(0, 0), ImGuiChildFlags_Borders, ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-        drawCanvas(img, tex, v, reset);
+        drawCanvas(gpu, img, tex, v, reset);
 
         ImGui::EndChild();
 
@@ -988,7 +988,7 @@ namespace {
         if (reset) {
             int w, h;
 
-            initialWindowSize(img, ImGui::GetStyle(), w, h);
+            initialWindowSize(img, ImGui::GetStyle(), gpu.scale, w, h);
             clampWindowSize(window.info(), w, h);
             // requestResize speaks pixels and converts to logical itself
             window.requestResize((u32)w, (u32)h);
@@ -1000,6 +1000,7 @@ namespace {
     // the cropper behind the frame driver: the editor, or the error panel
     // when the load or the save failed
     struct ScreenshotUi final: UiFrame {
+        Gpu* gpu = nullptr;
         plt::Window* window = nullptr;
         const Image* img = nullptr;
         Texture* tex = nullptr;
@@ -1011,7 +1012,7 @@ namespace {
     };
 
     int ScreenshotUi::frame() {
-        return error->empty() ? drawUi(*window, *img, *tex, *view) : drawErrorPanel(sv(*error));
+        return error->empty() ? drawUi(*gpu, *window, *img, *tex, *view) : drawErrorPanel("screenshot"_sv, gpu->scale, sv(*error));
     }
 
     // the crop rect in image px, with the empty-selection-is-whole-frame rule
@@ -1031,8 +1032,8 @@ namespace {
 }
 
 int mainScreenshot(StringView path) {
-    gTool = "screenshot"_sv;
-    initUiScale();
+    float scale = scaleFromEnv();
+    bool traceFrames = getenv("IM_TRACE_FRAMES") != nullptr;
 
     // load first; any failure becomes an on-screen error panel, not a console
     // line, so it reads like a message from the compositor
@@ -1062,13 +1063,13 @@ int mainScreenshot(StringView path) {
         ScreenshotUi ui;
         ObjPool::Ref shot = ObjPool::fromMemory();
 
-        gChaos = ChaosMonkey::create(*shot);
+        ChaosMonkey& chaos = *ChaosMonkey::create(*shot);
 
         // the platform, the input bridge and the window live in the same
         // arena: LIFO death tears the window down after every vulkan guard
         // below and before the platform it belongs to
         plt::Platform& platform = *plt::Platform::create(*shot);
-        ImGuiPlt& imgui = *ImGuiPlt::create(*shot);
+        ImGuiPlt& imgui = *ImGuiPlt::create(*shot, scale, traceFrames);
 
         // Open at the image's on-screen size (50% zoom) plus the actual
         // ImGui chrome. A bare error panel gets a small fixed size. Clamp
@@ -1078,10 +1079,10 @@ int mainScreenshot(StringView path) {
         if (loaded) {
             // sized with the style drawUi will use: WindowPadding at zero
             // there, only SameLine's ItemSpacing parts the panel and the image
-            initialWindowSize(img, uiStyle(), winW, winH);
+            initialWindowSize(img, scaledStyle(scale), scale, winW, winH);
         } else {
-            winW = pxi(480_d);
-            winH = pxi(180_d);
+            winW = (int)scaledPx(480_d, scale);
+            winH = (int)scaledPx(180_d, scale);
         }
 
         plt::WindowOptions options;
@@ -1110,49 +1111,54 @@ int mainScreenshot(StringView path) {
             window.requestResize((u32)wantW, (u32)wantH);
         }
 
-        VulkanWants wants;
+        GpuOptions wants;
 
+        wants.tool = "screenshot"_sv;
+        wants.scale = scale;
+        wants.chaos = &chaos;
+        wants.traceFrames = traceFrames;
         wants.hdr = loaded && img.color.hdr;
         wants.sharedBuffer = img.shared();
         wants.deviceUuid = img.deviceUuid;
-        setupVulkan(*shot, wants);
 
-        VkSurfaceKHR surface = createSurface(window);
+        Gpu& gpu = *Gpu::create(*shot, wants);
+        VkSurfaceKHR surface = gpu.createSurface(window);
 
         plt::WindowInfo bootInfo = window.info();
         int fbw = (int)bootInfo.width;
         int fbh = (int)bootInfo.height;
 
-        setupVulkanWindow(*shot, surface, fbw, fbh, loaded && img.color.hdr);
+        gpu.setupWindow(*shot, surface, fbw, fbh, loaded && img.color.hdr);
 
         if (loaded && img.color.hdr) {
-            setupLinearHdr(*shot, (u32)fbw, (u32)fbh);
+            gpu.setupLinearHdr(*shot, (u32)fbw, (u32)fbh);
         }
 
-        setupImGui(*shot, loaded && img.color.hdr);
-        gSdrWhiteNits = (float)img.color.sdrWhiteNits;
+        gpu.setupImGui(*shot, loaded && img.color.hdr);
+        gpu.sdrWhiteNits = (float)img.color.sdrWhiteNits;
 
         if (loaded) {
             // registered before the import so a mid-import throw still
             // releases the partially built handles
-            pooledGuard(*shot, [t = &tex] {
-                destroyTexture(*t);
+            pooledGuard(*shot, [g = &gpu, t = &tex] {
+                g->destroyTexture(*t);
             });
 
             if (img.shared()) {
-                importTexture(img, tex);
+                importTexture(gpu, img, tex);
             } else {
-                uploadTexture(img.w, img.h, img.px, tex);
+                gpu.uploadTexture(img.w, img.h, img.px, tex);
             }
         }
 
         // last in, first out: the queue drains before anything above dies
-        pooledGuard(*shot, [] {
-            vkDeviceWaitIdle(gDevice);
+        pooledGuard(*shot, [g = &gpu] {
+            vkDeviceWaitIdle(g->device);
         });
 
         Viewer view; // zoom 50%, no selection (whole frame) until the user drags
 
+        ui.gpu = &gpu;
         ui.window = &window;
         ui.img = &img;
         ui.tex = &tex;
@@ -1161,6 +1167,7 @@ int mainScreenshot(StringView path) {
         driver.platform = &platform;
         driver.window = &window;
         driver.imgui = &imgui;
+        driver.gpu = &gpu;
         driver.ui = &ui;
 
         // interactive phase: the cropper, or the error panel if the load failed
@@ -1198,9 +1205,9 @@ int mainScreenshot(StringView path) {
                 bool png = getenv("IM_SHOT_FORMAT") && StringView(getenv("IM_SHOT_FORMAT")) == "png"_sv;
 
                 if (png) {
-                    encodeSelection(img, tex, x0, y0, x1, y1, encoded);
+                    encodeSelection(gpu, img, tex, x0, y0, x1, y1, encoded);
                 } else {
-                    encodeJxlSelection(img, tex, x0, y0, x1, y1, encoded);
+                    encodeJxlSelection(gpu, img, tex, x0, y0, x1, y1, encoded);
                 }
 
                 Buffer dest = destPath();
