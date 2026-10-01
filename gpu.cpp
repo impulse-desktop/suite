@@ -198,7 +198,7 @@ VkPhysicalDevice Gpu::selectPhysicalDevice() {
     count = chaos->count("devices"_sv, count);
 
     if (!count) {
-        fail("no vulkan candidate"_sv);
+        fail("no vulkan device"_sv);
     }
 
     Vector<VkPhysicalDevice> devices;
