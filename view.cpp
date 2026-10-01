@@ -368,7 +368,6 @@ void ViewApp::loadThumb(size_t index, u32 side) {
 
 void ViewApp::show(size_t index) {
     current = index;
-    scrollToCurrent = true;
 
     Entry& entry = *entries[index];
 
@@ -413,6 +412,7 @@ void ViewApp::step(long delta) {
     next = next < 0 ? 0 : next > last ? last : next;
 
     if ((size_t)next != current) {
+        scrollToCurrent = true;
         show((size_t)next);
     }
 }
