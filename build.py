@@ -80,7 +80,7 @@ plt = import_build(
     extra_cppflags=["-Dno_vendored_std", "-I$(S)/../libstd"],
 )
 system = dependency(ldflags=["-lm"])
-media = [pkg_config(name) for name in ("libavformat", "libavcodec", "libavutil", "libswresample", "openal")]
+media = [pkg_config(name) for name in ("libavformat", "libavcodec", "libavutil", "libswscale", "libswresample", "openal")]
 # Vulkan's canonical `VkFoo info{VK_STRUCTURE_TYPE_FOO}` initialization zeros
 # the remaining aggregate fields by design; Clang otherwise diagnoses every
 # such declaration under -Wextra.
@@ -110,48 +110,38 @@ for shader, stage in [] if darwin else [
 
 
 # the player's color conversion: video.frag is one Jinja template for every
-# variant (FFmpeg pixel layout x color system x transfer x output);
-# video_shaders.py renders and compiles a layout's variants in one node, glues
-# the layouts into 16 sources whose arrays of variants video_codes.h gathers
-# into one array of arrays, and lists the layouts and codes the template
-# knows for the player to match
+# variant (fetch x transfer x output); video_shaders.py renders and compiles
+# each, and lists the codes the template knows for the player to check
 video_inputs = ["$(S)/video.frag", "$(S)/video_shaders.py", *build.glob("$(S)/ext/jinja2/*.py"), *build.glob("$(S)/ext/markupsafe/*.py")]
-video_parts = [line.split() for line in subprocess.check_output(["python3", "video_shaders.py", "parts", "video.frag"], text=True).splitlines()]
-video_codes = command(
+video_variants = [line.split() for line in subprocess.check_output(["python3", "video_shaders.py", "variants", "video.frag"], text=True).splitlines()]
+video_rules = [command(
     name="video_codes",
     inputs=video_inputs,
     outputs=["$(B)/shaders/video_codes.h"],
     descr="SH",
     cmd=["python3", "$(S)/video_shaders.py", "codes", "$(S)/video.frag", "$(B)/shaders/video_codes.h"],
-)
+)]
 video_language = "msl" if darwin else "spv"
-video_layout_rules = {layout: command(
-    name="video_" + layout + "_" + video_language,
+video_variant_rules = [command(
+    name="video_" + "_".join(variant) + "_" + video_language,
     inputs=video_inputs,
-    outputs=["$(B)/shaders/video_" + layout + "." + video_language + ".h"],
+    outputs=["$(B)/shaders/video_" + "_".join(variant) + "." + video_language + ".h"],
     descr="SH",
     cmd=[
-        "python3", "$(S)/video_shaders.py", "msl" if darwin else "compile", "$(S)/video.frag", layout,
-        "$(B)/shaders/video_" + layout + "." + video_language + ".h", "glslangValidator",
+        "python3", "$(S)/video_shaders.py", "msl" if darwin else "compile", "$(S)/video.frag", *variant,
+        "$(B)/shaders/video_" + "_".join(variant) + "." + video_language + ".h", "glslangValidator",
         *(["spirv-cross"] if darwin else []),
     ],
-) for layouts in video_parts for layout in layouts}
-video_part_rules = [command(
-    name=f"video_{video_language}_{part}",
-    inputs=[*video_inputs, *(video_layout_rules[layout].outputs[0] for layout in layouts)],
-    outputs=[f"$(B)/shaders/video_{video_language}_{part}.cpp"],
-    deps=[video_layout_rules[layout] for layout in layouts],
+) for variant in video_variants]
+video_parts = [rule.outputs[0] for rule in video_variant_rules]
+video_rules += [*video_variant_rules, command(
+    name="video_" + video_language,
+    inputs=[*video_inputs, *video_parts],
+    outputs=["$(B)/shaders/video_" + video_language + ".h"],
+    deps=video_variant_rules,
     descr="SH",
-    cmd=[
-        "python3", "$(S)/video_shaders.py", "metal" if darwin else "spirv", "$(S)/video.frag", str(part),
-        f"$(B)/shaders/video_{video_language}_{part}.cpp", *(video_layout_rules[layout].outputs[0] for layout in layouts),
-    ],
-) for part, layouts in enumerate(video_parts)]
-video = library(
-    name="video",
-    srcs=[{"src": rule.outputs[0], "inputs": video_codes.outputs} for rule in video_part_rules],
-    deps=[video_codes, *video_part_rules],
-)
+    cmd=["python3", "$(S)/video_shaders.py", "metal" if darwin else "spirv", "$(S)/video.frag", "$(B)/shaders/video_" + video_language + ".h", *video_parts],
+)]
 
 
 # ImGui's core and the platform's renderer backend: Vulkan's, or Metal's,
@@ -258,7 +248,7 @@ if darwin:
 # the vendored libraries' own dependencies come along by name: an imported
 # graph hands over its archive, not what the archive wants linked
 im_deps = [
-    *shader_rules, video_codes, video, imgui, decode, plt, libstd,
+    *shader_rules, *video_rules, imgui, decode, plt, libstd,
     *platform_deps, *encoders, *media, system,
 ]
 
