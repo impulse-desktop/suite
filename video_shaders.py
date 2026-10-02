@@ -5,7 +5,8 @@
   video_shaders.py compile TEMPLATE FETCH TRANSFER OUTPUT HEADER GLSLANG
   video_shaders.py codes TEMPLATE HEADER
   video_shaders.py spirv TEMPLATE HEADER VARIANT_HEADER...
-  video_shaders.py metal TEMPLATE HEADER GLSLANG SPIRV_CROSS
+  video_shaders.py msl TEMPLATE FETCH TRANSFER OUTPUT HEADER GLSLANG SPIRV_CROSS
+  video_shaders.py metal TEMPLATE HEADER VARIANT_HEADER...
 """
 
 import subprocess
@@ -156,21 +157,27 @@ def spirv_table(template, header, parts):
     Path(header).write_text("\n".join(lines), encoding="utf-8")
 
 
-def metal(template, header, glslang, spirv_cross):
-    every = variants(template)
-    lines = list(HEADER)
+def msl(template, variant, header, glslang, spirv_cross):
     with tempfile.TemporaryDirectory(prefix="video-shader-") as directory:
-        for variant in every:
-            module = spirv(template, variant, glslang, directory)
-            msl = module.with_suffix(".metal")
-            subprocess.run(
-                [spirv_cross, str(module), "--msl", "--msl-version", "20100", "--msl-decoration-binding", "--output", str(msl)],
-                check=True,
-            )
-            text = msl.read_text(encoding="utf-8")
-            if ")VIDEO_MSL" in text:
-                raise ValueError("a Metal shader contains its raw string delimiter")
-            lines += [f'static constexpr char {name(variant)}_msl[] = R"VIDEO_MSL(', text.rstrip(), ')VIDEO_MSL";', ""]
+        module = spirv(template, variant, glslang, directory)
+        source = module.with_suffix(".metal")
+        subprocess.run(
+            [spirv_cross, str(module), "--msl", "--msl-version", "20100", "--msl-decoration-binding", "--output", str(source)],
+            check=True,
+        )
+        text = source.read_text(encoding="utf-8")
+    if ")VIDEO_MSL" in text:
+        raise ValueError("a Metal shader contains its raw string delimiter")
+    lines = [f'static constexpr char {name(variant)}_msl[] = R"VIDEO_MSL(', text.rstrip(), ')VIDEO_MSL";', ""]
+    Path(header).write_text("\n".join(lines), encoding="utf-8")
+
+
+def metal(template, header, parts):
+    every = variants(template)
+    found = {Path(part).name: Path(part) for part in parts}
+    lines = list(HEADER)
+    for variant in every:
+        lines += found[f"{name(variant)}.msl.h"].read_text(encoding="utf-8").splitlines() + [""]
     lines += table(every, lambda v: f"{name(v)}_msl", lambda v: f"sizeof({name(v)}_msl) - 1")
     Path(header).write_text("\n".join(lines), encoding="utf-8")
 
@@ -184,8 +191,10 @@ def main():
         codes(args[1], args[2])
     elif len(args) >= 3 and args[0] == "spirv":
         spirv_table(args[1], args[2], args[3:])
-    elif len(args) == 5 and args[0] == "metal":
-        metal(args[1], args[2], args[3], args[4])
+    elif len(args) == 8 and args[0] == "msl":
+        msl(args[1], (args[2], args[3], args[4]), args[5], args[6], args[7])
+    elif len(args) >= 3 and args[0] == "metal":
+        metal(args[1], args[2], args[3:])
     elif len(args) == 2 and args[0] == "variants":
         print("\n".join(" ".join(variant) for variant in variants(args[1])))
     else:

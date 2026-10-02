@@ -121,31 +121,27 @@ video_rules = [command(
     descr="SH",
     cmd=["python3", "$(S)/video_shaders.py", "codes", "$(S)/video.frag", "$(B)/shaders/video_codes.h"],
 )]
-if darwin:
-    video_rules.append(command(
-        name="video_msl",
-        inputs=video_inputs,
-        outputs=["$(B)/shaders/video_msl.h"],
-        descr="SH",
-        cmd=["python3", "$(S)/video_shaders.py", "metal", "$(S)/video.frag", "$(B)/shaders/video_msl.h", "glslangValidator", "spirv-cross"],
-    ))
-else:
-    video_variant_rules = [command(
-        name="video_" + "_".join(variant),
-        inputs=video_inputs,
-        outputs=["$(B)/shaders/video_" + "_".join(variant) + ".spv.h"],
-        descr="SH",
-        cmd=["python3", "$(S)/video_shaders.py", "compile", "$(S)/video.frag", *variant, "$(B)/shaders/video_" + "_".join(variant) + ".spv.h", "glslangValidator"],
-    ) for variant in video_variants]
-    video_parts = [rule.outputs[0] for rule in video_variant_rules]
-    video_rules += [*video_variant_rules, command(
-        name="video_spv",
-        inputs=[*video_inputs, *video_parts],
-        outputs=["$(B)/shaders/video_spv.h"],
-        deps=video_variant_rules,
-        descr="SH",
-        cmd=["python3", "$(S)/video_shaders.py", "spirv", "$(S)/video.frag", "$(B)/shaders/video_spv.h", *video_parts],
-    )]
+video_language = "msl" if darwin else "spv"
+video_variant_rules = [command(
+    name="video_" + "_".join(variant) + "_" + video_language,
+    inputs=video_inputs,
+    outputs=["$(B)/shaders/video_" + "_".join(variant) + "." + video_language + ".h"],
+    descr="SH",
+    cmd=[
+        "python3", "$(S)/video_shaders.py", "msl" if darwin else "compile", "$(S)/video.frag", *variant,
+        "$(B)/shaders/video_" + "_".join(variant) + "." + video_language + ".h", "glslangValidator",
+        *(["spirv-cross"] if darwin else []),
+    ],
+) for variant in video_variants]
+video_parts = [rule.outputs[0] for rule in video_variant_rules]
+video_rules += [*video_variant_rules, command(
+    name="video_" + video_language,
+    inputs=[*video_inputs, *video_parts],
+    outputs=["$(B)/shaders/video_" + video_language + ".h"],
+    deps=video_variant_rules,
+    descr="SH",
+    cmd=["python3", "$(S)/video_shaders.py", "metal" if darwin else "spirv", "$(S)/video.frag", "$(B)/shaders/video_" + video_language + ".h", *video_parts],
+)]
 
 
 # ImGui's core and the platform's renderer backend: Vulkan's, or Metal's,
