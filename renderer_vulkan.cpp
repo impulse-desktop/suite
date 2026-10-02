@@ -126,7 +126,7 @@ namespace {
         plt::Platform* platform = nullptr;
         plt::Window* window = nullptr;
         PollGpu* timer = nullptr;
-        SmallObjAllocator* flights = nullptr;
+        SmallObjAllocator* smallObjects = nullptr;
         PFN_vkGetFenceFdKHR fenceFd = nullptr;
         Vector<VulkanImage*> drawn;
         u64 submitted = 0;
@@ -1805,7 +1805,7 @@ void Gpu::track(VkFence fence) {
     info.handleType = VK_EXTERNAL_FENCE_HANDLE_TYPE_SYNC_FD_BIT;
     vkc(fenceFd(device, &info, &fd));
 
-    Flight* flight = flights->make<Flight>(this, submitted, fd);
+    Flight* flight = smallObjects->make<Flight>(this, submitted, fd);
 
     drawn.clear();
 
@@ -1823,7 +1823,7 @@ void Gpu::landed(Flight* flight) {
         completed = flight->serial;
     }
     done.xchg(flight->images);
-    flights->release(flight);
+    smallObjects->release(flight);
     for (VulkanImage* image : done) {
         image->retired->run();
     }
@@ -2390,7 +2390,7 @@ Renderer* createVulkanRenderer(ObjPool& pool, plt::Platform& platform, plt::Wind
         wants.deviceUuid = static_cast<DmaImage*>(options.shared)->deviceUuid;
     }
     Gpu& gpu = *Gpu::create(pool, wants);
-    gpu.flights = SmallObjAllocator::create(&pool);
+    gpu.smallObjects = SmallObjAllocator::create(&pool);
     gpu.platform = &platform;
     gpu.window = &window;
     gpu.timer = pool.make<PollGpu>(&gpu);
