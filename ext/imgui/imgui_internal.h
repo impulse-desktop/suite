@@ -2175,7 +2175,6 @@ struct ImGuiContext
     ImGuiFrameTimer          MouseRepeatTimers[5];
     ImGuiFrameTimer          HoverItemTimer, HoverWindowTimer, HoverFeedbackTimer, DragHoldTimer;
     ImGuiFrameTimer          NavActivateTimer, NavHighlightTimer, NavWindowingTimerWake, NavWindowingListTimer;
-    ImGuiFrameTimer          SettingsTimer;
     bool                    Initialized;
     ImGuiIO                 IO;
     ImGuiPlatformIO         PlatformIO;

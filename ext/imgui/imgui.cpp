@@ -15344,17 +15344,15 @@ void ImGui::MarkIniSettingsDirty()
 {
     ImGuiContext& g = *GImGui;
     if (g.SettingsDirtyTimer <= 0.0f)
-    {
         g.SettingsDirtyTimer = g.IO.IniSavingRate;
-        if (g.IO.IniFilename != NULL)
-            g.SettingsTimer.Schedule(g.SettingsDirtyTimer);
-    }
 }
 
 void ImGui::MarkIniSettingsDirty(ImGuiWindow* window)
 {
+    ImGuiContext& g = *GImGui;
     if (!(window->Flags & ImGuiWindowFlags_NoSavedSettings))
-        MarkIniSettingsDirty();
+        if (g.SettingsDirtyTimer <= 0.0f)
+            g.SettingsDirtyTimer = g.IO.IniSavingRate;
 }
 
 void ImGui::AddSettingsHandler(const ImGuiSettingsHandler* handler)
