@@ -30,12 +30,6 @@
 #include <plt/platform.h>
 #include <plt/loop_wake.h>
 
-#if defined(__APPLE__)
-    #include <video_msl.h>
-#else
-    #include <video_spv.h>
-#endif
-
 extern "C" {
 #include <libavutil/pixdesc.h>
 #include <libavutil/imgutils.h>
@@ -43,10 +37,6 @@ extern "C" {
 #include <libavformat/avformat.h>
 #include <libavutil/channel_layout.h>
 #include <libswresample/swresample.h>
-#if defined(IM_FOR_TESTS)
-    #include <libavutil/opt.h>
-    #include <libswscale/swscale.h>
-#endif
 }
 
 using namespace stl;
@@ -108,21 +98,17 @@ namespace {
     };
 
     struct FrameUniform {
-        u32 plane[4];
-        u32 step[4];
-        u32 offset[4];
-        u32 shift[4];
-        u32 depth[4];
-        u32 planeOffset[4];
-        u32 lineSize[4];
+        u32 planeWord[4];
+        u32 lineWords[4];
         u32 size[4];
-        u32 chroma[4];
-        u32 color[4];
+        u32 tags[4];
+        u32 sites[4];
         float white[4];
     };
 
     struct FrameShader {
-        const char* fetch = nullptr;
+        const char* layout = nullptr;
+        const char* color = nullptr;
         const char* transfer = nullptr;
         FrameUniform uniform = {};
     };
@@ -446,69 +432,112 @@ namespace {
         raiseError(StringView(StringBuilder() << StringView(u8"video ") << StringView(what) << StringView(u8" ") << (i64)code << StringView(u8" is not supported")));
     }
 
-    static FrameShader describeFrame(const AVFrame* frame, float sdrWhiteNits) {
-        const AVPixFmtDescriptor* descriptor = av_pix_fmt_desc_get((AVPixelFormat)frame->format);
-        const AVBufferRef* buffer = frame->buf[0];
+    static const char* kindOf(const VideoCode* codes, size_t count, int code) {
+        for (size_t i = 0; i < count; i++) {
+            if (codes[i].code == code) {
+                return codes[i].kind;
+            }
+        }
 
-        if (!descriptor || (descriptor->flags & AV_PIX_FMT_FLAG_HWACCEL) || !buffer || frame->buf[1] || buffer->size % 4) {
-            raiseError(StringView(StringBuilder() << StringView(u8"video frames of format ") << StringView(av_get_pix_fmt_name((AVPixelFormat)frame->format)) << StringView(u8" cannot be shown")));
+        return nullptr;
+    }
+
+    static const VideoLayout* layoutNamed(const char* name) {
+        for (const VideoFormat& format : videoFormats) {
+            if (name && !strcmp(format.name, name)) {
+                return &videoLayouts[format.layout];
+            }
+        }
+
+        return nullptr;
+    }
+
+    static FrameShader describeFrame(const AVFrame* frame, float sdrWhiteNits) {
+        AVPixelFormat format = (AVPixelFormat)frame->format;
+        const AVPixFmtDescriptor* descriptor = av_pix_fmt_desc_get(format);
+        const AVBufferRef* buffer = frame->buf[0];
+        const VideoLayout* layout = layoutNamed(av_get_pix_fmt_name(format));
+
+        if (!descriptor || !layout || !buffer || frame->buf[1] || buffer->size % 4) {
+            raiseError(StringView(StringBuilder() << StringView(u8"video frames of format ") << StringView(av_get_pix_fmt_name(format)) << StringView(u8" cannot be shown")));
         }
 
         FrameShader out;
         FrameUniform& u = out.uniform;
-        bool rgb = descriptor->flags & AV_PIX_FMT_FLAG_RGB;
-        bool alpha = descriptor->flags & AV_PIX_FMT_FLAG_ALPHA;
-        int colors = descriptor->nb_components - (alpha ? 1 : 0);
+        StringView model(layout->model);
+        ptrdiff_t lines[4];
+        size_t sizes[4];
 
-        out.fetch = descriptor->flags & AV_PIX_FMT_FLAG_PAL ? "palette" : descriptor->flags & AV_PIX_FMT_FLAG_BITSTREAM ? "bitstream" : descriptor->flags & AV_PIX_FMT_FLAG_FLOAT ? "float" : "integer";
+        for (int p = 0; p < 4; p++) {
+            lines[p] = frame->linesize[p];
+        }
 
-        for (int c = 0; c < descriptor->nb_components; c++) {
-            const AVComponentDescriptor& comp = descriptor->comp[c];
-            bool chroma = (c == 1 || c == 2) && !rgb && colors >= 3;
-            u64 width = (u64)(chroma ? AV_CEIL_RSHIFT(frame->width, (int)descriptor->log2_chroma_w) : frame->width);
-            u64 height = (u64)(chroma ? AV_CEIL_RSHIFT(frame->height, (int)descriptor->log2_chroma_h) : frame->height);
-            u64 bits = comp.shift + comp.depth;
-            u64 row = descriptor->flags & AV_PIX_FMT_FLAG_BITSTREAM ? ((width - 1) * comp.step + comp.offset) / 8 + 1 : (width - 1) * comp.step + comp.offset + (bits > 16 || (descriptor->flags & AV_PIX_FMT_FLAG_FLOAT) ? 4 : bits > 8 ? 2 : 1 + ((descriptor->flags & AV_PIX_FMT_FLAG_BE) ? 1 : 0));
-            const uint8_t* data = frame->data[comp.plane];
+        int e = av_image_fill_plane_sizes(sizes, format, frame->height, lines);
 
-            if (!data || frame->linesize[comp.plane] <= 0 || data < buffer->data || (u64)(data - buffer->data) + (height - 1) * (u64)frame->linesize[comp.plane] + row > buffer->size) {
-                raiseError(StringView(u8"video frame planes exceed their buffer"));
-            }
-
-            u.plane[c] = (u32)comp.plane;
-            u.step[c] = (u32)comp.step;
-            u.offset[c] = (u32)comp.offset;
-            u.shift[c] = (u32)comp.shift;
-            u.depth[c] = (u32)comp.depth;
+        if (e < 0) {
+            failAv(StringView(u8"video frame layout"), e);
         }
 
         for (int p = 0; p < 4; p++) {
-            u.planeOffset[p] = frame->data[p] ? (u32)(frame->data[p] - buffer->data) : 0;
-            u.lineSize[p] = frame->data[p] ? (u32)frame->linesize[p] : 0;
+            if (!sizes[p]) {
+                continue;
+            }
+
+            const uint8_t* data = frame->data[p];
+            u64 offset = (u64)(data - buffer->data);
+
+            if (!data || data < buffer->data || lines[p] <= 0 || offset + sizes[p] > buffer->size) {
+                raiseError(StringView(u8"video frame planes exceed their buffer"));
+            }
+
+            if (offset % 4 || lines[p] % 4) {
+                raiseError(StringView(u8"video frame planes are not aligned to words"));
+            }
+
+            u.planeWord[p] = (u32)(offset / 4);
+            u.lineWords[p] = (u32)(lines[p] / 4);
+        }
+
+        int range = frame->color_range == AVCOL_RANGE_UNSPECIFIED && StringView(descriptor->name).startsWith(StringView(u8"yuvj")) ? AVCOL_RANGE_JPEG : frame->color_range;
+        bool xyz = model == StringView(u8"xyz");
+        int transfer = xyz && frame->color_trc == AVCOL_TRC_UNSPECIFIED ? AVCOL_TRC_SMPTE428 : frame->color_trc;
+        const char* pattern = StringView(descriptor->name).startsWith(StringView(u8"bayer_")) ? descriptor->name + 6 : "r";
+        u32 red = 0;
+
+        while (pattern[red] != 'r') {
+            red++;
         }
 
         u.size[0] = (u32)frame->width;
         u.size[1] = (u32)frame->height;
-        u.size[2] = (u32)descriptor->nb_components;
-        u.size[3] = ((descriptor->flags & AV_PIX_FMT_FLAG_BE) ? 1u : 0u) | (rgb ? 2u : 0u) | (alpha ? 4u : 0u);
-        u.chroma[0] = descriptor->log2_chroma_w;
-        u.chroma[1] = descriptor->log2_chroma_h;
-        u.chroma[2] = (u32)frame->chroma_location;
-        u.color[0] = (u32)frame->colorspace;
-        u.color[1] = frame->color_range == AVCOL_RANGE_UNSPECIFIED && StringView(descriptor->name).startsWith(StringView(u8"yuvj")) ? (u32)AVCOL_RANGE_JPEG : (u32)frame->color_range;
-        u.color[2] = (u32)frame->color_trc;
-        u.color[3] = (u32)frame->color_primaries;
+        u.size[2] = descriptor->log2_chroma_w;
+        u.size[3] = descriptor->log2_chroma_h;
+        u.tags[0] = (u32)frame->colorspace;
+        u.tags[1] = (u32)range;
+        u.tags[2] = (u32)transfer;
+        u.tags[3] = (u32)frame->color_primaries;
+        u.sites[0] = (u32)frame->chroma_location;
+        u.sites[1] = red % 2;
+        u.sites[2] = red / 2;
         u.white[0] = sdrWhiteNits;
 
-        if (!listed(videoMatrices, sizeof(videoMatrices), frame->colorspace)) {
+        out.layout = layout->name;
+        out.color = model == StringView(u8"yuv") ? kindOf(videoMatrices, sizeof(videoMatrices) / sizeof(videoMatrices[0]), frame->colorspace) : layout->model;
+        out.transfer = kindOf(videoTransfers, sizeof(videoTransfers) / sizeof(videoTransfers[0]), transfer);
+
+        if (!out.color) {
             unsupported("matrix", frame->colorspace);
         }
 
-        if (!listed(videoRanges, sizeof(videoRanges), (int)u.color[1])) {
-            unsupported("range", (int)u.color[1]);
+        if (!listed(videoRanges, sizeof(videoRanges), range)) {
+            unsupported("range", range);
         }
 
-        if (!listed(videoPrimaries, sizeof(videoPrimaries), frame->color_primaries)) {
+        if (!out.transfer) {
+            unsupported("transfer", transfer);
+        }
+
+        if (!xyz && !listed(videoPrimaries, sizeof(videoPrimaries), frame->color_primaries)) {
             unsupported("primaries", frame->color_primaries);
         }
 
@@ -516,27 +545,21 @@ namespace {
             unsupported("chroma location", frame->chroma_location);
         }
 
-        for (const VideoTransferCode& entry : videoTransfers) {
-            if (entry.code == frame->color_trc) {
-                out.transfer = entry.kind;
-            }
-        }
-
-        if (!out.transfer) {
-            unsupported("transfer", frame->color_trc);
-        }
-
         return out;
     }
 
     static const VideoShaderCode& shaderCode(const FrameShader& frame, const char* output) {
-        for (const VideoShaderCode& code : videoShaders) {
-            if (!strcmp(code.fetch, frame.fetch) && !strcmp(code.transfer, frame.transfer) && !strcmp(code.output, output)) {
-                return code;
+        for (const VideoShaderPart& part : videoShaderParts) {
+            for (size_t i = 0; i < part.count; i++) {
+                const VideoShaderCode& code = part.codes[i];
+
+                if (!strcmp(code.layout, frame.layout) && !strcmp(code.color, frame.color) && !strcmp(code.transfer, frame.transfer) && !strcmp(code.output, output)) {
+                    return code;
+                }
             }
         }
 
-        raiseError(StringView(u8"no video shader for this frame"));
+        raiseError(StringView(StringBuilder() << StringView(u8"video frames of ") << StringView(frame.color) << StringView(u8" color with a ") << StringView(frame.transfer) << StringView(u8" transfer cannot be shown")));
     }
 }
 
@@ -1585,7 +1608,7 @@ RenderShader& Screen::compile(const VideoShaderCode& code) {
     RenderShader* shader = player->ui->compileShader(*player->pool, code.code, code.size);
 
     compiled.pushBack(CompiledShader{&code, shader});
-    player->ui->trace(StringView(StringBuilder() << StringView(u8"compiled video shader ") << StringView(code.fetch) << StringView(u8" ") << StringView(code.transfer) << StringView(u8" ") << StringView(code.output)));
+    player->ui->trace(StringView(StringBuilder() << StringView(u8"compiled video shader ") << StringView(code.layout) << StringView(u8" ") << StringView(code.color) << StringView(u8" ") << StringView(code.transfer) << StringView(u8" ") << StringView(code.output)));
 
     return *shader;
 }
@@ -1847,126 +1870,7 @@ namespace {
     constexpr int sampleWidth = 63;
     constexpr int sampleHeight = 47;
     constexpr size_t samplePixels = (size_t)sampleWidth * sampleHeight;
-
-    constexpr const char* formatNames[] = {
-        "abgr",
-        "argb",
-        "ayuv64le",
-        "bgr0",
-        "bgr24",
-        "bgr48le",
-        "bgr565le",
-        "bgra",
-        "gbrap",
-        "gbrap10le",
-        "gbrap12le",
-        "gbrap14le",
-        "gbrap16le",
-        "gbrapf32le",
-        "gbrp",
-        "gbrp10le",
-        "gbrp12le",
-        "gbrp14le",
-        "gbrp16le",
-        "gbrp9le",
-        "gbrpf32le",
-        "gray10le",
-        "gray12le",
-        "gray14le",
-        "gray16be",
-        "gray16le",
-        "gray",
-        "gray9le",
-        "grayf32le",
-        "monob",
-        "nv12",
-        "nv16",
-        "nv24",
-        "p010le",
-        "p012le",
-        "p016le",
-        "p210le",
-        "p212le",
-        "p216le",
-        "p410le",
-        "p412le",
-        "p416le",
-        "pal8",
-        "rgb0",
-        "rgb24",
-        "rgb48be",
-        "rgb48le",
-        "rgb565le",
-        "rgba",
-        "rgba64be",
-        "rgba64le",
-        "uyvy422",
-        "x2bgr10le",
-        "x2rgb10le",
-        "xv36le",
-        "y210le",
-        "y212le",
-        "ya16be",
-        "ya8",
-        "yuv410p",
-        "yuv411p",
-        "yuv420p",
-        "yuv420p10le",
-        "yuv420p12le",
-        "yuv420p14le",
-        "yuv420p16le",
-        "yuv420p9le",
-        "yuv422p",
-        "yuv422p10le",
-        "yuv422p12le",
-        "yuv422p14le",
-        "yuv422p16le",
-        "yuv422p9le",
-        "yuv440p",
-        "yuv440p10le",
-        "yuv440p12le",
-        "yuv444p",
-        "yuv444p10le",
-        "yuv444p12le",
-        "yuv444p14le",
-        "yuv444p16le",
-        "yuv444p9le",
-        "yuva420p",
-        "yuva420p10le",
-        "yuva420p16le",
-        "yuva420p9le",
-        "yuva422p",
-        "yuva422p10le",
-        "yuva422p12le",
-        "yuva422p16le",
-        "yuva422p9le",
-        "yuva444p",
-        "yuva444p10le",
-        "yuva444p12le",
-        "yuva444p16le",
-        "yuva444p9le",
-        "yuvj411p",
-        "yuvj420p",
-        "yuvj422p",
-        "yuvj440p",
-        "yuvj444p",
-        "yuyv422",
-    };
-
-    constexpr const char* packedNames[] = {
-        "x2bgr10le",
-        "x2rgb10le",
-    };
-
-    static bool packedByHand(StringView name) {
-        for (const char* packed : packedNames) {
-            if (name == StringView(packed)) {
-                return true;
-            }
-        }
-
-        return false;
-    }
+    constexpr double readback = 1. / 512.;
 
     struct Chromaticity {
         int code;
@@ -1987,12 +1891,23 @@ namespace {
         {22, 0.630, 0.340, 0.295, 0.605, 0.155, 0.077, 0.3127, 0.3290},
     };
 
+    constexpr int lumaBytes[4] = {1, 2, 4, 5};
+
     struct Matrix {
         double m[3][3];
     };
 
     struct Ignored final: public Runable {
         void run() override;
+    };
+
+    enum class Model {
+        Yuv,
+        Rgb,
+        Gray,
+        Xyz,
+        Palette,
+        Bayer,
     };
 
     struct Case {
@@ -2004,10 +1919,14 @@ namespace {
         AVChromaLocation location = AVCHROMA_LOC_LEFT;
     };
 
+    struct Levels {
+        double offset;
+        double scale;
+    };
+
     struct FormatCheck {
         ObjPool* pool;
         Ui* ui;
-        AVFrame* source = nullptr;
         Slots slots;
         Vector<CompiledShader> compiled;
         Ignored retired;
@@ -2018,36 +1937,28 @@ namespace {
         FormatCheck(ObjPool* pool, Ui* ui);
         RenderShader& compile(const VideoShaderCode& code);
         AVFrame* frame(const Case& kase);
-        void scale(AVFrame* frame, const Case& kase);
-        void pack(AVFrame* frame);
+        void write(AVFrame* frame, const Case& kase);
+        void writePalette(AVFrame* frame);
+        void linearize(const Case& kase);
         void shade(AVFrame* frame, const char* output, Vector<double>& out);
-        void compare(const AVFrame* frame, StringView what, StringView output, const Vector<double>& got, double tolerance, bool relative);
+        void compare(StringView what, StringView output, const Vector<double>& got, double tolerance, bool relative);
         void verify(AVFrame* frame, StringView what, double tolerance);
         void verifyLinear(AVFrame* frame, StringView what, double tolerance);
-        void expectSource(bool alpha);
+        void check(const Case& kase, StringView what);
         void formats();
         void matrices();
         void locations();
+        void systems();
         void transfers();
         void primaries();
     };
 
-    static double sampleValue(int x, int y, int c) {
-        double u = (double)x / (sampleWidth - 1);
-        double v = (double)y / (sampleHeight - 1);
+    static double sampleValue(double x, double y, int c) {
+        double u = x / (sampleWidth - 1);
+        double v = y / (sampleHeight - 1);
         const double values[4] = {0.15 + 0.7 * u, 0.2 + 0.6 * v, 0.25 + 0.25 * (u + v), 0.3 + 0.7 * u};
 
         return values[c];
-    }
-
-    static double sampleChange(int dx, int dy) {
-        double change = 0.;
-
-        for (int c = 0; c < 4; c++) {
-            change = fmax(change, fabs(sampleValue(dx, dy, c) - sampleValue(0, 0, c)));
-        }
-
-        return change;
     }
 
     static double srgbDecode(double v) {
@@ -2181,23 +2092,355 @@ namespace {
         }
     }
 
-    static int componentDepth(AVPixelFormat format) {
-        const AVPixFmtDescriptor* descriptor = av_pix_fmt_desc_get(format);
-        int depth = 16;
 
-        for (int c = 0; c < descriptor->nb_components; c++) {
-            depth = descriptor->comp[c].depth < depth ? descriptor->comp[c].depth : depth;
-        }
+    static double pqDecode(double signal) {
+        const double m1 = 2610. / 16384.;
+        const double m2 = 2523. / 32.;
+        const double c1 = 3424. / 4096.;
+        const double c2 = 2413. / 128.;
+        const double c3 = 2392. / 128.;
+        double p = pow(signal, 1. / m2);
 
-        return depth;
+        return pow(fmax(p - c1, 0.) / (c2 - c3 * p), 1. / m1) * 10000.;
     }
 
-    static double tolerance(AVPixelFormat format) {
-        const AVPixFmtDescriptor* descriptor = av_pix_fmt_desc_get(format);
-        bool exact = descriptor->flags & (AV_PIX_FMT_FLAG_PAL | AV_PIX_FMT_FLAG_BITSTREAM | AV_PIX_FMT_FLAG_FLOAT);
-        bool subsampled = descriptor->log2_chroma_w || descriptor->log2_chroma_h;
+    static double hlgDecode(double signal) {
+        const double a = 0.17883277;
+        const double b = 0.28466892;
+        const double c = 0.55991073;
 
-        return exact ? 0.003 : 4. / (exp2(componentDepth(format)) - 1.) + 0.006 + (subsampled ? 0.01 : 0.);
+        return signal <= 0.5 ? signal * signal / 3. : (exp((signal - c) / a) + b) / 12.;
+    }
+
+    static double bt709Encode(double light, double alpha, double beta, double slope) {
+        return light < beta ? slope * light : alpha * pow(light, 0.45) - (alpha - 1.);
+    }
+
+    static double bt709Decode(double signal, double alpha, double beta, double slope) {
+        return signal < slope * beta ? signal / slope : pow((signal + alpha - 1.) / alpha, 1. / 0.45);
+    }
+
+    static double oetf(int code, double light) {
+        switch (code) {
+            case 4:
+                return pow(light, 1. / 2.2);
+            case 5:
+                return pow(light, 1. / 2.8);
+            case 7:
+                return bt709Encode(light, 1.1115, 0.0228, 4.);
+            case 8:
+                return light;
+            case 9:
+                return light < 0.01 ? 0. : 1. + log10(light) / 2.;
+            case 10:
+                return light < pow(10., -2.5) ? 0. : 1. + log10(light) / 2.5;
+            case 13:
+                return srgbEncode(light);
+            case 16:
+                return pqEncode(light * 10000.);
+            case 17:
+                return pow(light * 48. / 52.37, 1. / 2.6);
+            case 18:
+                return hlgEncode(light);
+            default:
+                return bt709Encode(light, 1.099296826809442, 0.018053968510807, 4.5);
+        }
+    }
+
+    static double inverseOetf(int code, double signal) {
+        switch (code) {
+            case 4:
+                return pow(signal, 2.2);
+            case 5:
+                return pow(signal, 2.8);
+            case 7:
+                return bt709Decode(signal, 1.1115, 0.0228, 4.);
+            case 8:
+                return signal;
+            case 9:
+                return signal <= 0. ? 0. : pow(10., (signal - 1.) * 2.);
+            case 10:
+                return signal <= 0. ? 0. : pow(10., (signal - 1.) * 2.5);
+            case 13:
+                return srgbDecode(signal);
+            case 16:
+                return pqDecode(signal) / 10000.;
+            case 17:
+                return pow(signal, 2.6) * 52.37 / 48.;
+            case 18:
+                return hlgDecode(signal);
+            default:
+                return bt709Decode(signal, 1.099296826809442, 0.018053968510807, 4.5);
+        }
+    }
+
+    static Matrix primariesToXyz(int code) {
+        for (const Chromaticity& c : chromaticities) {
+            if (c.code == code) {
+                return rgbToXyz(c);
+            }
+        }
+
+        return rgbToXyz(chromaticities[0]);
+    }
+
+    static void displayLight(int transfer, int primaries, const double* signal, double* light) {
+        double white = RendererOptions{}.sdrWhiteNits;
+        Matrix toXyz = primariesToXyz(primaries);
+
+        for (int c = 0; c < 3; c++) {
+            double v = fmax(signal[c], 0.);
+
+            switch (transfer) {
+                case 4:
+                    light[c] = pow(v, 2.2);
+                    break;
+                case 5:
+                    light[c] = pow(v, 2.8);
+                    break;
+                case 8:
+                    light[c] = signal[c];
+                    break;
+                case 9:
+                case 10:
+                    light[c] = inverseOetf(transfer, signal[c]);
+                    break;
+                case 13:
+                    light[c] = srgbDecode(v);
+                    break;
+                case 16:
+                    light[c] = pqDecode(v) / white;
+                    break;
+                case 17:
+                    light[c] = pow(v, 2.6) * 52.37 / 48.;
+                    break;
+                case 18:
+                    light[c] = hlgDecode(v);
+                    break;
+                default:
+                    light[c] = pow(v, 2.4);
+                    break;
+            }
+        }
+
+        if (transfer == 18) {
+            double luminance = fmax(toXyz.m[1][0] * light[0] + toXyz.m[1][1] * light[1] + toXyz.m[1][2] * light[2], 0.);
+
+            for (int c = 0; c < 3; c++) {
+                light[c] = 1000. * pow(luminance, 0.2) * light[c] / white;
+            }
+        }
+    }
+
+    static Model modelOf(const VideoLayout& layout) {
+        StringView model(layout.model);
+
+        return model == StringView(u8"yuv") ? Model::Yuv
+             : model == StringView(u8"rgb") ? Model::Rgb
+             : model == StringView(u8"gray") ? Model::Gray
+             : model == StringView(u8"xyz") ? Model::Xyz
+             : model == StringView(u8"palette") ? Model::Palette
+             : Model::Bayer;
+    }
+
+    static double lumaWeight(const Case& kase, int channel) {
+        switch (kase.matrix) {
+            case AVCOL_SPC_BT709:
+                return channel == 0 ? 0.2126 : 0.0722;
+            case AVCOL_SPC_FCC:
+                return channel == 0 ? 0.30 : 0.11;
+            case AVCOL_SPC_BT470BG:
+            case AVCOL_SPC_SMPTE170M:
+                return channel == 0 ? 0.299 : 0.114;
+            case AVCOL_SPC_SMPTE240M:
+                return channel == 0 ? 0.212 : 0.087;
+            case AVCOL_SPC_BT2020_NCL:
+            case AVCOL_SPC_BT2020_CL:
+                return channel == 0 ? 0.2627 : 0.0593;
+            case AVCOL_SPC_CHROMA_DERIVED_NCL:
+            case AVCOL_SPC_CHROMA_DERIVED_CL:
+                return primariesToXyz(kase.primaries).m[1][channel == 0 ? 0 : 2];
+            default:
+                return sampleHeight > 576 ? (channel == 0 ? 0.2126 : 0.0722) : (channel == 0 ? 0.299 : 0.114);
+        }
+    }
+
+    static void forward(const Case& kase, const double* rgb, double* ycc) {
+        double kr = lumaWeight(kase, 0);
+        double kb = lumaWeight(kase, 2);
+        double kg = 1. - kr - kb;
+
+        switch (kase.matrix) {
+            case AVCOL_SPC_RGB:
+                ycc[0] = rgb[1];
+                ycc[1] = rgb[2];
+                ycc[2] = rgb[0];
+                return;
+            case AVCOL_SPC_YCGCO:
+                ycc[0] = rgb[0] / 4. + rgb[1] / 2. + rgb[2] / 4.;
+                ycc[1] = -rgb[0] / 4. + rgb[1] / 2. - rgb[2] / 4.;
+                ycc[2] = rgb[0] / 2. - rgb[2] / 2.;
+                return;
+            case AVCOL_SPC_YCGCO_RE:
+            case AVCOL_SPC_YCGCO_RO: {
+                double co = rgb[0] - rgb[2];
+                double t = rgb[2] + co / 2.;
+                double cg = rgb[1] - t;
+
+                ycc[0] = t + cg / 2.;
+                ycc[1] = cg;
+                ycc[2] = co;
+                return;
+            }
+            case AVCOL_SPC_SMPTE2085:
+                ycc[0] = rgb[1];
+                ycc[1] = (0.986566 * rgb[2] - rgb[1]) / 2.;
+                ycc[2] = (rgb[0] - 0.991902 * rgb[1]) / 2.;
+                return;
+            case AVCOL_SPC_BT2020_CL:
+            case AVCOL_SPC_CHROMA_DERIVED_CL: {
+                int tf = kase.transfer;
+                double y = oetf(tf, kr * inverseOetf(tf, rgb[0]) + kg * inverseOetf(tf, rgb[1]) + kb * inverseOetf(tf, rgb[2]));
+                double b = rgb[2] - y;
+                double r = rgb[0] - y;
+
+                ycc[0] = y;
+                ycc[1] = b / (2. * (b <= 0. ? oetf(tf, 1. - kb) : 1. - oetf(tf, kb)));
+                ycc[2] = r / (2. * (r <= 0. ? oetf(tf, 1. - kr) : 1. - oetf(tf, kr)));
+                return;
+            }
+            case AVCOL_SPC_ICTCP: {
+                bool hlg = kase.transfer == AVCOL_TRC_ARIB_STD_B67;
+                const Matrix toLms = {{{1688. / 4096., 2146. / 4096., 262. / 4096.}, {683. / 4096., 2951. / 4096., 462. / 4096.}, {99. / 4096., 309. / 4096., 3688. / 4096.}}};
+                const Matrix toIctcp = hlg
+                    ? Matrix{{{0.5, 0.5, 0.}, {3625. / 4096., -7465. / 4096., 3840. / 4096.}, {9500. / 4096., -9212. / 4096., -288. / 4096.}}}
+                    : Matrix{{{0.5, 0.5, 0.}, {6610. / 4096., -13613. / 4096., 7003. / 4096.}, {17933. / 4096., -17390. / 4096., -543. / 4096.}}};
+                double light[3];
+                double lms[3];
+
+                for (int c = 0; c < 3; c++) {
+                    light[c] = hlg ? hlgDecode(rgb[c]) : pqDecode(rgb[c]);
+                }
+
+                apply(toLms, light, lms);
+
+                for (int c = 0; c < 3; c++) {
+                    lms[c] = hlg ? hlgEncode(lms[c]) : pqEncode(lms[c]);
+                }
+
+                apply(toIctcp, lms, ycc);
+                return;
+            }
+            default:
+                ycc[0] = kr * rgb[0] + kg * rgb[1] + kb * rgb[2];
+                ycc[1] = (rgb[2] - ycc[0]) / (2. * (1. - kb));
+                ycc[2] = (rgb[0] - ycc[0]) / (2. * (1. - kr));
+                return;
+        }
+    }
+
+    static bool reversible(const Case& kase) {
+        return kase.matrix == AVCOL_SPC_YCGCO_RE || kase.matrix == AVCOL_SPC_YCGCO_RO;
+    }
+
+    static Levels levels(const Case& kase, const VideoLayout& layout, int c) {
+        Model model = modelOf(layout);
+        int depth = layout.components[c][4];
+        bool alpha = layout.alpha && c == layout.count - 1;
+        bool chroma = model == Model::Yuv && (c == 1 || c == 2) && kase.matrix != AVCOL_SPC_RGB;
+        bool full = depth < 8 || kase.range == AVCOL_RANGE_JPEG || (kase.range == AVCOL_RANGE_UNSPECIFIED && model != Model::Yuv);
+        double unit = exp2(depth - 8.);
+
+        if (layout.floating) {
+            return {0., 1.};
+        }
+
+        if (alpha) {
+            return {0., exp2(depth) - 1.};
+        }
+
+        if (model == Model::Yuv && reversible(kase)) {
+            double scale = exp2(depth - (kase.matrix == AVCOL_SPC_YCGCO_RE ? 2 : 1)) - 1.;
+
+            return {chroma ? exp2(depth - 1.) : 0., scale};
+        }
+
+        if (chroma) {
+            return full ? Levels{exp2(depth - 1.), exp2(depth) - 1.} : Levels{128. * unit, 224. * unit};
+        }
+
+        return full ? Levels{0., exp2(depth) - 1.} : Levels{16. * unit, 219. * unit};
+    }
+
+    static double within(AVChromaLocation location, int axis) {
+        const double sites[7][2] = {{0., 0.5}, {0., 0.5}, {0.5, 0.5}, {0., 0.}, {0.5, 0.}, {0., 1.}, {0.5, 1.}};
+
+        return sites[location][axis];
+    }
+
+    static u32 halfBits(double value) {
+        u32 bits = __builtin_bit_cast(u32, (float)value);
+        u32 sign = (bits >> 16) & 0x8000u;
+        int exponent = (int)((bits >> 23) & 255u) - 127 + 15;
+        u32 mantissa = bits & 0x7fffffu;
+        u32 rest = mantissa & 0x1fffu;
+        u32 half = sign | (u32)exponent << 10 | mantissa >> 13;
+
+        if (exponent <= 0) {
+            return sign;
+        }
+
+        return rest > 0x1000u || (rest == 0x1000u && (half & 1u)) ? half + 1 : half;
+    }
+
+    static double halfValue(u32 half) {
+        return (1. + (half & 1023u) / 1024.) * exp2((int)((half >> 10) & 31u) - 15) * (half & 0x8000u ? -1. : 1.);
+    }
+
+    static u32 encode(double value, Levels levels, const VideoLayout& layout, int c) {
+        int depth = layout.components[c][4];
+
+        if (layout.floating) {
+            return depth == 16 ? halfBits(value) : __builtin_bit_cast(u32, (float)value);
+        }
+
+        double top = exp2(depth) - 1.;
+        double code = round(value * levels.scale + levels.offset);
+
+        return (u32)(code < 0. ? 0. : code > top ? top : code);
+    }
+
+    static double decode(u32 code, Levels levels, const VideoLayout& layout, int c) {
+        if (layout.floating) {
+            return layout.components[c][4] == 16 ? halfValue(code) : __builtin_bit_cast(float, code);
+        }
+
+        return ((double)code - levels.offset) / levels.scale;
+    }
+
+    static int mirrored(int at, int extent) {
+        int reflected = at < 0 ? -at : at;
+        int distance = extent - 1 - reflected;
+
+        return extent - 1 - (distance < 0 ? -distance : distance);
+    }
+
+    static int bayerRed(const AVPixFmtDescriptor* descriptor) {
+        const char* pattern = descriptor->name + 6;
+        int red = 0;
+
+        while (pattern[red] != 'r') {
+            red++;
+        }
+
+        return red;
+    }
+
+    static int bayerChannel(const AVPixFmtDescriptor* descriptor, int x, int y) {
+        int cell = (y & 1) * 2 + (x & 1);
+        int red = bayerRed(descriptor);
+
+        return cell == red ? 0 : cell == 3 - red ? 2 : 1;
     }
 
     static void writeRgb48(AVFrame* frame, int x, int y, const double* rgb) {
@@ -2217,30 +2460,10 @@ void Ignored::run() {
 FormatCheck::FormatCheck(ObjPool* pool_, Ui* ui_)
     : pool(pool_)
     , ui(ui_)
-    , source(av_frame_alloc())
 {
     pooledGuard(*pool, [this] {
         av_buffer_pool_uninit(&slots.pool);
-        av_frame_free(&source);
     });
-
-    source->format = AV_PIX_FMT_RGBA64LE;
-    source->width = sampleWidth;
-    source->height = sampleHeight;
-
-    if (av_frame_get_buffer(source, 0) < 0) {
-        fail(StringView(u8"cannot allocate the test picture"));
-    }
-
-    for (int y = 0; y < sampleHeight; y++) {
-        u16* row = (u16*)(source->data[0] + y * source->linesize[0]);
-
-        for (int x = 0; x < sampleWidth; x++) {
-            for (int c = 0; c < 4; c++) {
-                row[x * 4 + c] = (u16)lround(sampleValue(x, y, c) * 65535.);
-            }
-        }
-    }
 }
 
 RenderShader& FormatCheck::compile(const VideoShaderCode& code) {
@@ -2270,54 +2493,228 @@ AVFrame* FormatCheck::frame(const Case& kase) {
     frame->color_primaries = kase.primaries;
     frame->chroma_location = kase.location;
     slots.fill(frame, sampleWidth, sampleHeight, align);
+    memZero(frame->buf[0]->data, frame->buf[0]->data + frame->buf[0]->size);
 
     return frame;
 }
 
-void FormatCheck::scale(AVFrame* frame, const Case& kase) {
-    static constexpr double positions[7][2] = {{0., 0.5}, {0., 0.5}, {0.5, 0.5}, {0., 0.}, {0.5, 0.}, {0., 1.}, {0.5, 1.}};
+void FormatCheck::write(AVFrame* frame, const Case& kase) {
     const AVPixFmtDescriptor* descriptor = av_pix_fmt_desc_get(kase.format);
-    SwsContext* sws = sws_alloc_context();
-    STD_DEFER {
-        sws_freeContext(sws);
+    const VideoLayout& layout = *layoutNamed(descriptor->name);
+    Model model = modelOf(layout);
+    bool alpha = layout.alpha;
+    int count = layout.count;
+    AVPixFmtDescriptor written = *descriptor;
+    int stepX = 1 << descriptor->log2_chroma_w;
+    int stepY = 1 << descriptor->log2_chroma_h;
+    int chromaWidth = AV_CEIL_RSHIFT(sampleWidth, (int)descriptor->log2_chroma_w);
+    int chromaHeight = AV_CEIL_RSHIFT(sampleHeight, (int)descriptor->log2_chroma_h);
+    double siteX = within(kase.location, 0) * (stepX - 1);
+    double siteY = within(kase.location, 1) * (stepY - 1);
+    auto source = [&](int c, double x, double y) {
+        double rgba[4];
+        double ycc[3];
+
+        for (int k = 0; k < 4; k++) {
+            rgba[k] = sampleValue(x, y, k);
+        }
+
+        if (alpha && c == count - 1) {
+            return rgba[3];
+        }
+
+        if (model == Model::Gray) {
+            return 0.2126 * rgba[0] + 0.7152 * rgba[1] + 0.0722 * rgba[2];
+        }
+
+        if (model == Model::Yuv) {
+            forward(kase, rgba, ycc);
+
+            return ycc[c];
+        }
+
+        return rgba[c];
+    };
+    auto stored = [&](int c, double x, double y) {
+        Levels scale = levels(kase, layout, c);
+
+        return decode(encode(source(c, x, y), scale, layout, c), scale, layout, c);
     };
 
-    av_opt_set_int(sws, "srcw", sampleWidth, 0);
-    av_opt_set_int(sws, "srch", sampleHeight, 0);
-    av_opt_set_int(sws, "src_format", AV_PIX_FMT_RGBA64LE, 0);
-    av_opt_set_int(sws, "dstw", sampleWidth, 0);
-    av_opt_set_int(sws, "dsth", sampleHeight, 0);
-    av_opt_set_int(sws, "dst_format", kase.format, 0);
-    av_opt_set_int(sws, "sws_flags", SWS_BILINEAR | SWS_ACCURATE_RND | SWS_FULL_CHR_H_INP | SWS_BITEXACT, 0);
-    av_opt_set(sws, "sws_dither", "none", 0);
-    av_opt_set_int(sws, "dst_h_chr_pos", lround(positions[kase.location][0] * ((1 << descriptor->log2_chroma_w) - 1) * 256.), 0);
-    av_opt_set_int(sws, "dst_v_chr_pos", lround(positions[kase.location][1] * ((1 << descriptor->log2_chroma_h) - 1) * 256.), 0);
+    written.flags = (layout.bigEndian ? AV_PIX_FMT_FLAG_BE : 0) | (layout.bits ? AV_PIX_FMT_FLAG_BITSTREAM : 0);
 
-    if (sws_init_context(sws, nullptr, nullptr) < 0) {
-        fail(StringView(StringBuilder() << StringView(u8"swscale cannot produce ") << StringView(descriptor->name)));
+    for (int c = 0; c < count; c++) {
+        written.comp[c] = {layout.components[c][0], layout.components[c][1], layout.components[c][2], layout.components[c][3], layout.components[c][4]};
     }
 
-    const int* rgbTable = sws_getCoefficients(SWS_CS_ITU709);
+    expected.clear();
 
-    sws_setColorspaceDetails(sws, rgbTable, 1, descriptor->flags & AV_PIX_FMT_FLAG_RGB ? rgbTable : sws_getCoefficients(kase.matrix), kase.range == AVCOL_RANGE_JPEG, 0, 1 << 16, 1 << 16);
-    sws_scale(sws, source->data, source->linesize, 0, sampleHeight, frame->data, frame->linesize);
-}
+    if (model == Model::Bayer) {
+        int step = layout.components[0][1];
+        bool bigEndian = layout.bigEndian;
+        double top = exp2(8 * step) - 1.;
+        auto value = [&](int x, int y) {
+            x = mirrored(x, sampleWidth);
+            y = mirrored(y, sampleHeight);
 
-void FormatCheck::pack(AVFrame* frame) {
-    const AVPixFmtDescriptor* descriptor = av_pix_fmt_desc_get((AVPixelFormat)frame->format);
-    u32 line[sampleWidth];
+            return round(sampleValue(x, y, bayerChannel(descriptor, x, y)) * top) / top;
+        };
 
-    memZero(frame->buf[0]->data, frame->buf[0]->data + frame->buf[0]->size);
+        for (int y = 0; y < sampleHeight; y++) {
+            uint8_t* row = frame->data[0] + y * frame->linesize[0];
 
-    for (int c = 0; c < descriptor->nb_components; c++) {
-        double scale = exp2(descriptor->comp[c].depth) - 1.;
+            for (int x = 0; x < sampleWidth; x++) {
+                u32 code = (u32)lround(value(x, y) * top);
+
+                if (step == 1) {
+                    row[x] = (uint8_t)code;
+                } else {
+                    row[2 * x + (bigEndian ? 0 : 1)] = (uint8_t)(code >> 8);
+                    row[2 * x + (bigEndian ? 1 : 0)] = (uint8_t)code;
+                }
+            }
+        }
 
         for (int y = 0; y < sampleHeight; y++) {
             for (int x = 0; x < sampleWidth; x++) {
-                line[x] = (u32)lround(sampleValue(x, y, c) * scale);
+                int channel = bayerChannel(descriptor, x, y);
+                double here = value(x, y);
+                double horizontal = (value(x - 1, y) + value(x + 1, y)) / 2.;
+                double vertical = (value(x, y - 1) + value(x, y + 1)) / 2.;
+                double cross = (horizontal + vertical) / 2.;
+                double diagonal = (value(x - 1, y - 1) + value(x + 1, y - 1) + value(x - 1, y + 1) + value(x + 1, y + 1)) / 4.;
+                bool redRow = (y & 1) == bayerRed(descriptor) / 2;
+                double rgb[3] = {here, cross, diagonal};
+
+                if (channel == 2) {
+                    rgb[0] = diagonal;
+                    rgb[2] = here;
+                } else if (channel == 1) {
+                    rgb[0] = redRow ? horizontal : vertical;
+                    rgb[1] = here;
+                    rgb[2] = redRow ? vertical : horizontal;
+                }
+
+                for (int c = 0; c < 3; c++) {
+                    expected.pushBack(rgb[c]);
+                }
+
+                expected.pushBack(1.);
+            }
+        }
+
+        return;
+    }
+
+    for (int c = 0; c < count; c++) {
+        bool chroma = model == Model::Yuv && (c == 1 || c == 2);
+        int width = chroma ? chromaWidth : sampleWidth;
+        int height = chroma ? chromaHeight : sampleHeight;
+        Levels scale = levels(kase, layout, c);
+        u32 line[sampleWidth];
+
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                double at = chroma ? x * stepX + siteX : x;
+                double row = chroma ? y * stepY + siteY : y;
+
+                line[x] = encode(source(c, at, row), scale, layout, c);
+
+                if (kase.format == AV_PIX_FMT_MONOWHITE) {
+                    line[x] ^= 1u;
+                }
+
+                if (kase.format == AV_PIX_FMT_UYYVYY411 && c == 0) {
+                    frame->data[0][y * frame->linesize[0] + x / 4 * 6 + lumaBytes[x % 4]] = (uint8_t)line[x];
+                }
             }
 
-            av_write_image_line2(line, frame->data, frame->linesize, descriptor, 0, y, c, sampleWidth, 4);
+            if (!(kase.format == AV_PIX_FMT_UYYVYY411 && c == 0)) {
+                av_write_image_line2(line, frame->data, frame->linesize, &written, 0, y, c, width, 4);
+            }
+        }
+    }
+
+    Matrix toSignal = {};
+
+    if (model == Model::Yuv && (descriptor->log2_chroma_w || descriptor->log2_chroma_h)) {
+        Matrix fromSignal = {};
+
+        for (int k = 0; k < 3; k++) {
+            double rgb[3] = {k == 0 ? 1. : 0., k == 1 ? 1. : 0., k == 2 ? 1. : 0.};
+            double ycc[3];
+
+            forward(kase, rgb, ycc);
+
+            for (int c = 0; c < 3; c++) {
+                fromSignal.m[c][k] = ycc[c];
+            }
+        }
+
+        toSignal = invert(fromSignal);
+    }
+
+    for (int y = 0; y < sampleHeight; y++) {
+        for (int x = 0; x < sampleWidth; x++) {
+            double rgba[4] = {sampleValue(x, y, 0), sampleValue(x, y, 1), sampleValue(x, y, 2), alpha ? stored(count - 1, x, y) : 1.};
+
+            if (model == Model::Gray) {
+                rgba[0] = rgba[1] = rgba[2] = stored(0, x, y);
+            } else if (model != Model::Yuv) {
+                for (int c = 0; c < 3; c++) {
+                    rgba[c] = stored(c, x, y);
+                }
+            } else if (descriptor->log2_chroma_w || descriptor->log2_chroma_h) {
+                double chromaX = fmin(fmax((x - siteX) / stepX, 0.), chromaWidth - 1.) * stepX + siteX;
+                double chromaY = fmin(fmax((y - siteY) / stepY, 0.), chromaHeight - 1.) * stepY + siteY;
+                double ycc[3] = {source(0, x, y), source(1, chromaX, chromaY), source(2, chromaX, chromaY)};
+
+                apply(toSignal, ycc, rgba);
+            }
+
+            for (int c = 0; c < 4; c++) {
+                expected.pushBack(rgba[c]);
+            }
+        }
+    }
+}
+
+void FormatCheck::writePalette(AVFrame* frame) {
+    u32* entries = (u32*)frame->data[1];
+
+    for (u32 i = 0; i < 256; i++) {
+        entries[i] = (255 - i) << 24 | i << 16 | ((i * 7) & 255) << 8 | ((i * 13) & 255);
+    }
+
+    expected.clear();
+
+    for (int y = 0; y < sampleHeight; y++) {
+        for (int x = 0; x < sampleWidth; x++) {
+            u32 index = (u32)((x * 5 + y * 3) & 255);
+            u32 entry = entries[index];
+
+            frame->data[0][y * frame->linesize[0] + x] = (uint8_t)index;
+            expected.pushBack(pow(srgbDecode(((entry >> 16) & 255) / 255.), 1. / 2.4));
+            expected.pushBack(pow(srgbDecode(((entry >> 8) & 255) / 255.), 1. / 2.4));
+            expected.pushBack(pow(srgbDecode((entry & 255) / 255.), 1. / 2.4));
+            expected.pushBack((entry >> 24) / 255.);
+        }
+    }
+}
+
+void FormatCheck::linearize(const Case& kase) {
+    Matrix toScene = toBt2020(kase.primaries);
+
+    for (size_t i = 0; i < samplePixels; i++) {
+        double signal[3] = {expected[i * 4], expected[i * 4 + 1], expected[i * 4 + 2]};
+        double light[3];
+        double scene[3];
+
+        displayLight(kase.transfer, kase.primaries, signal, light);
+        apply(toScene, light, scene);
+
+        for (int c = 0; c < 3; c++) {
+            expected.mut(i * 4 + c) = scene[c];
         }
     }
 }
@@ -2340,35 +2737,24 @@ void FormatCheck::shade(AVFrame* frame, const char* output, Vector<double>& out)
     }
 }
 
-void FormatCheck::compare(const AVFrame* frame, StringView what, StringView output, const Vector<double>& got, double tolerance, bool relative) {
-    const AVPixFmtDescriptor* descriptor = av_pix_fmt_desc_get((AVPixelFormat)frame->format);
-    int bandX = (1 << descriptor->log2_chroma_w) - 1;
-    int bandY = (1 << descriptor->log2_chroma_h) - 1;
-    double edge = tolerance + sampleChange(bandX, 0) + sampleChange(0, bandY);
-    double score = 0.;
+void FormatCheck::compare(StringView what, StringView output, const Vector<double>& got, double tolerance, bool relative) {
     double worst = 0.;
-    double allowed = tolerance;
     size_t at = 0;
 
     for (size_t i = 0; i < samplePixels * 4; i++) {
-        int x = (int)(i / 4 % sampleWidth);
-        int y = (int)(i / 4 / sampleWidth);
-        double limit = x >= bandX && x < sampleWidth - bandX && y >= bandY && y < sampleHeight - bandY ? tolerance : edge;
         double error = fabs(got[i] - expected[i]) / (relative ? fmax(1., fabs(expected[i])) : 1.);
 
-        if (!(error / limit <= score) && !isnan(score)) {
-            score = error / limit;
+        if (!(error <= worst) && !isnan(worst)) {
             worst = error;
-            allowed = limit;
             at = i;
         }
     }
 
     checked++;
 
-    if (!(score <= 1.)) {
+    if (!(worst <= tolerance)) {
         failed++;
-        sysE << StringView(u8"play formats: ") << what << StringView(u8" ") << output << StringView(u8" is off by ") << worst << StringView(u8" at ") << (u64)(at / 4 % sampleWidth) << StringView(u8",") << (u64)(at / 4 / sampleWidth) << StringView(u8" channel ") << (u64)(at % 4) << StringView(u8", allowed ") << allowed << endL;
+        sysE << StringView(u8"play formats: ") << what << StringView(u8" ") << output << StringView(u8" is off by ") << worst << StringView(u8" at ") << (u64)(at / 4 % sampleWidth) << StringView(u8",") << (u64)(at / 4 / sampleWidth) << StringView(u8" channel ") << (u64)(at % 4) << StringView(u8", got ") << got[at] << StringView(u8" for ") << expected[at] << StringView(u8", allowed ") << tolerance << endL;
     }
 }
 
@@ -2383,7 +2769,7 @@ void FormatCheck::verify(AVFrame* frame, StringView what, double tolerance) {
         }
     }
 
-    compare(frame, what, StringView(u8"sdr"), got, tolerance, false);
+    compare(what, StringView(u8"sdr"), got, tolerance, false);
     shade(frame, "hdr", got);
 
     Matrix back = invert(toBt2020(1));
@@ -2399,184 +2785,174 @@ void FormatCheck::verify(AVFrame* frame, StringView what, double tolerance) {
         }
     }
 
-    compare(frame, what, StringView(u8"hdr"), got, tolerance, false);
+    compare(what, StringView(u8"hdr"), got, tolerance, false);
 }
 
 void FormatCheck::verifyLinear(AVFrame* frame, StringView what, double tolerance) {
     Vector<double> got;
 
     shade(frame, "hdr", got);
-    compare(frame, what, StringView(u8"hdr"), got, tolerance, true);
+    compare(what, StringView(u8"hdr"), got, tolerance, true);
 }
 
-void FormatCheck::expectSource(bool alpha) {
-    expected.clear();
+void FormatCheck::check(const Case& kase, StringView what) {
+    const VideoLayout* layout = layoutNamed(av_get_pix_fmt_name(kase.format));
 
-    for (int y = 0; y < sampleHeight; y++) {
-        for (int x = 0; x < sampleWidth; x++) {
+    if (!layout) {
+        checked++;
+        failed++;
+        sysE << StringView(u8"play formats: ") << what << StringView(u8" has no layout") << endL;
+
+        return;
+    }
+
+    Model model = modelOf(*layout);
+    AVFrame* frame = this->frame(kase);
+    STD_DEFER {
+        av_frame_free(&frame);
+    };
+
+    if (model == Model::Palette) {
+        writePalette(frame);
+        frame->color_trc = AVCOL_TRC_IEC61966_2_1;
+        verify(frame, what, readback);
+
+        return;
+    }
+
+    write(frame, kase);
+
+    if (model == Model::Xyz || kase.transfer != AVCOL_TRC_BT709 || kase.primaries != AVCOL_PRI_BT709) {
+        Case shown = kase;
+
+        if (model == Model::Xyz && kase.transfer == AVCOL_TRC_UNSPECIFIED) {
+            shown.transfer = AVCOL_TRC_SMPTE428;
+        }
+
+        linearize(shown);
+        verifyLinear(frame, what, readback);
+
+        return;
+    }
+
+    double tolerance = readback;
+
+    if (model == Model::Yuv) {
+        Matrix fromSignal = {};
+        double steps[3];
+
+        for (int k = 0; k < 3; k++) {
+            double rgb[3] = {k == 0 ? 1. : 0., k == 1 ? 1. : 0., k == 2 ? 1. : 0.};
+            double ycc[3];
+
+            forward(kase, rgb, ycc);
+
             for (int c = 0; c < 3; c++) {
-                expected.pushBack(sampleValue(x, y, c));
+                fromSignal.m[c][k] = ycc[c];
             }
 
-            expected.pushBack(alpha ? sampleValue(x, y, 3) : 1.);
+            steps[k] = layout->floating ? 0. : 0.5 / levels(kase, *layout, k).scale;
+        }
+
+        Matrix toSignal = invert(fromSignal);
+
+        for (int c = 0; c < 3; c++) {
+            double bound = readback;
+
+            for (int k = 0; k < 3; k++) {
+                bound += fabs(toSignal.m[c][k]) * steps[k];
+            }
+
+            tolerance = fmax(tolerance, bound);
         }
     }
+
+    verify(frame, what, tolerance);
 }
 
 void FormatCheck::formats() {
-    for (const char* name : formatNames) {
+    for (const AVPixFmtDescriptor* descriptor = av_pix_fmt_desc_next(nullptr); descriptor; descriptor = av_pix_fmt_desc_next(descriptor)) {
+        if (descriptor->flags & AV_PIX_FMT_FLAG_HWACCEL) {
+            continue;
+        }
+
         Case kase;
+        const VideoLayout* layout = layoutNamed(descriptor->name);
+        Model model = layout ? modelOf(*layout) : Model::Rgb;
 
-        kase.format = av_get_pix_fmt(name);
+        kase.format = av_pix_fmt_desc_get_id(descriptor);
+        kase.matrix = model == Model::Yuv ? AVCOL_SPC_BT709 : AVCOL_SPC_RGB;
+        kase.range = model == Model::Yuv && !StringView(descriptor->name).startsWith(StringView(u8"yuvj")) ? AVCOL_RANGE_MPEG : AVCOL_RANGE_JPEG;
 
-        const AVPixFmtDescriptor* descriptor = av_pix_fmt_desc_get(kase.format);
-        bool rgb = descriptor->flags & AV_PIX_FMT_FLAG_RGB;
-        bool alpha = descriptor->flags & AV_PIX_FMT_FLAG_ALPHA;
-        bool palette = descriptor->flags & AV_PIX_FMT_FLAG_PAL;
-        bool bitstream = descriptor->flags & AV_PIX_FMT_FLAG_BITSTREAM;
-        bool gray = descriptor->nb_components - (alpha ? 1 : 0) == 1 && !palette;
-
-        kase.matrix = rgb ? AVCOL_SPC_RGB : AVCOL_SPC_BT709;
-        kase.range = rgb || palette || StringView(name).startsWith(StringView(u8"yuvj")) ? AVCOL_RANGE_JPEG : AVCOL_RANGE_MPEG;
-
-        AVFrame* frame = this->frame(kase);
-        STD_DEFER {
-            av_frame_free(&frame);
-        };
-
-        if (palette) {
-            u32* entries = (u32*)frame->data[1];
-
-            for (u32 i = 0; i < 256; i++) {
-                entries[i] = (255 - i) << 24 | i << 16 | ((i * 7) & 255) << 8 | ((i * 13) & 255);
-            }
-
-            for (int y = 0; y < sampleHeight; y++) {
-                for (int x = 0; x < sampleWidth; x++) {
-                    frame->data[0][y * frame->linesize[0] + x] = (uint8_t)((x * 5 + y * 3) & 255);
-                }
-            }
-        } else if (packedByHand(StringView(name))) {
-            pack(frame);
-        } else {
-            scale(frame, kase);
+        if (model == Model::Xyz) {
+            kase.transfer = AVCOL_TRC_UNSPECIFIED;
+            kase.primaries = AVCOL_PRI_SMPTE428;
         }
 
-        expectSource(alpha);
-
-        for (int y = 0; y < sampleHeight; y++) {
-            for (int x = 0; x < sampleWidth; x++) {
-                size_t at = ((size_t)y * sampleWidth + x) * 4;
-                double value[4] = {expected[at], expected[at + 1], expected[at + 2], expected[at + 3]};
-
-                if (palette) {
-                    u32 entry = ((const u32*)frame->data[1])[frame->data[0][y * frame->linesize[0] + x]];
-
-                    value[0] = pow(srgbDecode(((entry >> 16) & 255) / 255.), 1. / 2.4);
-                    value[1] = pow(srgbDecode(((entry >> 8) & 255) / 255.), 1. / 2.4);
-                    value[2] = pow(srgbDecode((entry & 255) / 255.), 1. / 2.4);
-                    value[3] = (entry >> 24) / 255.;
-                } else if (bitstream) {
-                    value[0] = value[1] = value[2] = (frame->data[0][y * frame->linesize[0] + x / 8] >> (7 - x % 8)) & 1;
-                } else if (gray) {
-                    value[0] = value[1] = value[2] = 0.2126 * value[0] + 0.7152 * value[1] + 0.0722 * value[2];
-                }
-
-                for (int c = 0; c < 4; c++) {
-                    expected.mut(at + c) = value[c];
-                }
-            }
-        }
-
-        if (palette) {
-            frame->color_trc = AVCOL_TRC_IEC61966_2_1;
-        }
-
-        verify(frame, StringView(name), tolerance(kase.format));
+        check(kase, StringView(descriptor->name));
     }
 }
 
 void FormatCheck::matrices() {
-    const char* const names[] = {"yuv444p", "yuv444p10le", "yuv444p12le", "yuv444p16le"};
-    const AVColorSpace matrices[] = {AVCOL_SPC_BT709, AVCOL_SPC_FCC, AVCOL_SPC_BT470BG, AVCOL_SPC_SMPTE170M, AVCOL_SPC_SMPTE240M, AVCOL_SPC_BT2020_NCL};
-    const AVColorRange ranges[] = {AVCOL_RANGE_MPEG, AVCOL_RANGE_JPEG};
-    const AVColorSpace direct[] = {AVCOL_SPC_RGB, AVCOL_SPC_YCGCO};
+    const AVPixelFormat formats[] = {AV_PIX_FMT_YUV444P, AV_PIX_FMT_YUV444P10LE, AV_PIX_FMT_YUV444P16LE, AV_PIX_FMT_YUV420P, AV_PIX_FMT_NV12, AV_PIX_FMT_P010LE, AV_PIX_FMT_YUYV422, AV_PIX_FMT_Y210LE};
+    const AVColorRange ranges[] = {AVCOL_RANGE_UNSPECIFIED, AVCOL_RANGE_MPEG, AVCOL_RANGE_JPEG};
 
-    for (const char* name : names) {
-        for (AVColorSpace matrix : matrices) {
-            for (AVColorRange range : ranges) {
+    for (const VideoCode& matrix : videoMatrices) {
+        if (strcmp(matrix.kind, "linear")) {
+            continue;
+        }
+
+        for (AVColorRange range : ranges) {
+            for (AVPixelFormat format : formats) {
                 Case kase;
 
-                kase.format = av_get_pix_fmt(name);
-                kase.matrix = matrix;
+                kase.format = format;
+                kase.matrix = (AVColorSpace)matrix.code;
                 kase.range = range;
-
-                AVFrame* frame = this->frame(kase);
-                STD_DEFER {
-                    av_frame_free(&frame);
-                };
-
-                scale(frame, kase);
-                expectSource(false);
-                verify(frame, StringView(StringBuilder() << StringView(name) << StringView(u8" matrix ") << (i64)matrix << StringView(u8" range ") << (i64)range), tolerance(kase.format));
+                check(kase, StringView(StringBuilder() << StringView(av_get_pix_fmt_name(format)) << StringView(u8" matrix ") << (i64)matrix.code << StringView(u8" range ") << (i64)range));
             }
         }
-    }
-
-    for (AVColorSpace matrix : direct) {
-        Case kase;
-
-        kase.format = AV_PIX_FMT_YUV444P16LE;
-        kase.matrix = matrix;
-        kase.range = AVCOL_RANGE_JPEG;
-
-        AVFrame* frame = this->frame(kase);
-        STD_DEFER {
-            av_frame_free(&frame);
-        };
-
-        for (int y = 0; y < sampleHeight; y++) {
-            for (int x = 0; x < sampleWidth; x++) {
-                double r = sampleValue(x, y, 0);
-                double g = sampleValue(x, y, 1);
-                double b = sampleValue(x, y, 2);
-                double planes[3] = {g, b, r};
-
-                if (matrix == AVCOL_SPC_YCGCO) {
-                    planes[0] = 0.25 * r + 0.5 * g + 0.25 * b;
-                    planes[1] = -0.25 * r + 0.5 * g - 0.25 * b + 32768. / 65535.;
-                    planes[2] = 0.5 * r - 0.5 * b + 32768. / 65535.;
-                }
-
-                for (int p = 0; p < 3; p++) {
-                    ((u16*)(frame->data[p] + y * frame->linesize[p]))[x] = (u16)lround(planes[p] * 65535.);
-                }
-            }
-        }
-
-        expectSource(false);
-        verify(frame, StringView(StringBuilder() << StringView(u8"yuv444p16le matrix ") << (i64)matrix), tolerance(kase.format));
     }
 }
 
 void FormatCheck::locations() {
-    const char* const names[] = {"yuv420p", "yuv422p", "yuv440p", "yuv411p", "yuv410p", "yuv420p10le", "nv12", "p010le"};
+    const AVPixelFormat formats[] = {
+        AV_PIX_FMT_YUV420P, AV_PIX_FMT_YUV422P, AV_PIX_FMT_YUV440P, AV_PIX_FMT_YUV411P, AV_PIX_FMT_YUV410P, AV_PIX_FMT_YUV420P10LE, AV_PIX_FMT_NV12,
+        AV_PIX_FMT_NV21, AV_PIX_FMT_P010LE, AV_PIX_FMT_YUYV422, AV_PIX_FMT_UYVY422, AV_PIX_FMT_Y210LE, AV_PIX_FMT_UYYVYY411,
+    };
 
-    for (const char* name : names) {
+    for (AVPixelFormat format : formats) {
         for (int location = AVCHROMA_LOC_UNSPECIFIED; location <= AVCHROMA_LOC_BOTTOM; location++) {
             Case kase;
 
-            kase.format = av_get_pix_fmt(name);
+            kase.format = format;
             kase.location = (AVChromaLocation)location;
+            check(kase, StringView(StringBuilder() << StringView(av_get_pix_fmt_name(format)) << StringView(u8" chroma location ") << (i64)location));
+        }
+    }
+}
 
-            AVFrame* frame = this->frame(kase);
-            STD_DEFER {
-                av_frame_free(&frame);
-            };
+void FormatCheck::systems() {
+    for (const VideoCode& matrix : videoMatrices) {
+        bool cl = !strcmp(matrix.kind, "cl");
 
-            scale(frame, kase);
-            expectSource(false);
-            verify(frame, StringView(StringBuilder() << StringView(name) << StringView(u8" chroma location ") << (i64)location), tolerance(kase.format));
+        if (!cl && strcmp(matrix.kind, "ictcp")) {
+            continue;
+        }
+
+        for (const VideoCode& transfer : videoTransfers) {
+            if (!cl && transfer.code != AVCOL_TRC_SMPTE2084 && transfer.code != AVCOL_TRC_ARIB_STD_B67) {
+                continue;
+            }
+
+            Case kase;
+
+            kase.format = AV_PIX_FMT_YUV444P16LE;
+            kase.matrix = (AVColorSpace)matrix.code;
+            kase.range = AVCOL_RANGE_MPEG;
+            kase.transfer = (AVColorTransferCharacteristic)transfer.code;
+            kase.primaries = AVCOL_PRI_BT2020;
+            check(kase, StringView(StringBuilder() << StringView(u8"yuv444p16le matrix ") << (i64)matrix.code << StringView(u8" transfer ") << (i64)transfer.code));
         }
     }
 }
@@ -2584,7 +2960,7 @@ void FormatCheck::locations() {
 void FormatCheck::transfers() {
     float white = RendererOptions{}.sdrWhiteNits;
 
-    for (const VideoTransferCode& entry : videoTransfers) {
+    for (const VideoCode& entry : videoTransfers) {
         Case kase;
 
         kase.format = AV_PIX_FMT_RGB48LE;
@@ -2677,6 +3053,7 @@ static int checkFormats(ObjPool& pool) {
             check.formats();
             check.matrices();
             check.locations();
+            check.systems();
             check.transfers();
             check.primaries();
         } catch (...) {
