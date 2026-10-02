@@ -600,7 +600,7 @@ namespace {
         const double* eotf = transfer->eotf;
         bool power = eotf[0] == eotf[5] && eotf[1] == eotf[6] && eotf[2] == 1. && eotf[3] == 0. && eotf[4] == 0. && eotf[10] < 0.;
 
-        out.layout = layout->name;
+        out.layout = layout->shape;
         out.system = yuv ? matrix->system : layout->model;
         out.transfer = transfer->shape;
         out.conversion = same ? "same" : "convert";
@@ -622,7 +622,7 @@ namespace {
 
             out.output = "any";
             putPiece(u.curve, fused, 1.);
-        } else if (shape == StringView(u8"curve")) {
+        } else if (shape == StringView(u8"curve") || sdr || shape == StringView(u8"log")) {
             out.conversion = "convert";
         }
 
@@ -647,6 +647,9 @@ namespace {
                 offsets[slot] = chroma ? exp2(depth - 1.) : 0.;
                 scales[slot] = exp2(depth - lumaBits) - 1.;
             }
+
+            offsets[slot] *= exp2(layout->padding[c]);
+            scales[slot] *= exp2(layout->padding[c]);
         }
 
         if (layout->inverted) {

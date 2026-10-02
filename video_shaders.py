@@ -85,7 +85,24 @@ def environment(template):
 
 
 def tables(template):
-    return environment(template).make_module({"layout": "gray", "system": "gray", "transfer": "curve", "conversion": "same", "output": "any"})
+    source = {"model": "gray", "flags": [], "components": [[0, 1, 0, 0, 8]]}
+    return environment(template).make_module({"layout": "gray", "source": source, "system": "gray", "transfer": "curve", "conversion": "same", "output": "any"})
+
+
+def layouts(module):
+    every = {}
+    for name, entry in module.layouts.items():
+        for suffix in entry.get("endians", [""]):
+            layout = {key: value for key, value in entry.items() if key not in ("endians", "formats", "fields")}
+            layout["flags"] = (["be"] if suffix == "be" else []) + entry.get("flags", [])
+            named = lambda text: [format + suffix for format in text.split()]
+            layout["members"] = [(named(entry["formats"]), entry["components"])]
+            for formats, (shift, depth) in entry.get("fields", {}).items():
+                if any(component[3] or component[4] < 16 for component in entry["components"]):
+                    raise ValueError(f"{name} narrows a component that is not a whole word")
+                layout["members"].append((named(formats), [[*component[:3], shift, depth] for component in entry["components"]]))
+            every[name + suffix] = layout
+    return every
 
 
 def window(shift, depth):
@@ -113,10 +130,10 @@ def check(name, layout):
 def variants(template):
     module = tables(template)
     every = []
-    for name, layout in module.layouts.items():
+    for name, layout in layouts(module).items():
         check(name, layout)
-        for system in module.systems[layout["model"]]:
-            for transfer in module.shapes[system]:
+        for system in module.systems.get(layout["model"], [layout["model"]]):
+            for transfer in module.shapes.get(system, list(module.chains)):
                 for conversion, output in module.chains[transfer]:
                     every.append((name, system, transfer, conversion, output))
     return every
@@ -126,13 +143,13 @@ PARTS = 16
 
 
 def parts(template):
-    layouts = list(tables(template).layouts)
-    return [layouts[part::PARTS] for part in range(PARTS)]
+    names = list(layouts(tables(template)))
+    return [names[part::PARTS] for part in range(PARTS)]
 
 
 def part_variants(template, part):
-    layouts = parts(template)[part]
-    return [variant for variant in variants(template) if variant[0] in layouts]
+    names = parts(template)[part]
+    return [variant for variant in variants(template) if variant[0] in names]
 
 
 def symbol(variant):
@@ -141,8 +158,9 @@ def symbol(variant):
 
 def spirv(template, variant, glslang, directory, variable=None):
     layout, system, transfer, conversion, output = variant
+    shape = layouts(tables(template))[layout]
     source = Path(directory) / f"{symbol(variant)}.frag"
-    source.write_text(environment(template).render(layout=layout, system=system, transfer=transfer, conversion=conversion, output=output), encoding="utf-8")
+    source.write_text(environment(template).render(layout=layout, source=shape, system=system, transfer=transfer, conversion=conversion, output=output), encoding="utf-8")
     command = [glslang, "--quiet", "--target-env", "vulkan1.1", "-V", "-S", "frag"]
     if variable:
         command += ["--variable-name", variable, "-o", str(source.with_suffix(".h"))]
@@ -216,6 +234,7 @@ def codes(template, header):
     lines += [
         "struct VideoLayout {",
         "    const char* name;",
+        "    const char* shape;",
         "    const char* model;",
         "    bool bigEndian;",
         "    bool alpha;",
@@ -224,19 +243,22 @@ def codes(template, header):
         "    bool inverted;",
         "    int count;",
         "    int components[4][5];",
+        "    int padding[4];",
         "};",
         "",
         "static constexpr VideoLayout videoLayouts[] = {",
     ]
-    for name, layout in module.layouts.items():
+    members = [(name, layout, formats, components) for name, layout in layouts(module).items() for formats, components in layout["members"]]
+    for name, layout, formats, components in members:
         flags = ", ".join("true" if flag in layout["flags"] else "false" for flag in ("be", "alpha", "float", "bits"))
         flags += ", true" if layout.get("inverted") else ", false"
-        components = ", ".join("{" + ", ".join(str(value) for value in component) + "}" for component in layout["components"])
-        lines.append(f'    {{"{name}", "{layout["model"]}", {flags}, {len(layout["components"])}, {{{components}}}}},')
+        fields = ", ".join("{" + ", ".join(str(value) for value in component) + "}" for component in components)
+        padding = ", ".join(str(component[3] - whole[3]) for component, whole in zip(components, layout["components"]))
+        lines.append(f'    {{"{formats[0]}", "{name}", "{layout["model"]}", {flags}, {len(components)}, {{{fields}}}, {{{padding}}}}},')
     lines += ["};", ""]
     lines += ["struct VideoFormat {", "    const char* name;", "    int layout;", "};", "", "static constexpr VideoFormat videoFormats[] = {"]
-    for index, layout in enumerate(module.layouts.values()):
-        lines += [f'    {{"{name}", {index}}},' for name in layout["formats"]]
+    for index, (name, layout, formats, components) in enumerate(members):
+        lines += [f'    {{"{format}", {index}}},' for format in formats]
     lines += ["};", ""]
     lines += [
         "struct VideoMatrix {",
