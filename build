@@ -165,19 +165,6 @@ def _uniq(values: Iterable[Any]) -> list[Any]:
     return out
 
 
-def _flag_units(flags: Iterable[str]) -> list[tuple[str, ...]]:
-    """Group flags that take their argument as the next word, such as
-    `-framework AudioToolbox`, so deduplication keeps them whole."""
-    flags = list(flags)
-    units: list[tuple[str, ...]] = []
-    i = 0
-    while i < len(flags):
-        width = 2 if flags[i] in ("-framework", "-weak_framework") else 1
-        units.append(tuple(flags[i:i + width]))
-        i += width
-    return units
-
-
 def _source_path(path: str) -> str:
     path = str(path)
     if path.startswith((S + "/", B + "/")) or os.path.isabs(path):
@@ -1309,7 +1296,7 @@ class BuildContext:
         flags = [*self.external_cflags]
         if uses_cxx:
             flags.extend(self.external_cxxflags)
-        return _uniq(
+        return [
             flag for flag in flags
             if flag.startswith((
                 "-fsanitize=",
@@ -1317,7 +1304,7 @@ class BuildContext:
                 "-fsanitize-recover=",
                 "-fno-sanitize-recover=",
             ))
-        )
+        ]
 
     def _usage_compile_flags(self, targets: Iterable[Target], cxx: bool) -> list[str]:
         out: list[str] = []
@@ -1334,7 +1321,7 @@ class BuildContext:
                 out.extend(target.public_cxxflags)
         for target in targets:
             walk(target)
-        return _uniq(out)
+        return out
 
     @staticmethod
     def _include_roots_from_flags(flags: Iterable[str]) -> list[str]:
@@ -1379,7 +1366,7 @@ class BuildContext:
             out.extend(target.ldflags)
         for target in targets:
             walk(target)
-        return [flag for unit in _uniq(_flag_units(out)) for flag in unit]
+        return out
 
     def _add_node(self, node: Node) -> None:
         for output in node.outputs:
