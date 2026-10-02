@@ -130,16 +130,6 @@ compositor's devices and the scenarios. On a Mac, the host tools
 ./build --target aarch64-apple-darwin11
 ```
 
-From Linux the same build cross-checks through the overlay in `dev/ix`,
-which puts the darwin libraries into a host realm; the compiler is the
-toolchain's own, on PATH by hand:
-
-```
-IX_PATH=$PWD/dev/ix:{builtin} ix run set/suite/darwin -- sh -c \
-  'PATH=$(echo "$CPPFLAGS" | grep -o "/ix/store/[^ ]*-bin-clang-[0-9]*/share/include" | head -1 | sed "s|/share/include|/bin|"):$PATH \
-   ./build --target aarch64-apple-darwin11 -B .build-darwin im'
-```
-
 ## Testing
 
 ```
