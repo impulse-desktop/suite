@@ -2,11 +2,12 @@
 
 """Renders video.frag, a Jinja template, into its shader variants.
 
-  video_shaders.py compile TEMPLATE FETCH TRANSFER OUTPUT HEADER GLSLANG
+  video_shaders.py parts TEMPLATE
   video_shaders.py codes TEMPLATE HEADER
-  video_shaders.py spirv TEMPLATE HEADER VARIANT_HEADER...
-  video_shaders.py msl TEMPLATE FETCH TRANSFER OUTPUT HEADER GLSLANG SPIRV_CROSS
-  video_shaders.py metal TEMPLATE HEADER VARIANT_HEADER...
+  video_shaders.py compile TEMPLATE LAYOUT HEADER GLSLANG
+  video_shaders.py spirv TEMPLATE PART SOURCE LAYOUT_HEADER...
+  video_shaders.py msl TEMPLATE LAYOUT HEADER GLSLANG SPIRV_CROSS
+  video_shaders.py metal TEMPLATE PART SOURCE LAYOUT_HEADER...
 """
 
 import subprocess
@@ -79,124 +80,246 @@ def environment(template):
     )
     env.globals["rgb_to_xyz"] = lambda primaries: mat3(to_xyz(primaries))
     env.globals["xyz_to_rgb"] = lambda primaries: mat3(inverse(to_xyz(primaries)))
+    env.globals["inverse_matrix"] = lambda rows, scale: mat3(inverse([[value / scale for value in row] for row in rows]))
     return env.get_template(Path(template).name)
 
 
 def tables(template):
-    return environment(template).make_module({"fetch": "", "transfer": "", "output": ""})
+    return environment(template).make_module({"layout": "gray", "system": "gray", "transfer": "curve", "output": "sdr"})
+
+
+def window(shift, depth):
+    return 1 if shift + depth <= 8 else 2 if shift + depth <= 16 else 4
+
+
+def check(name, layout):
+    if layout["model"] in ("bayer", "palette") or "bits" in layout["flags"]:
+        return
+    for c, (plane, step, offset, shift, depth) in enumerate(layout["components"]):
+        if c == 0 and "luma" in layout:
+            continue
+        size = window(shift, depth)
+        start = offset + (1 if "be" in layout["flags"] and size == 1 else 0)
+        if step % 4 == 0:
+            inside = start % 4 + size <= 4
+        elif step in (1, 2):
+            inside = start + size <= step
+        else:
+            inside = all((x * step + start) % 4 + size <= 4 for x in range(4))
+        if start < 0 or not inside:
+            raise ValueError(f"component {c} of {name} straddles a word")
 
 
 def variants(template):
     module = tables(template)
-    return [(f, t, o) for f in module.fetches for t in module.transfers for o in module.outputs]
+    every = []
+    for name, layout in module.layouts.items():
+        check(name, layout)
+        for system in module.systems[layout["model"]]:
+            for transfer in module.shapes[system]:
+                for output in module.outputs:
+                    every.append((name, system, transfer, output))
+    return every
 
 
-def name(variant):
+PARTS = 16
+
+
+def parts(template):
+    layouts = list(tables(template).layouts)
+    return [layouts[part::PARTS] for part in range(PARTS)]
+
+
+def part_variants(template, part):
+    layouts = parts(template)[part]
+    return [variant for variant in variants(template) if variant[0] in layouts]
+
+
+def symbol(variant):
     return "video_" + "_".join(variant)
 
 
-def spirv(template, variant, glslang, directory, header=None):
-    fetch, transfer, output = variant
-    source = Path(directory) / f"{name(variant)}.frag"
-    source.write_text(environment(template).render(fetch=fetch, transfer=transfer, output=output), encoding="utf-8")
+def spirv(template, variant, glslang, directory, variable=None):
+    layout, system, transfer, output = variant
+    source = Path(directory) / f"{symbol(variant)}.frag"
+    source.write_text(environment(template).render(layout=layout, system=system, transfer=transfer, output=output), encoding="utf-8")
     command = [glslang, "--quiet", "--target-env", "vulkan1.1", "-V", "-S", "frag"]
-    if header:
-        command += ["--variable-name", f"{name(variant)}_spv", "-o", str(header)]
+    if variable:
+        command += ["--variable-name", variable, "-o", str(source.with_suffix(".h"))]
     else:
         command += ["-o", str(source.with_suffix(".spv"))]
     subprocess.run([*command, str(source)], check=True)
-    return source.with_suffix(".spv")
+    return source.with_suffix(".h" if variable else ".spv")
 
 
 HEADER = ["#pragma once", "", "#include <stddef.h>", "#include <stdint.h>", ""]
 
 
-def table(variants, symbol, size):
-    lines = [
+def unpragma(text):
+    return [line for line in text.splitlines() if line.strip() != "#pragma once"]
+
+
+def compile_layout(template, layout, header, glslang):
+    lines = []
+    with tempfile.TemporaryDirectory(prefix="video-shader-") as directory:
+        for variant in variants(template):
+            if variant[0] == layout:
+                part = spirv(template, variant, glslang, directory, f"{symbol(variant)}_spv")
+                lines += unpragma(part.read_text(encoding="utf-8")) + [""]
+    Path(header).write_text("\n".join(lines), encoding="utf-8")
+
+
+def msl_layout(template, layout, header, glslang, spirv_cross):
+    lines = []
+    with tempfile.TemporaryDirectory(prefix="video-shader-") as directory:
+        for variant in variants(template):
+            if variant[0] != layout:
+                continue
+            module = spirv(template, variant, glslang, directory)
+            source = module.with_suffix(".metal")
+            subprocess.run(
+                [spirv_cross, str(module), "--msl", "--msl-version", "20100", "--msl-decoration-binding", "--output", str(source)],
+                check=True,
+            )
+            text = source.read_text(encoding="utf-8")
+            if ")VIDEO_MSL" in text:
+                raise ValueError("a Metal shader contains its raw string delimiter")
+            lines += [f'static constexpr char {symbol(variant)}_msl[] = R"VIDEO_MSL(', text.rstrip(), ')VIDEO_MSL";', ""]
+    Path(header).write_text("\n".join(lines), encoding="utf-8")
+
+
+def part_source(template, part, source, headers, suffix, size):
+    found = {Path(header).name: Path(header) for header in headers}
+    lines = ["#include <video_codes.h>", ""]
+    for layout in parts(template)[part]:
+        lines += unpragma(found[f"video_{layout}.{suffix}.h"].read_text(encoding="utf-8")) + [""]
+    every = part_variants(template, int(part))
+    lines.append(f"const VideoShaderCode videoShaders{part}[{len(every)}] = {{")
+    for variant in every:
+        layout, system, transfer, output = variant
+        name = symbol(variant) + "_" + suffix
+        lines.append(f'    {{"{layout}", "{system}", "{transfer}", "{output}", {name}, {size(name)}}},')
+    Path(source).write_text("\n".join(lines + ["};", ""]), encoding="utf-8")
+
+
+def matrix(rows):
+    return "{" + ", ".join("{" + ", ".join(f"{value:.12g}" for value in row) + "}" for row in rows) + "}"
+
+
+def numbers(values):
+    return "{" + ", ".join(f"{value:.12g}" for value in values) + "}"
+
+
+def codes(template, header):
+    module = tables(template)
+    lines = list(HEADER)
+    lines += [
+        "struct VideoLayout {",
+        "    const char* name;",
+        "    const char* model;",
+        "    bool bigEndian;",
+        "    bool alpha;",
+        "    bool floating;",
+        "    bool bits;",
+        "    int count;",
+        "    int components[4][5];",
+        "};",
+        "",
+        "static constexpr VideoLayout videoLayouts[] = {",
+    ]
+    for name, layout in module.layouts.items():
+        flags = ", ".join("true" if flag in layout["flags"] else "false" for flag in ("be", "alpha", "float", "bits"))
+        components = ", ".join("{" + ", ".join(str(value) for value in component) + "}" for component in layout["components"])
+        lines.append(f'    {{"{name}", "{layout["model"]}", {flags}, {len(layout["components"])}, {{{components}}}}},')
+    lines += ["};", ""]
+    lines += ["struct VideoFormat {", "    const char* name;", "    int layout;", "};", "", "static constexpr VideoFormat videoFormats[] = {"]
+    for index, layout in enumerate(module.layouts.values()):
+        lines += [f'    {{"{name}", {index}}},' for name in layout["formats"]]
+    lines += ["};", ""]
+    lines += [
+        "struct VideoMatrix {",
+        "    uint8_t code;",
+        "    const char* system;",
+        "    const char* weights;",
+        "    double kr;",
+        "    double kb;",
+        "    double toSignal[3][3];",
+        "    int lumaBits;",
+        "};",
+        "",
+        "static constexpr VideoMatrix videoMatrices[] = {",
+    ]
+    for code, entry in module.matrices.items():
+        weights = entry.get("weights", "fixed" if "toSignal" in entry else "none")
+        kr, kb = weights if isinstance(weights, list) else (0, 0)
+        kind = "given" if isinstance(weights, list) else weights
+        rows = entry.get("toSignal", [[0, 0, 0]] * 3)
+        lines.append(f'    {{{code}, "{entry["system"]}", "{kind}", {kr}, {kb}, {matrix(rows)}, {entry.get("lumaBits", 0)}}},')
+    lines += ["};", ""]
+    lines += [
+        "struct VideoTransfer {",
+        "    uint8_t code;",
+        "    const char* shape;",
+        "    double eotf[5];",
+        "    double oetf[5];",
+        "};",
+        "",
+        "static constexpr VideoTransfer videoTransfers[] = {",
+    ]
+    for code, entry in module.transfers.items():
+        lines.append(f'    {{{code}, "{entry["shape"]}", {numbers(entry["eotf"])}, {numbers(entry["oetf"])}}},')
+    lines += ["};", ""]
+    lines += ["struct VideoPrimaries {", "    uint8_t code;", "    double toXyz[3][3];", "};", "", "static constexpr VideoPrimaries videoPrimaries[] = {"]
+    for code, chromaticities in module.primaries.items():
+        lines.append(f"    {{{code}, {matrix(to_xyz(chromaticities))}}},")
+    lines += ["};", ""]
+    lines += ["struct VideoOutput {", "    const char* name;", "    double fromXyz[3][3];", "};", "", "static constexpr VideoOutput videoOutputs[] = {"]
+    lines.append(f'    {{"sdr", {matrix(inverse(to_xyz(module.primaries[1])))}}},')
+    lines.append(f'    {{"hdr", {matrix(inverse(to_xyz(module.primaries[9])))}}},')
+    lines += ["};", ""]
+    lines += ["struct VideoLocation {", "    uint8_t code;", "    double site[2];", "};", "", "static constexpr VideoLocation videoLocations[] = {"]
+    for code, site in module.locations.items():
+        lines.append(f"    {{{code}, {numbers(site)}}},")
+    lines += ["};", ""]
+    lines += [f"static constexpr uint8_t videoRanges[] = {{{', '.join(str(value) for value in module.ranges)}}};", ""]
+    lines += [
         "struct VideoShaderCode {",
-        "    const char* fetch;",
+        "    const char* layout;",
+        "    const char* system;",
         "    const char* transfer;",
         "    const char* output;",
         "    const void* code;",
         "    size_t size;",
         "};",
         "",
-        "static constexpr VideoShaderCode videoShaders[] = {",
+        "struct VideoShaderPart {",
+        "    const VideoShaderCode* codes;",
+        "    size_t count;",
+        "};",
+        "",
     ]
-    for variant in variants:
-        fetch, transfer, output = variant
-        lines.append(f'    {{"{fetch}", "{transfer}", "{output}", {symbol(variant)}, {size(variant)}}},')
-    return lines + ["};", ""]
-
-
-def codes(template, header):
-    module = tables(template)
-    lines = HEADER + ["struct VideoTransferCode {", "    uint8_t code;", "    const char* kind;", "};", ""]
-    lines.append("static constexpr VideoTransferCode videoTransfers[] = {")
-    for transfer, values in module.transfers.items():
-        lines += [f'    {{{value}, "{transfer}"}},' for value in values]
+    counts = [len(part_variants(template, part)) for part in range(PARTS)]
+    lines += [f"extern const VideoShaderCode videoShaders{part}[{count}];" for part, count in enumerate(counts)]
+    lines += ["", "static constexpr VideoShaderPart videoShaderParts[] = {"]
+    lines += [f"    {{videoShaders{part}, {count}}}," for part, count in enumerate(counts)]
     lines += ["};", ""]
-    for symbol, values in (
-        ("videoMatrices", module.matrices),
-        ("videoPrimaries", list(module.primaries)),
-        ("videoRanges", module.ranges),
-        ("videoLocations", module.locations),
-    ):
-        lines += [f"static constexpr uint8_t {symbol}[] = {{{', '.join(str(value) for value in values)}}};", ""]
-    Path(header).write_text("\n".join(lines), encoding="utf-8")
-
-
-def spirv_table(template, header, parts):
-    every = variants(template)
-    found = {Path(part).name: Path(part) for part in parts}
-    lines = list(HEADER)
-    for variant in every:
-        text = found[f"{name(variant)}.spv.h"].read_text(encoding="utf-8")
-        lines += [line for line in text.splitlines() if line.strip() != "#pragma once"] + [""]
-    lines += table(every, lambda v: f"{name(v)}_spv", lambda v: f"sizeof({name(v)}_spv)")
-    Path(header).write_text("\n".join(lines), encoding="utf-8")
-
-
-def msl(template, variant, header, glslang, spirv_cross):
-    with tempfile.TemporaryDirectory(prefix="video-shader-") as directory:
-        module = spirv(template, variant, glslang, directory)
-        source = module.with_suffix(".metal")
-        subprocess.run(
-            [spirv_cross, str(module), "--msl", "--msl-version", "20100", "--msl-decoration-binding", "--output", str(source)],
-            check=True,
-        )
-        text = source.read_text(encoding="utf-8")
-    if ")VIDEO_MSL" in text:
-        raise ValueError("a Metal shader contains its raw string delimiter")
-    lines = [f'static constexpr char {name(variant)}_msl[] = R"VIDEO_MSL(', text.rstrip(), ')VIDEO_MSL";', ""]
-    Path(header).write_text("\n".join(lines), encoding="utf-8")
-
-
-def metal(template, header, parts):
-    every = variants(template)
-    found = {Path(part).name: Path(part) for part in parts}
-    lines = list(HEADER)
-    for variant in every:
-        lines += found[f"{name(variant)}.msl.h"].read_text(encoding="utf-8").splitlines() + [""]
-    lines += table(every, lambda v: f"{name(v)}_msl", lambda v: f"sizeof({name(v)}_msl) - 1")
     Path(header).write_text("\n".join(lines), encoding="utf-8")
 
 
 def main():
     args = sys.argv[1:]
-    if len(args) == 7 and args[0] == "compile":
-        with tempfile.TemporaryDirectory(prefix="video-shader-") as directory:
-            spirv(args[1], (args[2], args[3], args[4]), args[6], directory, header=args[5])
+    if len(args) == 2 and args[0] == "parts":
+        print("\n".join(" ".join(layouts) for layouts in parts(args[1])))
     elif len(args) == 3 and args[0] == "codes":
         codes(args[1], args[2])
-    elif len(args) >= 3 and args[0] == "spirv":
-        spirv_table(args[1], args[2], args[3:])
-    elif len(args) == 8 and args[0] == "msl":
-        msl(args[1], (args[2], args[3], args[4]), args[5], args[6], args[7])
-    elif len(args) >= 3 and args[0] == "metal":
-        metal(args[1], args[2], args[3:])
-    elif len(args) == 2 and args[0] == "variants":
-        print("\n".join(" ".join(variant) for variant in variants(args[1])))
+    elif len(args) == 5 and args[0] == "compile":
+        compile_layout(args[1], args[2], args[3], args[4])
+    elif len(args) >= 4 and args[0] == "spirv":
+        part_source(args[1], int(args[2]), args[3], args[4:], "spv", lambda name: f"sizeof({name})")
+    elif len(args) == 6 and args[0] == "msl":
+        msl_layout(args[1], args[2], args[3], args[4], args[5])
+    elif len(args) >= 4 and args[0] == "metal":
+        part_source(args[1], int(args[2]), args[3], args[4:], "msl", lambda name: f"sizeof({name}) - 1")
     else:
         raise SystemExit(__doc__)
 
