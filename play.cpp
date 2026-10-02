@@ -2962,16 +2962,20 @@ void FormatCheck::verify(AVFrame* frame, StringView what, double tolerance) {
 
     for (size_t i = 0; i < samplePixels; i++) {
         double linear[3] = {got[i * 4], got[i * 4 + 1], got[i * 4 + 2]};
+        double signal[3] = {expected[i * 4], expected[i * 4 + 1], expected[i * 4 + 2]};
         double rgb[3];
+        double light[3];
 
         apply(back, linear, rgb);
+        displayLight(AVCOL_TRC_BT709, AVCOL_PRI_BT709, signal, light);
 
         for (int c = 0; c < 3; c++) {
-            got.mut(i * 4 + c) = pow(fmax(rgb[c], 0.), 1. / 2.4);
+            got.mut(i * 4 + c) = rgb[c];
+            expected.mut(i * 4 + c) = light[c];
         }
     }
 
-    compare(what, StringView(u8"hdr"), got, tolerance, false);
+    compare(what, StringView(u8"hdr"), got, 2.4 * tolerance, true);
 }
 
 void FormatCheck::verifyLinear(AVFrame* frame, StringView what, double tolerance) {
