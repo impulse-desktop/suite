@@ -72,7 +72,7 @@ else:
     jxl = pkg_config("libjxl")
     encoders = [pkg_config("libpng"), jxl]
 
-libstd = import_build(std_build, "libstd.a", extra_cflags=["-Wno-error"])
+libstd = import_build(std_build, "libstd.a", extra_cflags=["-Wno-error", "-Wno-deprecated-declarations"])
 plt = import_build(
     plt_build,
     "libplt.a",
@@ -115,7 +115,7 @@ imgui_core = [path for path in build.glob("$(S)/ext/imgui/*.cpp") if not path.en
 imgui = library(
     name="imgui",
     srcs=[*imgui_core, "$(S)/ext/imgui/imgui_impl_metal.mm"] if darwin else [*imgui_core, "$(S)/ext/imgui/imgui_impl_vulkan.cpp"],
-    cflags=["-fobjc-arc", "-fobjc-weak"] if darwin else [],
+    cflags=["-fobjc-arc"] if darwin else [],
     deps=platform_deps,
 )
 
