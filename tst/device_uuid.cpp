@@ -21,6 +21,37 @@ static bool sampleable(VkPhysicalDevice device, VkFormat format) {
         }
     }
     free(modifiers);
+    VkPhysicalDeviceProperties deviceProperties = {};
+    vkGetPhysicalDeviceProperties(device, &deviceProperties);
+    uint32_t count = 0;
+    vkEnumerateDeviceExtensionProperties(device, nullptr, &count, nullptr);
+    VkExtensionProperties* extensions = (VkExtensionProperties*)calloc(count + 1, sizeof(VkExtensionProperties));
+    vkEnumerateDeviceExtensionProperties(device, nullptr, &count, extensions);
+    bool flags2 = VK_API_VERSION_MINOR(deviceProperties.apiVersion) >= 3;
+    for (uint32_t i = 0; i < count; i++) {
+        if (strcmp(extensions[i].extensionName, VK_KHR_FORMAT_FEATURE_FLAGS_2_EXTENSION_NAME) == 0) {
+            flags2 = true;
+        }
+    }
+    free(extensions);
+    if (!found || !flags2) {
+        return found;
+    }
+    VkDrmFormatModifierPropertiesList2EXT list2 = {};
+    list2.sType = VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_2_EXT;
+    properties.pNext = &list2;
+    vkGetPhysicalDeviceFormatProperties2(device, format, &properties);
+    VkDrmFormatModifierProperties2EXT* modifiers2 = (VkDrmFormatModifierProperties2EXT*)calloc(list2.drmFormatModifierCount + 1, sizeof(VkDrmFormatModifierProperties2EXT));
+    list2.pDrmFormatModifierProperties = modifiers2;
+    vkGetPhysicalDeviceFormatProperties2(device, format, &properties);
+    const VkFormatFeatureFlags2 needed2 = VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_LINEAR_BIT | VK_FORMAT_FEATURE_2_TRANSFER_SRC_BIT;
+    found = false;
+    for (uint32_t i = 0; i < list2.drmFormatModifierCount; i++) {
+        if (modifiers2[i].drmFormatModifier == 0 && (modifiers2[i].drmFormatModifierTilingFeatures & needed2) == needed2) {
+            found = true;
+        }
+    }
+    free(modifiers2);
     return found;
 }
 
