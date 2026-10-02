@@ -53,24 +53,24 @@ const uint BIG_ENDIAN = 1u;
 const uint RGB = 2u;
 const uint ALPHA = 4u;
 
-uint width() {
+uint frameWidth() {
     return frame.size.x;
 }
 
-uint height() {
+uint frameHeight() {
     return frame.size.y;
 }
 
-uint components() {
+uint componentCount() {
     return frame.size.z;
 }
 
-bool flag(uint bit) {
+bool hasFlag(uint bit) {
     return (frame.size.w & bit) != 0u;
 }
 
-uint colors() {
-    return flag(ALPHA) ? components() - 1u : components();
+uint colorCount() {
+    return hasFlag(ALPHA) ? componentCount() - 1u : componentCount();
 }
 
 uint matrixCode() {
@@ -103,7 +103,7 @@ uint bytesAt(uint address, uint count, bool bigEndian) {
     return value;
 }
 
-uint mask(uint bits) {
+uint depthMask(uint bits) {
     return bits >= 32u ? 0xffffffffu : (1u << bits) - 1u;
 }
 
@@ -118,7 +118,7 @@ mat3 primariesToXyz() {
     }
 }
 
-uint address(uint c, uvec2 at) {
+uint componentAddress(uint c, uvec2 at) {
     uint p = frame.plane[c];
 
     return frame.planeOffset[p] + at.y * frame.lineSize[p] + at.x * frame.step[c] + frame.offset[c];
@@ -146,7 +146,7 @@ vec4 paletteColor(uvec2 at) {
 vec4 sourceColor(vec2 at) {
     uvec2 a;
     uvec2 b;
-    vec2 f = bilinear(at, uvec2(width(), height()), a, b);
+    vec2 f = bilinear(at, uvec2(frameWidth(), frameHeight()), a, b);
     vec4 top = mix(paletteColor(a), paletteColor(uvec2(b.x, a.y)), f.x);
     vec4 bottom = mix(paletteColor(uvec2(a.x, b.y)), paletteColor(b), f.x);
 
@@ -157,44 +157,44 @@ vec4 sourceColor(vec2 at) {
 
 {%- if fetch == "integer" %}
 
-float component(uint c, uvec2 at) {
+float componentCode(uint c, uvec2 at) {
     uint bits = frame.shift[c] + frame.depth[c];
-    bool bigEndian = flag(BIG_ENDIAN);
-    uint value = bits <= 8u ? byteAt(address(c, at) + (bigEndian ? 1u : 0u)) : bytesAt(address(c, at), bits <= 16u ? 2u : 4u, bigEndian);
+    bool bigEndian = hasFlag(BIG_ENDIAN);
+    uint value = bits <= 8u ? byteAt(componentAddress(c, at) + (bigEndian ? 1u : 0u)) : bytesAt(componentAddress(c, at), bits <= 16u ? 2u : 4u, bigEndian);
 
-    return float((value >> frame.shift[c]) & mask(frame.depth[c]));
+    return float((value >> frame.shift[c]) & depthMask(frame.depth[c]));
 }
 
 {%- elif fetch == "float" %}
 
-float component(uint c, uvec2 at) {
-    return uintBitsToFloat(bytesAt(address(c, at), 4u, flag(BIG_ENDIAN)));
+float componentCode(uint c, uvec2 at) {
+    return uintBitsToFloat(bytesAt(componentAddress(c, at), 4u, hasFlag(BIG_ENDIAN)));
 }
 
 {%- elif fetch == "bitstream" %}
 
-float component(uint c, uvec2 at) {
+float componentCode(uint c, uvec2 at) {
     uint p = frame.plane[c];
     uint bit = at.x * frame.step[c] + frame.offset[c];
     uint value = byteAt(frame.planeOffset[p] + at.y * frame.lineSize[p] + (bit >> 3));
 
-    return float((value >> (8u - frame.depth[c] - (bit & 7u))) & mask(frame.depth[c]));
+    return float((value >> (8u - frame.depth[c] - (bit & 7u))) & depthMask(frame.depth[c]));
 }
 
 {%- endif %}
 
-float sampled(uint c, vec2 at, uvec2 extent) {
+float interpolated(uint c, vec2 at, uvec2 extent) {
     uvec2 a;
     uvec2 b;
     vec2 f = bilinear(at, extent, a, b);
-    float top = mix(component(c, a), component(c, uvec2(b.x, a.y)), f.x);
-    float bottom = mix(component(c, uvec2(a.x, b.y)), component(c, b), f.x);
+    float top = mix(componentCode(c, a), componentCode(c, uvec2(b.x, a.y)), f.x);
+    float bottom = mix(componentCode(c, uvec2(a.x, b.y)), componentCode(c, b), f.x);
 
     return mix(top, bottom, f.y);
 }
 
 float fullComponent(uint c, vec2 at) {
-    return sampled(c, at, uvec2(width(), height()));
+    return interpolated(c, at, uvec2(frameWidth(), frameHeight()));
 }
 
 vec2 chromaSiting() {
@@ -211,16 +211,16 @@ vec2 chromaSiting() {
 
 float chromaComponent(uint c, vec2 at) {
     uvec2 subsampling = frame.chroma.xy;
-    uvec2 extent = (uvec2(width(), height()) + (uvec2(1u) << subsampling) - 1u) >> subsampling;
+    uvec2 extent = (uvec2(frameWidth(), frameHeight()) + (uvec2(1u) << subsampling) - 1u) >> subsampling;
 
-    return sampled(c, (at - chromaSiting()) / vec2(uvec2(1u) << subsampling), extent);
+    return interpolated(c, (at - chromaSiting()) / vec2(uvec2(1u) << subsampling), extent);
 }
 
 bool fullRange() {
 {%- if fetch == "float" %}
     return true;
 {%- else %}
-    return rangeCode() == 2u || (rangeCode() == 0u && (flag(RGB) || colors() == 1u));
+    return rangeCode() == 2u || (rangeCode() == 0u && (hasFlag(RGB) || colorCount() == 1u));
 {%- endif %}
 }
 
@@ -248,7 +248,7 @@ float decodeAlpha(float code, uint depth) {
 {%- if fetch == "float" %}
     return code;
 {%- else %}
-    return code / float(mask(depth));
+    return code / float(depthMask(depth));
 {%- endif %}
 }
 
@@ -268,7 +268,7 @@ vec2 lumaWeights() {
         case 12u:
             return vec2(primariesToXyz()[0].y, primariesToXyz()[2].y);
         default:
-            return height() > 576u ? vec2(0.2126, 0.0722) : vec2(0.299, 0.114);
+            return frameHeight() > 576u ? vec2(0.2126, 0.0722) : vec2(0.299, 0.114);
     }
 }
 
@@ -286,16 +286,16 @@ vec3 yuvToRgb(float y, float cb, float cr) {
 }
 
 vec4 sourceColor(vec2 at) {
-    uint last = components() - 1u;
-    float alpha = flag(ALPHA) ? decodeAlpha(fullComponent(last, at), frame.depth[last]) : 1.0;
+    uint last = componentCount() - 1u;
+    float alpha = hasFlag(ALPHA) ? decodeAlpha(fullComponent(last, at), frame.depth[last]) : 1.0;
 
-    if (flag(RGB)) {
+    if (hasFlag(RGB)) {
         return vec4(decodeLuma(fullComponent(0u, at), frame.depth[0]), decodeLuma(fullComponent(1u, at), frame.depth[1]), decodeLuma(fullComponent(2u, at), frame.depth[2]), alpha);
     }
 
     float y = decodeLuma(fullComponent(0u, at), frame.depth[0]);
 
-    if (colors() == 1u) {
+    if (colorCount() == 1u) {
         return vec4(y, y, y, alpha);
     }
 
@@ -349,7 +349,7 @@ vec3 eotf(vec3 e) {
 {%- endif %}
 }
 
-vec4 target(vec3 linear, float alpha) {
+vec4 encodeOutput(vec3 linear, float alpha) {
     vec3 xyz = primariesToXyz() * linear;
 {%- if output == "hdr" %}
     vec3 rgb = {{ xyz_to_rgb(primaries[9]) }} * xyz;
@@ -363,7 +363,7 @@ vec4 target(vec3 linear, float alpha) {
 }
 
 void main() {
-    vec4 color = sourceColor(vUv * vec2(width(), height()) - 0.5);
+    vec4 color = sourceColor(vUv * vec2(frameWidth(), frameHeight()) - 0.5);
 
-    fColor = target(eotf(color.rgb), color.a);
+    fColor = encodeOutput(eotf(color.rgb), color.a);
 }
