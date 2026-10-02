@@ -165,6 +165,19 @@ def _uniq(values: Iterable[Any]) -> list[Any]:
     return out
 
 
+def _flag_units(flags: Iterable[str]) -> list[tuple[str, ...]]:
+    """Group flags that take their argument as the next word, such as
+    `-framework AudioToolbox`, so deduplication keeps them whole."""
+    flags = list(flags)
+    units: list[tuple[str, ...]] = []
+    i = 0
+    while i < len(flags):
+        width = 2 if flags[i] in ("-framework", "-weak_framework") else 1
+        units.append(tuple(flags[i:i + width]))
+        i += width
+    return units
+
+
 def _source_path(path: str) -> str:
     path = str(path)
     if path.startswith((S + "/", B + "/")) or os.path.isabs(path):
@@ -1366,7 +1379,7 @@ class BuildContext:
             out.extend(target.ldflags)
         for target in targets:
             walk(target)
-        return _uniq(out)
+        return [flag for unit in _uniq(_flag_units(out)) for flag in unit]
 
     def _add_node(self, node: Node) -> None:
         for output in node.outputs:
