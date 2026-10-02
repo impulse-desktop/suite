@@ -13,6 +13,7 @@ with Session("shared_formats") as s:
         (58, 0xFFF80001, (65535, 32800, 64)),
         (64, 0xC01803FF, (65535, 32800, 64)),
     ):
+        s.require_import(fmt)
         fd = udmabuf(struct.pack("<I", pixel) * (w * h))
         if fd is None:
             s.skip("the kernel offers no udmabuf")

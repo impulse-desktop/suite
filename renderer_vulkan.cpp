@@ -2123,6 +2123,27 @@ RenderImage* VulkanRenderer::import(ObjPool& pool, SharedImage& source, bool hdr
     if (hdr && !gpu->linearHdr) {
         fail(StringView(u8"HDR image needs an HDR renderer"));
     }
+    VkPhysicalDeviceImageDrmFormatModifierInfoEXT modifierQuery{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_DRM_FORMAT_MODIFIER_INFO_EXT};
+    VkPhysicalDeviceExternalImageFormatInfo externalQuery{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO};
+    VkPhysicalDeviceImageFormatInfo2 formatQuery{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2};
+    VkExternalImageFormatProperties externalSupport{VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES};
+    VkImageFormatProperties2 formatSupport{VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2};
+
+    modifierQuery.drmFormatModifier = img.modifier;
+    modifierQuery.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    externalQuery.pNext = &modifierQuery;
+    externalQuery.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+    formatQuery.pNext = &externalQuery;
+    formatQuery.format = (VkFormat)img.format;
+    formatQuery.type = VK_IMAGE_TYPE_2D;
+    formatQuery.tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
+    formatQuery.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    formatSupport.pNext = &externalSupport;
+
+    if (vkGetPhysicalDeviceImageFormatProperties2(gpu->phys, &formatQuery, &formatSupport) != VK_SUCCESS || !(externalSupport.externalMemoryProperties.externalMemoryFeatures & VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT)) {
+        fail(StringView(u8"vulkan cannot import the shared screenshot's format"));
+    }
+
     VulkanImage* image = pool.make<VulkanImage>();
     image->gpu = gpu;
     image->width = img.width;

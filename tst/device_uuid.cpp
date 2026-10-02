@@ -1,7 +1,40 @@
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <vulkan/vulkan.h>
 
-int main() {
+static bool importable(VkPhysicalDevice device, VkFormat format) {
+    VkPhysicalDeviceImageDrmFormatModifierInfoEXT modifier = {};
+    modifier.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_DRM_FORMAT_MODIFIER_INFO_EXT;
+    modifier.drmFormatModifier = 0;
+    modifier.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    VkPhysicalDeviceExternalImageFormatInfo external = {};
+    external.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO;
+    external.pNext = &modifier;
+    external.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+    VkPhysicalDeviceImageFormatInfo2 query = {};
+    query.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2;
+    query.pNext = &external;
+    query.format = format;
+    query.type = VK_IMAGE_TYPE_2D;
+    query.tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
+    query.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    VkExternalImageFormatProperties externalSupport = {};
+    externalSupport.sType = VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES;
+    VkImageFormatProperties2 support = {};
+    support.sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2;
+    support.pNext = &externalSupport;
+    if (vkGetPhysicalDeviceImageFormatProperties2(device, &query, &support) != VK_SUCCESS) {
+        return false;
+    }
+    return (externalSupport.externalMemoryProperties.externalMemoryFeatures & VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT) != 0;
+}
+
+int main(int argc, char** argv) {
+    if (argc != 1 && !(argc == 3 && strcmp(argv[1], "--import") == 0)) {
+        fprintf(stderr, "usage: device_uuid [--import VKFORMAT]\n");
+        return 2;
+    }
     VkApplicationInfo app = {};
     app.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
     app.apiVersion = VK_API_VERSION_1_2;
@@ -19,6 +52,11 @@ int main() {
     if ((result != VK_SUCCESS && result != VK_INCOMPLETE) || count == 0) {
         fprintf(stderr, "device_uuid: no vulkan device\n");
         return 1;
+    }
+    if (argc == 3) {
+        printf("%s\n", importable(device, (VkFormat)atoi(argv[2])) ? "yes" : "no");
+        vkDestroyInstance(instance, nullptr);
+        return 0;
     }
     VkPhysicalDeviceIDProperties ids = {};
     ids.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES;

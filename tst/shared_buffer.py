@@ -14,6 +14,7 @@ with Session("shared_buffer") as s:
     fd = udmabuf(bytes(b for r, g, b_ in rgb for b in (b_, g, r, 255)))
     if fd is None:
         s.skip("the kernel offers no udmabuf")
+    s.require_import(44)
     spec = f"{w}:{h}:44:0:{w * 4}:0:{w * h * 4}:{s.device_uuid()}"
     shots = s.artifacts / "shots"
     probes = [(0, 0), (17, 5), (63, 47), (40, 20)]

@@ -72,9 +72,10 @@ with Session("view_async", tool="view") as s:
     assert "im view: cannot show b.png" not in s.client_log(), "stale error replaced the selection"
     shows((255, 0, 0), "late-error-ignored")
 
-    # Exit while a worker is blocked in file I/O: joining it would hang forever.
+    # Exit while a worker is blocked in file I/O: the test build joins it
+    # once its read ends.
     s.tap(KEY_RIGHT)
     s.said("loading image b.png", 3)
-    s.close()
+    s.close_releasing([blocked])
 
-print("OK: image and properties retained together, stale success and error ignored, exit without joining")
+print("OK: image and properties retained together, stale success and error ignored, exit with a worker blocked in a read")

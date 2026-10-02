@@ -35,10 +35,10 @@ with Session("view_four_workers", tool="view") as s:
         readers[1] = -1
         s.said("loading image f19.png")
         assert s.client_log().count("im view: loading ") == 5, "more than one freed credit was used"
-        s.close()
     finally:
         for fd in readers:
             if fd >= 0:
                 os.close(fd)
+    s.close_releasing(sorted(pics.iterdir()))
 
-print("OK: four concurrent workers, bounded dispatch, no idle polling, latest Show has priority, immediate exit")
+print("OK: four concurrent workers, bounded dispatch, no idle polling, latest Show has priority, exit with workers blocked in reads")

@@ -3,6 +3,7 @@ driver's virtual input devices on it, and the tool under test as its
 client. Scenarios drive the tool through real input and check what it
 draws (grim) and what it leaves on disk."""
 
+import errno
 import fcntl
 import json
 import math
@@ -174,6 +175,13 @@ class Session:
         """The Vulkan device the tool gets, as a compositor would name it
         on a shared buffer."""
         return subprocess.run([str(self.device_uuid_binary)], env=self.env, stdout=subprocess.PIPE, check=True, timeout=30).stdout.decode().strip()
+
+    def require_import(self, vkformat):
+        """The tool's Vulkan device imports a linear dma-buf of this
+        VkFormat, or the scenario is skipped."""
+        answer = subprocess.run([str(self.device_uuid_binary), "--import", str(vkformat)], env=self.env, stdout=subprocess.PIPE, check=True, timeout=30).stdout.decode().strip()
+        if answer != "yes":
+            raise Skip(f"the Vulkan device imports no linear dma-buf of VkFormat {vkformat}")
 
     def environment(self, unset, overrides):
         env = {key: value for key, value in self.env.items() if key not in unset}
@@ -431,6 +439,26 @@ class Session:
     def close(self, code=KEY_ESC):
         """Escape (or another key) leaves the tool; it must exit 0."""
         self.tap(code, client=False)
+        self.gone()
+        assert self.finished() == 0, "the tool did not exit cleanly"
+
+    def close_releasing(self, fifos, code=KEY_ESC):
+        """Escape leaves a tool whose workers may still read these FIFOs:
+        the test build joins its workers before it exits, so every FIFO a
+        worker opens gets a writer that closes at once, an end of file,
+        until the tool is gone; it must exit 0."""
+        self.tap(code, client=False)
+        deadline = time.monotonic() + 12
+        while self.client.poll() is None:
+            if time.monotonic() > deadline:
+                raise AssertionError("the tool did not exit with its FIFOs released")
+            for fifo in fifos:
+                try:
+                    os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+                except OSError as error:
+                    if error.errno != errno.ENXIO:
+                        raise
+            time.sleep(0.02)
         self.gone()
         assert self.finished() == 0, "the tool did not exit cleanly"
 

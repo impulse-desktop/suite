@@ -201,5 +201,5 @@ int main(int argc, char** argv) {
         sysE << Exception::current() << endL;
         result = 1;
     }
-    exit(result);
+    return result;
 }
