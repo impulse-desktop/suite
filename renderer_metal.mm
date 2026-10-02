@@ -7,8 +7,10 @@
 #include <std/dbg/insist.h>
 #include <std/lib/vector.h>
 #include <std/str/builder.h>
+#include <std/thr/channel.h>
 #include <std/thr/runable.h>
 #include <std/mem/obj_pool.h>
+#include <std/mem/small_obj_allocator.h>
 
 #include <math.h>
 #include <string.h>
@@ -76,9 +78,10 @@ namespace {
         ImVec2 hi;
     };
 
-    struct ImageUse {
-        MetalImage* image;
-        u64 serial;
+    struct Flight {
+        Vector<MetalImage*> images;
+
+        explicit Flight(const Vector<MetalImage*>& drawn);
     };
 
     struct MetalRenderer final: Renderer {
@@ -87,10 +90,8 @@ namespace {
         CAMetalDisplayLink* displayLink = nil;
         ImMetalDisplayTarget* target = nil;
         Vector<MetalImage*> drawn;
-        Vector<ImageUse> uses;
-        NSMutableArray<id<MTLCommandBuffer>>* flights = nil;
-        u64 submitted = 0;
-        u64 completed = 0;
+        SmallObjAllocator* smallObjects = nullptr;
+        Channel* landed = nullptr;
         bool waiting = false;
         CAMetalLayer* layer = nil;
         NSWindow* window = nil;
@@ -221,9 +222,6 @@ SharedImage* createMetalSharedImage(ObjPool& pool, StringView description, intpt
 MetalImage::~MetalImage() noexcept {
     for (const MetalImage* image : renderer->drawn) {
         STD_INSIST(image != this);
-    }
-    for (const ImageUse& use : renderer->uses) {
-        STD_INSIST(use.image != this);
     }
     [lastUse waitUntilCompleted];
 }
@@ -444,26 +442,27 @@ void PollMetal::ready() {
     renderer->poll();
 }
 
-void MetalRenderer::poll() {
-    while (flights.count > 0 && flights[0].status >= MTLCommandBufferStatusCompleted) {
-        checkCommand(flights[0]);
-        [flights removeObjectAtIndex:0];
-        completed++;
-    }
-    Vector<ImageUse> done;
-    size_t kept = 0;
-    for (const ImageUse& use : uses) {
-        if (use.serial <= completed) {
-            done.pushBack(use);
-        } else {
-            uses.mut(kept++) = use;
+Flight::Flight(const Vector<MetalImage*>& drawn) {
+    for (MetalImage* image : drawn) {
+        if (image->retired) {
+            images.pushBack(image);
         }
     }
-    while (uses.length() > kept) {
-        uses.popBack();
-    }
-    for (const ImageUse& use : done) {
-        use.image->retired->run();
+}
+
+void MetalRenderer::poll() {
+    void* item;
+
+    while (landed->tryDequeue(&item)) {
+        Flight* flight = (Flight*)item;
+        Vector<MetalImage*> done;
+
+        done.xchg(flight->images);
+        smallObjects->release(flight);
+
+        for (MetalImage* image : done) {
+            image->retired->run();
+        }
     }
 }
 
@@ -516,10 +515,8 @@ bool MetalRenderer::endFrame(ImDrawData* draw) {
                 image->dirty = false;
             }
             image->lastUse = command;
-            if (image->retired) {
-                uses.pushBack(ImageUse{image, submitted + 1});
-            }
         }
+        Flight* flight = smallObjects->make<Flight>(drawn);
         drawn.clear();
         encoder = [command renderCommandEncoderWithDescriptor:pass];
         if (!encoder) {
@@ -532,14 +529,14 @@ bool MetalRenderer::endFrame(ImDrawData* draw) {
         }
         [encoder endEncoding];
         encoder = nil;
+        Channel* done = landed;
         plt::LoopWake* completed = wake;
         [command addCompletedHandler:^(id<MTLCommandBuffer>) {
+          done->enqueue(flight);
           completed->signal();
         }];
         [command presentDrawable:drawable];
         [command commit];
-        [flights addObject:command];
-        submitted++;
         last = command;
         drawable = nil;
         pass = nil;
@@ -610,7 +607,8 @@ Renderer* createMetalRenderer(ObjPool& pool, plt::Platform& platform, plt::Windo
     layer.presentsWithTransaction = NO;
     layer.wantsExtendedDynamicRangeContent = options.hdr;
     renderer->wake = platform.createLoopWake(pool, *pool.make<PollMetal>(renderer));
-    renderer->flights = [NSMutableArray new];
+    renderer->smallObjects = SmallObjAllocator::create(&pool);
+    renderer->landed = Channel::create(&pool, 64);
     renderer->target = [ImMetalDisplayTarget new];
     renderer->target.owner = renderer;
     renderer->displayLink = [[CAMetalDisplayLink alloc] initWithMetalLayer:layer];
