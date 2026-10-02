@@ -85,7 +85,7 @@ def environment(template):
 
 
 def tables(template):
-    return environment(template).make_module({"layout": "gray", "system": "gray", "transfer": "curve", "output": "sdr"})
+    return environment(template).make_module({"layout": "gray", "system": "gray", "transfer": "curve", "conversion": "same", "output": "any"})
 
 
 def window(shift, depth):
@@ -117,8 +117,8 @@ def variants(template):
         check(name, layout)
         for system in module.systems[layout["model"]]:
             for transfer in module.shapes[system]:
-                for output in module.outputs:
-                    every.append((name, system, transfer, output))
+                for conversion, output in module.chains[transfer]:
+                    every.append((name, system, transfer, conversion, output))
     return every
 
 
@@ -140,9 +140,9 @@ def symbol(variant):
 
 
 def spirv(template, variant, glslang, directory, variable=None):
-    layout, system, transfer, output = variant
+    layout, system, transfer, conversion, output = variant
     source = Path(directory) / f"{symbol(variant)}.frag"
-    source.write_text(environment(template).render(layout=layout, system=system, transfer=transfer, output=output), encoding="utf-8")
+    source.write_text(environment(template).render(layout=layout, system=system, transfer=transfer, conversion=conversion, output=output), encoding="utf-8")
     command = [glslang, "--quiet", "--target-env", "vulkan1.1", "-V", "-S", "frag"]
     if variable:
         command += ["--variable-name", variable, "-o", str(source.with_suffix(".h"))]
@@ -196,9 +196,9 @@ def part_source(template, part, source, headers, suffix, size):
     every = part_variants(template, int(part))
     lines.append(f"const VideoShaderCode videoShaders{part}[{len(every)}] = {{")
     for variant in every:
-        layout, system, transfer, output = variant
+        layout, system, transfer, conversion, output = variant
         name = symbol(variant) + "_" + suffix
-        lines.append(f'    {{"{layout}", "{system}", "{transfer}", "{output}", {name}, {size(name)}}},')
+        lines.append(f'    {{"{layout}", "{system}", "{transfer}", "{conversion}", "{output}", {name}, {size(name)}}},')
     Path(source).write_text("\n".join(lines + ["};", ""]), encoding="utf-8")
 
 
@@ -221,6 +221,7 @@ def codes(template, header):
         "    bool alpha;",
         "    bool floating;",
         "    bool bits;",
+        "    bool inverted;",
         "    int count;",
         "    int components[4][5];",
         "};",
@@ -229,6 +230,7 @@ def codes(template, header):
     ]
     for name, layout in module.layouts.items():
         flags = ", ".join("true" if flag in layout["flags"] else "false" for flag in ("be", "alpha", "float", "bits"))
+        flags += ", true" if layout.get("inverted") else ", false"
         components = ", ".join("{" + ", ".join(str(value) for value in component) + "}" for component in layout["components"])
         lines.append(f'    {{"{name}", "{layout["model"]}", {flags}, {len(layout["components"])}, {{{components}}}}},')
     lines += ["};", ""]
@@ -260,22 +262,25 @@ def codes(template, header):
         "struct VideoTransfer {",
         "    uint8_t code;",
         "    const char* shape;",
-        "    double eotf[5];",
-        "    double oetf[5];",
+        "    double eotf[11];",
+        "    double oetf[11];",
+        "    double inverse[11];",
+        "    double decades;",
         "};",
         "",
         "static constexpr VideoTransfer videoTransfers[] = {",
     ]
+    flat = lambda piece: numbers([*piece[0], *piece[1], piece[2]]) if piece else numbers([0] * 11)
     for code, entry in module.transfers.items():
-        lines.append(f'    {{{code}, "{entry["shape"]}", {numbers(entry["eotf"])}, {numbers(entry["oetf"])}}},')
+        lines.append(f'    {{{code}, "{entry["shape"]}", {flat(entry.get("eotf"))}, {flat(entry.get("oetf"))}, {flat(entry.get("inverse"))}, {entry.get("decades", 0)}}},')
     lines += ["};", ""]
     lines += ["struct VideoPrimaries {", "    uint8_t code;", "    double toXyz[3][3];", "};", "", "static constexpr VideoPrimaries videoPrimaries[] = {"]
     for code, chromaticities in module.primaries.items():
         lines.append(f"    {{{code}, {matrix(to_xyz(chromaticities))}}},")
     lines += ["};", ""]
     lines += ["struct VideoOutput {", "    const char* name;", "    double fromXyz[3][3];", "};", "", "static constexpr VideoOutput videoOutputs[] = {"]
-    lines.append(f'    {{"sdr", {matrix(inverse(to_xyz(module.primaries[1])))}}},')
-    lines.append(f'    {{"hdr", {matrix(inverse(to_xyz(module.primaries[9])))}}},')
+    for name, code in module.outputs.items():
+        lines.append(f'    {{"{name}", {matrix(inverse(to_xyz(module.primaries[code])))}}},')
     lines += ["};", ""]
     lines += ["struct VideoLocation {", "    uint8_t code;", "    double site[2];", "};", "", "static constexpr VideoLocation videoLocations[] = {"]
     for code, site in module.locations.items():
@@ -287,6 +292,7 @@ def codes(template, header):
         "    const char* layout;",
         "    const char* system;",
         "    const char* transfer;",
+        "    const char* conversion;",
         "    const char* output;",
         "    const void* code;",
         "    size_t size;",

@@ -98,18 +98,19 @@ namespace {
     };
 
     struct FrameUniform {
-        u32 planeWord[4];
-        u32 lineWords[4];
+        u32 planeOffset[4];
+        u32 lineSize[4];
         u32 size[4];
+        float chroma[4];
+        float decode[3][4];
+        float bias[4];
         float sites[4];
-        float levelOffset[4];
-        float levelScale[4];
-        float toSignal[3][4];
-        float lumaWeights[4];
-        float eotf[4];
-        float oetf[4];
-        float scales[4];
+        float weights[4];
+        float curve[3][4];
+        float oetf[3][4];
+        float inverse[3][4];
         float toOutput[3][4];
+        float light[4];
         float luminance[4];
     };
 
@@ -117,6 +118,7 @@ namespace {
         const char* layout = nullptr;
         const char* system = nullptr;
         const char* transfer = nullptr;
+        const char* conversion = nullptr;
         const char* output = nullptr;
         FrameUniform uniform = {};
     };
@@ -459,6 +461,21 @@ namespace {
         }
     }
 
+    static void putPiece(float (&out)[3][4], const double (&piece)[11], double top) {
+        const double* upper = piece;
+        const double* lower = piece + 5;
+
+        for (int i = 0; i < 4; i++) {
+            out[0][i] = (float)upper[i];
+            out[1][i] = (float)lower[i];
+        }
+
+        out[2][0] = (float)upper[4];
+        out[2][1] = (float)lower[4];
+        out[2][2] = (float)piece[10];
+        out[2][3] = (float)top;
+    }
+
     static void yccMatrix(double kr, double kb, double (&rows)[3][3]) {
         double kg = 1. - kr - kb;
         const double ncl[3][3] = {
@@ -490,6 +507,7 @@ namespace {
         bool yuv = model == StringView(u8"yuv");
         bool xyz = model == StringView(u8"xyz");
         bool bayer = model == StringView(u8"bayer");
+        bool gray = model == StringView(u8"gray");
         ptrdiff_t lines[4];
         size_t sizes[4];
 
@@ -519,8 +537,8 @@ namespace {
                 raiseError(StringView(u8"video frame planes are not aligned to words"));
             }
 
-            u.planeWord[p] = (u32)(offset / 4);
-            u.lineWords[p] = (u32)(lines[p] / 4);
+            u.planeOffset[p] = (u32)offset;
+            u.lineSize[p] = (u32)lines[p];
         }
 
         int range = frame->color_range == AVCOL_RANGE_UNSPECIFIED && StringView(descriptor->name).startsWith(StringView(u8"yuvj")) ? AVCOL_RANGE_JPEG : frame->color_range;
@@ -530,10 +548,15 @@ namespace {
         const VideoTransfer* transfer = entryOf(videoTransfers, transferCode);
         const VideoPrimaries* primaries = entryOf(videoPrimaries, primariesCode);
         const VideoLocation* location = entryOf(videoLocations, frame->chroma_location);
+        const VideoOutput* target = nullptr;
         bool ranged = false;
 
         for (uint8_t known : videoRanges) {
             ranged = ranged || known == range;
+        }
+
+        for (const VideoOutput& candidate : videoOutputs) {
+            target = strcmp(candidate.name, output) ? target : &candidate;
         }
 
         if (yuv && !matrix) {
@@ -556,24 +579,57 @@ namespace {
             unsupported("chroma location", frame->chroma_location);
         }
 
-        const VideoOutput* target = nullptr;
+        double toOutput[3][3];
+        bool same = true;
 
-        for (const VideoOutput& candidate : videoOutputs) {
-            target = strcmp(candidate.name, output) ? target : &candidate;
+        for (int row = 0; row < 3; row++) {
+            for (int column = 0; column < 3; column++) {
+                toOutput[row][column] = 0.;
+
+                for (int k = 0; k < 3; k++) {
+                    toOutput[row][column] += target->fromXyz[row][k] * primaries->toXyz[k][column];
+                }
+
+                same = same && fabs(toOutput[row][column] - (row == column ? 1. : 0.)) < 1e-6;
+            }
         }
+
+        const double unbounded = 3.4e38;
+        StringView shape(transfer->shape);
+        bool sdr = !strcmp(target->name, "sdr");
+        const double* eotf = transfer->eotf;
+        bool power = eotf[0] == eotf[5] && eotf[1] == eotf[6] && eotf[2] == 1. && eotf[3] == 0. && eotf[4] == 0. && eotf[10] < 0.;
 
         out.layout = layout->name;
         out.system = yuv ? matrix->system : layout->model;
         out.transfer = transfer->shape;
+        out.conversion = same ? "same" : "convert";
         out.output = target->name;
+        putPiece(u.curve, transfer->eotf, unbounded);
+        putPiece(u.oetf, transfer->oetf, unbounded);
+        putPiece(u.inverse, transfer->inverse, unbounded);
+
+        if (shape == StringView(u8"curve") && same && (sdr ? transferCode == AVCOL_TRC_IEC61966_2_1 : transferCode == AVCOL_TRC_LINEAR)) {
+            out.transfer = "identity";
+            out.output = "any";
+            u.curve[2][3] = (float)(sdr ? 1. : unbounded);
+        } else if (shape == StringView(u8"curve") && same && !sdr) {
+            out.output = "any";
+        } else if (shape == StringView(u8"curve") && same && power) {
+            double scale = eotf[0];
+            double gamma = eotf[1];
+            const double fused[11] = {1.055 * pow(scale, 1. / 2.4), gamma / 2.4, 1., 0., 0.055, 12.92 * scale, gamma, 1., 0., 0., pow(0.0031308 / scale, 1. / gamma)};
+
+            out.output = "any";
+            putPiece(u.curve, fused, 1.);
+        } else if (shape == StringView(u8"curve")) {
+            out.conversion = "convert";
+        }
 
         int lumaBits = yuv ? matrix->lumaBits : 0;
         bool identity = yuv && frame->colorspace == AVCOL_SPC_RGB;
-
-        for (int c = 0; c < 4; c++) {
-            u.levelOffset[c] = 0.f;
-            u.levelScale[c] = 1.f;
-        }
+        double offsets[4] = {};
+        double scales[4] = {1., 1., 1., 1.};
 
         for (int c = 0; c < layout->count && !layout->floating; c++) {
             bool alpha = layout->alpha && c == layout->count - 1;
@@ -582,17 +638,20 @@ namespace {
             bool full = depth < 8 || range == AVCOL_RANGE_JPEG || (range == AVCOL_RANGE_UNSPECIFIED && !yuv);
             double unit = exp2(depth - 8.);
             double top = exp2(depth) - 1.;
-            double offset = chroma ? (full ? exp2(depth - 1.) : 128. * unit) : (full ? 0. : 16. * unit);
-            double scale = chroma ? (full ? top : 224. * unit) : (full ? top : 219. * unit);
             int slot = alpha ? 3 : c;
 
-            if (lumaBits && !alpha) {
-                offset = chroma ? exp2(depth - 1.) : 0.;
-                scale = exp2(depth - lumaBits) - 1.;
-            }
+            offsets[slot] = alpha ? 0. : chroma ? (full ? exp2(depth - 1.) : 128. * unit) : (full ? 0. : 16. * unit);
+            scales[slot] = alpha ? top : chroma ? (full ? top : 224. * unit) : (full ? top : 219. * unit);
 
-            u.levelOffset[slot] = (float)(alpha ? 0. : offset);
-            u.levelScale[slot] = (float)(alpha ? top : scale);
+            if (lumaBits && !alpha) {
+                offsets[slot] = chroma ? exp2(depth - 1.) : 0.;
+                scales[slot] = exp2(depth - lumaBits) - 1.;
+            }
+        }
+
+        if (layout->inverted) {
+            offsets[0] = 1.;
+            scales[0] = -1.;
         }
 
         double kr = yuv ? matrix->kr : 0.;
@@ -608,36 +667,36 @@ namespace {
             kb = frame->height > 576 ? 0.0722 : 0.114;
         }
 
-        double toSignal[3][3];
-        double toOutput[3][3];
+        double toSignal[3][3] = {{1., 0., 0.}, {0., 1., 0.}, {0., 0., 1.}};
+        double decode[3][3];
 
-        if (yuv && !strcmp(matrix->weights, "fixed")) {
-            putMatrix(u.toSignal, matrix->toSignal);
-        } else {
+        if (yuv && !strcmp(matrix->system, "linear") && !strcmp(matrix->weights, "fixed")) {
+            for (int row = 0; row < 3; row++) {
+                for (int column = 0; column < 3; column++) {
+                    toSignal[row][column] = matrix->toSignal[row][column];
+                }
+            }
+        } else if (yuv && !strcmp(matrix->system, "linear")) {
             yccMatrix(kr, kb, toSignal);
-            putMatrix(u.toSignal, toSignal);
+        } else if (gray) {
+            toSignal[1][0] = 1.;
+            toSignal[2][0] = 1.;
+            toSignal[1][1] = 0.;
+            toSignal[2][2] = 0.;
         }
 
         for (int row = 0; row < 3; row++) {
-            for (int column = 0; column < 3; column++) {
-                toOutput[row][column] = 0.;
+            u.bias[row] = 0.f;
 
-                for (int k = 0; k < 3; k++) {
-                    toOutput[row][column] += target->fromXyz[row][k] * primaries->toXyz[k][column];
-                }
+            for (int column = 0; column < 3; column++) {
+                decode[row][column] = toSignal[row][column] / scales[column];
+                u.bias[row] -= (float)(decode[row][column] * offsets[column]);
             }
         }
 
+        putMatrix(u.decode, decode);
         putMatrix(u.toOutput, toOutput);
-
-        for (int i = 0; i < 4; i++) {
-            u.eotf[i] = (float)transfer->eotf[i];
-            u.oetf[i] = (float)transfer->oetf[i];
-        }
-
-        for (int i = 0; i < 3; i++) {
-            u.luminance[i] = (float)primaries->toXyz[1][i];
-        }
+        u.bias[3] = (float)(1. / scales[3]);
 
         const char* pattern = bayer ? descriptor->name + 6 : "r";
         u32 red = 0;
@@ -646,19 +705,28 @@ namespace {
             red++;
         }
 
+        int shiftX = descriptor->log2_chroma_w;
+        int shiftY = descriptor->log2_chroma_h;
+
         u.size[0] = (u32)frame->width;
         u.size[1] = (u32)frame->height;
-        u.size[2] = descriptor->log2_chroma_w;
-        u.size[3] = descriptor->log2_chroma_h;
-        u.sites[0] = (float)(location->site[0] * ((1 << descriptor->log2_chroma_w) - 1));
-        u.sites[1] = (float)(location->site[1] * ((1 << descriptor->log2_chroma_h) - 1));
-        u.sites[2] = (float)(red % 2);
-        u.sites[3] = (float)(red / 2);
-        u.lumaWeights[0] = (float)kr;
-        u.lumaWeights[1] = (float)kb;
-        u.scales[0] = (float)transfer->eotf[4];
-        u.scales[1] = (float)transfer->oetf[4];
-        u.scales[2] = sdrWhiteNits;
+        u.size[2] = (u32)AV_CEIL_RSHIFT(frame->width, shiftX);
+        u.size[3] = (u32)AV_CEIL_RSHIFT(frame->height, shiftY);
+        u.chroma[0] = (float)exp2(-shiftX);
+        u.chroma[1] = (float)exp2(-shiftY);
+        u.chroma[2] = (float)(location->site[0] * (exp2(shiftX) - 1.) * exp2(-shiftX));
+        u.chroma[3] = (float)(location->site[1] * (exp2(shiftY) - 1.) * exp2(-shiftY));
+        u.sites[0] = (float)(red % 2);
+        u.sites[1] = (float)(red / 2);
+        u.weights[0] = (float)kr;
+        u.weights[1] = (float)kb;
+        u.light[0] = (float)transfer->decades;
+        u.light[1] = 10000.f / sdrWhiteNits;
+        u.light[2] = 1000.f / sdrWhiteNits;
+
+        for (int i = 0; i < 3; i++) {
+            u.luminance[i] = (float)primaries->toXyz[1][i];
+        }
 
         return out;
     }
@@ -668,7 +736,7 @@ namespace {
             for (size_t i = 0; i < part.count; i++) {
                 const VideoShaderCode& code = part.codes[i];
 
-                if (!strcmp(code.layout, frame.layout) && !strcmp(code.system, frame.system) && !strcmp(code.transfer, frame.transfer) && !strcmp(code.output, frame.output)) {
+                if (!strcmp(code.layout, frame.layout) && !strcmp(code.system, frame.system) && !strcmp(code.transfer, frame.transfer) && !strcmp(code.conversion, frame.conversion) && !strcmp(code.output, frame.output)) {
                     return code;
                 }
             }
@@ -1723,7 +1791,7 @@ RenderShader& Screen::compile(const VideoShaderCode& code) {
     RenderShader* shader = player->ui->compileShader(*player->pool, code.code, code.size);
 
     compiled.pushBack(CompiledShader{&code, shader});
-    player->ui->trace(StringView(StringBuilder() << StringView(u8"compiled video shader ") << StringView(code.layout) << StringView(u8" ") << StringView(code.system) << StringView(u8" ") << StringView(code.transfer) << StringView(u8" ") << StringView(code.output)));
+    player->ui->trace(StringView(StringBuilder() << StringView(u8"compiled video shader ") << StringView(code.layout) << StringView(u8" ") << StringView(code.system) << StringView(u8" ") << StringView(code.transfer) << StringView(u8" ") << StringView(code.conversion) << StringView(u8" ") << StringView(code.output)));
 
     return *shader;
 }
