@@ -2092,7 +2092,6 @@ namespace {
         }
     }
 
-
     static double pqDecode(double signal) {
         const double m1 = 2610. / 16384.;
         const double m2 = 2523. / 32.;
@@ -2235,12 +2234,16 @@ namespace {
     static Model modelOf(const VideoLayout& layout) {
         StringView model(layout.model);
 
-        return model == StringView(u8"yuv") ? Model::Yuv
-             : model == StringView(u8"rgb") ? Model::Rgb
-             : model == StringView(u8"gray") ? Model::Gray
-             : model == StringView(u8"xyz") ? Model::Xyz
-             : model == StringView(u8"palette") ? Model::Palette
-             : Model::Bayer;
+        const StringView names[] = {StringView(u8"yuv"), StringView(u8"rgb"), StringView(u8"gray"), StringView(u8"xyz"), StringView(u8"palette")};
+        const Model models[] = {Model::Yuv, Model::Rgb, Model::Gray, Model::Xyz, Model::Palette};
+
+        for (size_t i = 0; i < sizeof(models) / sizeof(models[0]); i++) {
+            if (model == names[i]) {
+                return models[i];
+            }
+        }
+
+        return Model::Bayer;
     }
 
     static double lumaWeight(const Case& kase, int channel) {
@@ -2312,9 +2315,8 @@ namespace {
             case AVCOL_SPC_ICTCP: {
                 bool hlg = kase.transfer == AVCOL_TRC_ARIB_STD_B67;
                 const Matrix toLms = {{{1688. / 4096., 2146. / 4096., 262. / 4096.}, {683. / 4096., 2951. / 4096., 462. / 4096.}, {99. / 4096., 309. / 4096., 3688. / 4096.}}};
-                const Matrix toIctcp = hlg
-                    ? Matrix{{{0.5, 0.5, 0.}, {3625. / 4096., -7465. / 4096., 3840. / 4096.}, {9500. / 4096., -9212. / 4096., -288. / 4096.}}}
-                    : Matrix{{{0.5, 0.5, 0.}, {6610. / 4096., -13613. / 4096., 7003. / 4096.}, {17933. / 4096., -17390. / 4096., -543. / 4096.}}};
+                const Matrix hlgToIctcp = {{{0.5, 0.5, 0.}, {3625. / 4096., -7465. / 4096., 3840. / 4096.}, {9500. / 4096., -9212. / 4096., -288. / 4096.}}};
+                const Matrix pqToIctcp = {{{0.5, 0.5, 0.}, {6610. / 4096., -13613. / 4096., 7003. / 4096.}, {17933. / 4096., -17390. / 4096., -543. / 4096.}}};
                 double light[3];
                 double lms[3];
 
@@ -2328,7 +2330,7 @@ namespace {
                     lms[c] = hlg ? hlgEncode(lms[c]) : pqEncode(lms[c]);
                 }
 
-                apply(toIctcp, lms, ycc);
+                apply(hlg ? hlgToIctcp : pqToIctcp, lms, ycc);
                 return;
             }
             default:
@@ -2917,8 +2919,19 @@ void FormatCheck::matrices() {
 
 void FormatCheck::locations() {
     const AVPixelFormat formats[] = {
-        AV_PIX_FMT_YUV420P, AV_PIX_FMT_YUV422P, AV_PIX_FMT_YUV440P, AV_PIX_FMT_YUV411P, AV_PIX_FMT_YUV410P, AV_PIX_FMT_YUV420P10LE, AV_PIX_FMT_NV12,
-        AV_PIX_FMT_NV21, AV_PIX_FMT_P010LE, AV_PIX_FMT_YUYV422, AV_PIX_FMT_UYVY422, AV_PIX_FMT_Y210LE, AV_PIX_FMT_UYYVYY411,
+        AV_PIX_FMT_YUV420P,
+        AV_PIX_FMT_YUV422P,
+        AV_PIX_FMT_YUV440P,
+        AV_PIX_FMT_YUV411P,
+        AV_PIX_FMT_YUV410P,
+        AV_PIX_FMT_YUV420P10LE,
+        AV_PIX_FMT_NV12,
+        AV_PIX_FMT_NV21,
+        AV_PIX_FMT_P010LE,
+        AV_PIX_FMT_YUYV422,
+        AV_PIX_FMT_UYVY422,
+        AV_PIX_FMT_Y210LE,
+        AV_PIX_FMT_UYYVYY411,
     };
 
     for (AVPixelFormat format : formats) {
