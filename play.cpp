@@ -2416,11 +2416,14 @@ void FormatCheck::formats() {
 }
 
 void FormatCheck::matrices() {
+    const char* const names[] = {"yuv444p", "yuv444p10le", "yuv444p12le", "yuv444p16le"};
     const AVColorSpace matrices[] = {AVCOL_SPC_BT709, AVCOL_SPC_FCC, AVCOL_SPC_BT470BG, AVCOL_SPC_SMPTE170M, AVCOL_SPC_SMPTE240M, AVCOL_SPC_BT2020_NCL};
+    const AVColorRange ranges[] = {AVCOL_RANGE_MPEG, AVCOL_RANGE_JPEG};
+    const AVColorSpace direct[] = {AVCOL_SPC_RGB, AVCOL_SPC_YCGCO};
 
-    for (const char* name : {"yuv444p", "yuv444p10le", "yuv444p12le", "yuv444p16le"}) {
+    for (const char* name : names) {
         for (AVColorSpace matrix : matrices) {
-            for (AVColorRange range : {AVCOL_RANGE_MPEG, AVCOL_RANGE_JPEG}) {
+            for (AVColorRange range : ranges) {
                 Case kase;
 
                 kase.format = av_get_pix_fmt(name);
@@ -2439,7 +2442,7 @@ void FormatCheck::matrices() {
         }
     }
 
-    for (AVColorSpace matrix : {AVCOL_SPC_RGB, AVCOL_SPC_YCGCO}) {
+    for (AVColorSpace matrix : direct) {
         Case kase;
 
         kase.format = AV_PIX_FMT_YUV444P16LE;
@@ -2476,7 +2479,9 @@ void FormatCheck::matrices() {
 }
 
 void FormatCheck::locations() {
-    for (const char* name : {"yuv420p", "yuv422p", "yuv440p", "yuv411p", "yuv410p", "yuv420p10le", "nv12", "p010le"}) {
+    const char* const names[] = {"yuv420p", "yuv422p", "yuv440p", "yuv411p", "yuv410p", "yuv420p10le", "nv12", "p010le"};
+
+    for (const char* name : names) {
         for (int location = AVCHROMA_LOC_UNSPECIFIED; location <= AVCHROMA_LOC_BOTTOM; location++) {
             Case kase;
 
