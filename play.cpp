@@ -21,6 +21,7 @@
 #include <imgui.h>
 #include <AL/alc.h>
 #include <string.h>
+#include <unistd.h>
 #include <AL/alext.h>
 #include <sys/mman.h>
 #include <plt/fiber.h>
@@ -1625,8 +1626,8 @@ Player::Player(ObjPool& pool_, Ui& ui_, const char* path_)
     , video(pool->make<Video>(this))
     , audio(pool->make<Audio>(this))
     , screen(pool->make<Screen>(this))
-    , videoThread(Thread::create(pool, *video, pool->allocateOverAligned(threadStack, 4096), threadStack))
-    , audioThread(Thread::create(pool, *audio, pool->allocateOverAligned(threadStack, 4096), threadStack))
+    , videoThread(Thread::create(pool, *video, pool->allocateOverAligned(threadStack, (size_t)sysconf(_SC_PAGESIZE)), threadStack))
+    , audioThread(Thread::create(pool, *audio, pool->allocateOverAligned(threadStack, (size_t)sysconf(_SC_PAGESIZE)), threadStack))
 {
 }
 
