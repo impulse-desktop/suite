@@ -6,10 +6,9 @@
 
 #include <std/ios/sys.h>
 #include <std/sys/crt.h>
-#include <std/lib/list.h>
 #include <std/sys/throw.h>
-#include <std/dbg/verify.h>
 #include <std/lib/vector.h>
+#include <std/ptr/scoped.h>
 #include <std/thr/thread.h>
 #include <std/str/builder.h>
 #include <std/thr/channel.h>
@@ -18,1425 +17,1620 @@
 
 #include <math.h>
 #include <AL/al.h>
+#include <imgui.h>
 #include <AL/alc.h>
-#include <stdlib.h>
 #include <string.h>
 #include <AL/alext.h>
+#include <sys/mman.h>
 #include <plt/fiber.h>
 #include <plt/poller.h>
 #include <plt/platform.h>
 #include <plt/loop_wake.h>
 
 extern "C" {
+#include <libavutil/pixdesc.h>
+#include <libswscale/swscale.h>
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavutil/channel_layout.h>
-#include <libavutil/imgutils.h>
 #include <libswresample/swresample.h>
-#include <libswscale/swscale.h>
 }
 
 using namespace stl;
 
 namespace {
-    constexpr size_t imageCount = 10;
-    constexpr size_t packetCount = 16;
-    // At most 32 packet slots, 10 image slots, one control per worker and
-    // one audio clock/event token can be in transit. Data cannot consume
-    // the space needed by control messages or return messages.
-    constexpr size_t channelCapacity = 128;
-    constexpr int audioRate = 48000;
-    constexpr int audioBufferCount = 6;
-    constexpr int audioBufferSamples = 1024;
+    constexpr Design windowWidth = 960_d;
+    constexpr Design windowHeight = 600_d;
+    constexpr Design barPadding = 8_d;
+    constexpr Design buttonWidth = 72_d;
+    constexpr size_t surfaceCount = 10;
+    constexpr size_t rowAlignment = 256;
+    constexpr size_t slotAlignment = 64u << 10;
+    constexpr size_t channelCapacity = 1024;
+    constexpr size_t threadStack = 8u << 20;
+    constexpr size_t controllerStack = 8u << 20;
+    constexpr int audioBuffers = 6;
+    constexpr int bufferRate = 20;
+    constexpr size_t sampleBytes = 4;
+    constexpr double seekStep = 10.;
 
-    enum class Kind {
-        Seek,
-        Playback,
-        Packet,
-        Stream,
-        File,
-        Image,
+    enum class Kind : u8 {
+        Control,
+        Stop,
+        Surface,
+        Pulse,
+        Frame,
         Resize,
-        Clock,
-        AudioPulse,
         End,
+        Clock,
         Failure
     };
 
-    struct Message: public IntrusiveNode {
-        ObjPool* owner = nullptr;
+    struct Message {
+        virtual ~Message() noexcept;
         virtual Kind messageKind() const = 0;
     };
 
+    template <Kind K>
+    struct Typed: public Message {
+        static constexpr Kind kind = K;
+        Kind messageKind() const override;
+    };
+
     template <typename T>
-    static T* cast(Message* message) {
-        return message && message->messageKind() == T::kind ? static_cast<T*>(message) : nullptr;
+    T* cast(Message* message) {
+        return message->messageKind() == T::kind ? static_cast<T*>(message) : nullptr;
     }
 
-    template <typename T>
-    static T* makeMessage() {
-        ObjPool* pool = ObjPool::fromMemoryRaw();
-        T* message = pool->make<T>();
-        message->owner = pool;
-        return message;
-    }
+    struct Player;
+    struct Surfaces;
 
-    static void discard(Message* message) {
-        delete message->owner;
-    }
+    struct VideoImage final: public Runable {
+        Player* player;
+        Surfaces* set;
+        uint8_t* data;
+        size_t stride;
+        u32 width;
+        u32 height;
+        RenderImage* render;
+        u32 draws = 0;
 
-    static void send(Channel* channel, Message* message) {
-        STD_VERIFY(channel->tryEnqueue(message));
-    }
-
-    static void ffcheck(int status) {
-        if (status < 0) {
-            char text[AV_ERROR_MAX_STRING_SIZE];
-            av_strerror(status, text, sizeof(text));
-            fail(StringView(text));
-        }
-    }
-
-    struct Mailbox {
-        Channel* channel = nullptr;
-        plt::LoopWake* wake = nullptr;
-        void send(Message* message) const;
-    };
-
-    struct Seek final: public Message {
-        static constexpr Kind kind = Kind::Seek;
-        int worker = 0;
-        u64 generation = 0;
-        double position = 0;
-        bool playing = false;
-        Kind messageKind() const override;
-    };
-
-    struct Playback final: public Message {
-        static constexpr Kind kind = Kind::Playback;
-        int worker = 0;
-        u64 generation = 0;
-        bool playing = false;
-        Kind messageKind() const override;
-    };
-
-    struct Packet final: public Message {
-        static constexpr Kind kind = Kind::Packet;
-        AVPacket* packet = nullptr;
-        int stream = 0;
-        u64 generation = 0;
-        bool eof = false;
-        Packet();
-        ~Packet() noexcept;
-        Kind messageKind() const override;
-    };
-
-    struct Stream final: public Message {
-        static constexpr Kind kind = Kind::Stream;
-        AVCodecParameters* parameters = nullptr;
-        AVRational timeBase{};
-        AVRational frameRate{};
-        double origin = 0;
-        Stream();
-        ~Stream() noexcept;
-        Kind messageKind() const override;
-    };
-
-    struct File final: public Message {
-        static constexpr Kind kind = Kind::File;
-        double duration = 0;
-        u32 width = 0;
-        u32 height = 0;
-        bool audio = false;
-        bool video = false;
-        Kind messageKind() const override;
-    };
-
-    struct VideoImage final: public Message {
-        static constexpr Kind kind = Kind::Image;
-        RenderImage* image = nullptr;
-        void* data = nullptr;
-        size_t size = 0;
-        size_t stride = 0;
-        ObjPool* pixels = nullptr;
-        u32 width = 0;
-        u32 height = 0;
-        double pts = 0;
-        double duration = 0;
-        double aspect = 1;
-        u64 generation = 0;
-        // These two flags belong to the UI, throughout the GPU use. The
-        // producer receives the image only after both have been cleared.
-        bool held = false;
-        bool busy = false;
-        Runable* retired = nullptr;
-        Kind messageKind() const override;
-    };
-
-    struct Resize final: public Message {
-        static constexpr Kind kind = Kind::Resize;
-        VideoImage* image = nullptr;
-        u32 width = 0;
-        u32 height = 0;
-        Kind messageKind() const override;
-    };
-
-    struct Clock final: public Message {
-        static constexpr Kind kind = Kind::Clock;
-        u64 generation = 0;
-        u64 at = 0;
-        double position = 0;
-        double limit = 0;
-        bool running = false;
-        bool ended = false;
-        Kind messageKind() const override;
-    };
-
-    struct AudioPulse final: public Message {
-        static constexpr Kind kind = Kind::AudioPulse;
-        Kind messageKind() const override;
-    };
-
-    struct End final: public Message {
-        static constexpr Kind kind = Kind::End;
-        u64 generation = 0;
-        double position = 0;
-        Kind messageKind() const override;
-    };
-
-    struct Failure final: public Message {
-        static constexpr Kind kind = Kind::Failure;
-        Buffer text;
-        Kind messageKind() const override;
-    };
-
-    struct Worker: public Runable {
-        Channel* input = nullptr;
-        Mailbox output;
-        u64 generation = 1;
-        bool playing = false;
+        VideoImage(Player* player, Surfaces* set, ObjPool& pool, uint8_t* data, size_t size, size_t stride, u32 width, u32 height);
         void run() override;
-        virtual void start(ObjPool& pool) = 0;
-        virtual void accept(Message* message) = 0;
-        virtual bool step() = 0;
-        virtual void seek(double position) = 0;
-        virtual void playback() = 0;
-        bool control(Message* message);
     };
 
-    struct Demux final: public Worker {
-        const char* path = nullptr;
-        Channel* streams[2]{};
+    struct Surfaces {
+        ObjPool* pool;
+        u32 width;
+        u32 height;
+        size_t home = 0;
+        VideoImage* images[surfaceCount] = {};
+
+        Surfaces(Player* player, ObjPool* pool, u32 width, u32 height);
+    };
+
+    struct Control final: public Typed<Kind::Control> {
+        u64 generation;
+        double position;
+        bool playing;
+
+        Control(u64 generation, double position, bool playing);
+    };
+
+    struct Stop final: public Typed<Kind::Stop> {};
+
+    struct Surface final: public Typed<Kind::Surface> {
+        VideoImage* image;
+
+        explicit Surface(VideoImage* image);
+    };
+
+    struct Pulse final: public Typed<Kind::Pulse> {};
+
+    struct Frame final: public Typed<Kind::Frame> {
+        VideoImage* image;
+        u64 generation;
+        double pts;
+        double aspect;
+
+        Frame(VideoImage* image, u64 generation, double pts, double aspect);
+    };
+
+    struct Resize final: public Typed<Kind::Resize> {
+        u32 width;
+        u32 height;
+
+        Resize(u32 width, u32 height);
+    };
+
+    struct End final: public Typed<Kind::End> {
+        u64 generation;
+
+        explicit End(u64 generation);
+    };
+
+    struct Clock final: public Typed<Kind::Clock> {
+        u64 generation;
+        double position;
+        u64 at;
+        bool running;
+        bool ended;
+
+        Clock(u64 generation, double position, u64 at, bool running, bool ended);
+    };
+
+    struct Failure final: public Typed<Kind::Failure> {
+        Buffer text;
+
+        explicit Failure(StringView text);
+    };
+
+    struct Stream {
         AVFormatContext* format = nullptr;
-        AVPacket* pending = nullptr;
-        IntrusiveList available[2];
-        int indexes[2] = {-1, -1};
-        bool ended[2]{};
-        bool eof = false;
-        bool pendingReady = false;
-        double origin = 0;
-        void start(ObjPool& pool) override;
-        void accept(Message* message) override;
-        bool step() override;
-        void seek(double position) override;
-        void playback() override;
-    };
-
-    struct Decoder: public Worker {
-        Channel* demux = nullptr;
         AVCodecContext* codec = nullptr;
+        AVPacket* packet = nullptr;
         AVFrame* frame = nullptr;
-        AVRational timeBase{};
-        double origin = 0;
-        double target = 0;
-        IntrusiveList packets;
-        bool draining = false;
-        bool exhausted = false;
-        void start(ObjPool& pool) override;
-        void open(Stream& stream);
-        void reset(double position);
-        void returnPacket(Packet* packet);
-        // One decoder call per step, returning to the mailbox between calls.
-        bool feed();
+        int index = -1;
+        double start = 0.;
+        double duration = 0.;
+        bool eof = false;
+
+        Stream(Player* player, AVMediaType type);
+        void seek(double position);
+        int receive();
+        double seconds(i64 timestamp) const;
+        double timeBase() const;
     };
 
-    struct Video final: public Decoder {
-        IntrusiveList images;
+    struct Video final: public Runable {
+        Player* player;
+        Stream stream;
         SwsContext* scaler = nullptr;
-        bool frameReady = false;
-        bool preview = true;
-        double frameDuration = 1.0 / 25;
-        double nextPts = 0;
-        double endPts = 0;
-        void accept(Message* message) override;
-        bool step() override;
-        void seek(double position) override;
-        void playback() override;
+        Vector<VideoImage*> idle;
+        u64 generation = 1;
+        double target = 0.;
+        double pts = 0.;
+        double next = 0.;
+        u32 wantWidth = 0;
+        u32 wantHeight = 0;
+        u32 askedWidth = 0;
+        u32 askedHeight = 0;
+        bool decoded = false;
+        bool ended = false;
+
+        explicit Video(Player* player);
+        void run() override;
+        void apply(const Control& control);
+        void give(VideoImage* image);
+        void refuse();
+        bool step();
+        bool deliver();
+        void convert(VideoImage& image);
     };
 
-    struct AudioEvent {
-        Channel* input = nullptr;
-        Channel* token = nullptr;
-    };
-
-    struct Audio final: public Decoder {
+    struct Audio final: public Runable {
+        Player* player;
+        Stream stream;
         ALCdevice* device = nullptr;
         ALCcontext* context = nullptr;
         ALuint source = 0;
-        ALuint buffers[audioBufferCount]{};
-        Vector<ALuint> available;
-
-        struct Queued {
-            ALuint buffer;
-            double pts;
-            int samples;
-        };
-
-        Vector<Queued> queued;
-        AudioEvent event;
-        Clock* clock = nullptr;
-        bool clockDirty = false;
-        LPALGETSOURCEDVSOFT getLatency = nullptr;
+        ALuint buffers[audioBuffers] = {};
+        LPALGETSOURCEDVSOFT sourceOffsets = nullptr;
         SwrContext* resampler = nullptr;
-        AVChannelLayout inputLayout{};
-        AVSampleFormat inputFormat = AV_SAMPLE_FMT_NONE;
+        AVChannelLayout layout{};
+        int format = -1;
         int inputRate = 0;
+        int rate = 0;
+        Vector<ALuint> idle;
+        size_t ring[audioBuffers] = {};
+        size_t ringHead = 0;
+        size_t ringLength = 0;
         Buffer pcm;
-        int pcmSamples = 0;
-        int pcmAt = 0;
-        double pcmPts = 0;
-        double nextPts = 0;
-        double played = 0;
-        double latency = 0;
-        bool resamplerEnded = false;
-        void start(ObjPool& pool) override;
-        void accept(Message* message) override;
-        bool step() override;
-        void seek(double position) override;
-        void playback() override;
-        void openOutput(ObjPool& pool);
+        double pcmStart = 0.;
+        double queuedStart = 0.;
+        u64 generation = 1;
+        double target = 0.;
+        bool playing = true;
+        bool skipping = true;
+        bool drained = false;
+        bool ended = false;
+
+        explicit Audio(Player* player);
+        void run() override;
+        void apply(const Control& control);
         void service();
-        void publishClock();
+        bool step();
         void convert();
-        void queueSamples();
-        ObjPool* pool = nullptr;
+        void drop(size_t taken);
+        void enqueue();
+        void start();
+        void finish();
+        void report();
+        ALint state();
+        size_t samples() const;
+        size_t bufferSamples() const;
     };
 
-    struct Player;
-
-    struct WakePlayer final: public plt::TimerCallback {
+    struct Screen final: public Runable {
         Player* player;
-        explicit WakePlayer(Player* player);
+        plt::Fiber* fiber = nullptr;
+        bool hasVideo;
+        bool hasAudio;
+        double duration;
+        Surfaces* surfaces = nullptr;
+        Vector<Surfaces*> spent;
+        Vector<Frame*> waiting;
+        Frame* shown = nullptr;
+        u64 generation = 1;
+        double target = 0.;
+        bool playing = true;
+        bool ended = false;
+        bool videoEnded = false;
+        bool audioEnded = false;
+        double clockBase = 0.;
+        u64 clockAt = 0;
+        bool clockRunning = false;
+        i64 drawnSecond = -1;
+        bool scrubbing = false;
+        float scrub = 0.f;
+        bool fullscreen = false;
+        bool failed = false;
+        Buffer error;
+
+        explicit Screen(Player* player);
+        void run() override;
+        void resume();
+        bool frame();
+        void drain();
+        u64 present();
+        void finishIfEnded(u64 now);
+        void show(Frame* frame);
+        Frame* takeFirst();
+        void release(VideoImage* image);
+        void retired(VideoImage* image);
+        void applyClock(const Clock& clock);
+        void makeSurfaces(u32 width, u32 height);
+        void seek(double to, bool play);
+        void toggle();
+        void sendControl(Channel* to);
+        void halt(StringView text);
+        bool audioMaster() const;
+        double position(u64 now) const;
+        void setClock(double base, bool running, u64 at);
+        void keys();
+        void draw();
+    };
+
+    struct CallScreen final: public plt::TimerCallback {
+        Player* player;
+
+        explicit CallScreen(Player* player);
         void ready() override;
     };
 
-    struct RetiredImage final: public Runable {
-        Player* player;
-        VideoImage* image;
-        RetiredImage(Player* player, VideoImage* image);
-        void run() override;
+    struct Player {
+        ObjPool* pool;
+        Ui* ui;
+        const char* path;
+        Channel* videoInbox;
+        Channel* audioInbox;
+        Channel* screenInbox;
+        plt::LoopWake* wake;
+        Video* video;
+        Audio* audio;
+        Screen* screen;
+
+        Player(ObjPool& pool, Ui& ui, const char* path);
+        void post(Message* message);
     };
 
-    struct Player final: public Runable {
-        ObjPool* pool = nullptr;
-        Ui* ui = nullptr;
-        Channel* inbox = nullptr;
-        Channel* workers[3]{};
-        plt::LoopWake* wake = nullptr;
-        plt::Fiber* controller = nullptr;
-        Vector<VideoImage*> ready;
-        VideoImage* shown = nullptr;
+    [[noreturn]] static void failAv(StringView what, int error) {
+        char text[AV_ERROR_MAX_STRING_SIZE];
 
-        struct Sent {
-            u64 generation = 1;
-            bool playing = false;
-            bool pending = false;
-        };
+        av_strerror(error, text, sizeof(text));
+        raiseError(StringView(StringBuilder() << what << StringView(u8": ") << StringView(text)));
+    }
 
-        Sent sent[3];
-        Buffer error;
-        const char* path = nullptr;
-        double duration = 0;
-        double seekPosition = 0;
-        double clockPosition = 0;
-        double clockLimit = 0;
-        u64 clockAt = 0;
-        u64 generation = 1;
-        bool playing = true;
-        bool loaded = false;
-        bool audio = false;
-        bool video = false;
-        bool haveClock = false;
-        bool clockRunning = false;
-        bool audioEnded = false;
-        bool videoEnded = false;
-        bool preview = true;
-        bool quit = false;
-        double videoEnd = 0;
-        u64 nextUi = 0;
-        void init(ObjPool& owner, const char* filename);
-        void run() override;
-        void accept(Message* message);
-        void controls();
-        void seek(double position, bool resume);
-        void toggle();
-        double position(u64 now) const;
-        bool ended(double position) const;
-        void resize(VideoImage& image, u32 width, u32 height);
-        void release(VideoImage* image);
-        void retired(VideoImage* image);
-        void draw();
-        void show(VideoImage* image);
-        void trace(const char* event, double position);
-    };
+    static void checkAl() {
+        ALenum error = alGetError();
+
+        if (error != AL_NO_ERROR) {
+            const ALchar* text = alGetString(error);
+
+            raiseError(StringView(StringBuilder() << StringView(u8"OpenAL: ") << StringView(text ? text : "error")));
+        }
+    }
+
+    static void AL_APIENTRY audioEvent(ALenum, ALuint, ALuint, ALsizei, const ALchar*, void* user) noexcept {
+        Pulse* pulse = new Pulse();
+
+        if (!((Player*)user)->audioInbox->tryEnqueue(pulse)) {
+            delete pulse;
+        }
+    }
+
+    static void appendTime(StringBuilder& text, double seconds) {
+        i64 whole = seconds > 0. ? (i64)seconds : 0;
+
+        text << whole / 60 << StringView(u8":") << (whole % 60 < 10 ? StringView(u8"0") : StringView(u8"")) << whole % 60;
+    }
+
+    static i64 milliseconds(double seconds) {
+        return (i64)llround(seconds * 1000.);
+    }
+
+    static u64 microseconds(double seconds) {
+        return seconds > 0. ? (u64)ceil(seconds * 1e6) : 1;
+    }
 }
 
-Kind Seek::messageKind() const {
-    return kind;
+Message::~Message() noexcept {
 }
 
-Kind Playback::messageKind() const {
-    return kind;
+template <Kind K>
+Kind Typed<K>::messageKind() const {
+    return K;
 }
 
-Kind Packet::messageKind() const {
-    return kind;
-}
-
-Kind Stream::messageKind() const {
-    return kind;
-}
-
-Kind File::messageKind() const {
-    return kind;
-}
-
-Kind VideoImage::messageKind() const {
-    return kind;
-}
-
-Kind Resize::messageKind() const {
-    return kind;
-}
-
-Kind Clock::messageKind() const {
-    return kind;
-}
-
-Kind AudioPulse::messageKind() const {
-    return kind;
-}
-
-Kind End::messageKind() const {
-    return kind;
-}
-
-Kind Failure::messageKind() const {
-    return kind;
-}
-
-Packet::Packet()
-    : packet(av_packet_alloc())
+Control::Control(u64 generation_, double position_, bool playing_)
+    : generation(generation_)
+    , position(position_)
+    , playing(playing_)
 {
-    STD_VERIFY(packet);
 }
 
-Packet::~Packet() noexcept {
-    av_packet_free(&packet);
-}
-
-Stream::Stream()
-    : parameters(avcodec_parameters_alloc())
+Surface::Surface(VideoImage* image_)
+    : image(image_)
 {
-    STD_VERIFY(parameters);
 }
 
-Stream::~Stream() noexcept {
-    avcodec_parameters_free(&parameters);
+Frame::Frame(VideoImage* image_, u64 generation_, double pts_, double aspect_)
+    : image(image_)
+    , generation(generation_)
+    , pts(pts_)
+    , aspect(aspect_)
+{
 }
 
-void Mailbox::send(Message* message) const {
-    ::send(channel, message);
-    wake->signal();
+Resize::Resize(u32 width_, u32 height_)
+    : width(width_)
+    , height(height_)
+{
 }
 
-void Worker::run() {
-    ObjPool::Ref pool = ObjPool::fromMemory();
+End::End(u64 generation_)
+    : generation(generation_)
+{
+}
+
+Clock::Clock(u64 generation_, double position_, u64 at_, bool running_, bool ended_)
+    : generation(generation_)
+    , position(position_)
+    , at(at_)
+    , running(running_)
+    , ended(ended_)
+{
+}
+
+Failure::Failure(StringView text_)
+    : text(text_)
+{
+}
+
+VideoImage::VideoImage(Player* player_, Surfaces* set_, ObjPool& pool, uint8_t* data_, size_t size, size_t stride_, u32 width_, u32 height_)
+    : player(player_)
+    , set(set_)
+    , data(data_)
+    , stride(stride_)
+    , width(width_)
+    , height(height_)
+    , render(player_->ui->bindImage(pool, width_, height_, data_, size, stride_, *this))
+{
+}
+
+void VideoImage::run() {
+    player->screen->retired(this);
+}
+
+Surfaces::Surfaces(Player* player, ObjPool* pool_, u32 width_, u32 height_)
+    : pool(pool_)
+    , width(width_)
+    , height(height_)
+{
+    checkImageSize(width, height, player->ui->maxTextureSide());
+
+    size_t stride = ((size_t)width * 4 + rowAlignment - 1) / rowAlignment * rowAlignment;
+    size_t slot = (stride * height + slotAlignment - 1) / slotAlignment * slotAlignment;
+    size_t bytes = slot * surfaceCount;
+    void* base = mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+
+    if (base == MAP_FAILED) {
+        Errno().raise(StringBuilder() << StringView(u8"cannot map video buffers"));
+    }
+
+    pooledGuard(*pool, [base, bytes] {
+        munmap(base, bytes);
+    });
+#if defined(__linux__)
+    madvise(base, bytes, MADV_HUGEPAGE);
+#endif
+
+    for (size_t i = 0; i < surfaceCount; i++) {
+        images[i] = pool->make<VideoImage>(player, this, *pool, (uint8_t*)base + i * slot, slot, stride, width, height);
+    }
+
+    player->ui->trace(StringView(StringBuilder() << StringView(u8"mapped ") << (i64)bytes << StringView(u8" bytes for ") << (i64)width << StringView(u8"x") << (i64)height));
+}
+
+Stream::Stream(Player* player, AVMediaType type) {
+    StringView path(player->path);
+    int e = avformat_open_input(&format, player->path, nullptr, nullptr);
+
+    if (e < 0) {
+        failAv(path, e);
+    }
+
+    pooledGuard(*player->pool, [this] {
+        avformat_close_input(&format);
+    });
+
+    e = avformat_find_stream_info(format, nullptr);
+
+    if (e < 0) {
+        failAv(path, e);
+    }
+
+    duration = format->duration > 0 ? (double)format->duration / AV_TIME_BASE : 0.;
+    start = format->start_time != AV_NOPTS_VALUE ? (double)format->start_time / AV_TIME_BASE : 0.;
+
+    int found = av_find_best_stream(format, type, -1, -1, nullptr, 0);
+
+    if (found < 0 || (format->streams[found]->disposition & AV_DISPOSITION_ATTACHED_PIC)) {
+        return;
+    }
+
+    index = found;
+
+    for (unsigned i = 0; i < format->nb_streams; i++) {
+        if ((int)i != index) {
+            format->streams[i]->discard = AVDISCARD_ALL;
+        }
+    }
+
+    const AVCodecParameters* parameters = format->streams[index]->codecpar;
+    const AVCodec* decoder = avcodec_find_decoder(parameters->codec_id);
+
+    if (!decoder) {
+        raiseError(StringView(StringBuilder() << path << StringView(u8": no decoder for the ") << StringView(av_get_media_type_string(type)) << StringView(u8" codec ") << StringView(avcodec_get_name(parameters->codec_id))));
+    }
+
+    codec = avcodec_alloc_context3(decoder);
+    packet = av_packet_alloc();
+    frame = av_frame_alloc();
+    pooledGuard(*player->pool, [this] {
+        av_frame_free(&frame);
+        av_packet_free(&packet);
+        avcodec_free_context(&codec);
+    });
+
+    if (!codec || !packet || !frame) {
+        fail(StringView(u8"cannot allocate a decoder"));
+    }
+
+    e = avcodec_parameters_to_context(codec, parameters);
+
+    if (e < 0) {
+        failAv(path, e);
+    }
+
+    codec->pkt_timebase = format->streams[index]->time_base;
+    codec->thread_count = 0;
+    e = avcodec_open2(codec, decoder, nullptr);
+
+    if (e < 0) {
+        failAv(path, e);
+    }
+}
+
+void Stream::seek(double position) {
+    i64 ts = av_rescale_q((i64)((position + start) * AV_TIME_BASE), AVRational{1, AV_TIME_BASE}, format->streams[index]->time_base);
+
+    if (avformat_seek_file(format, index, INT64_MIN, ts, ts, 0) < 0) {
+        av_seek_frame(format, index, ts, AVSEEK_FLAG_BACKWARD);
+    }
+
+    avcodec_flush_buffers(codec);
+    av_frame_unref(frame);
+    eof = false;
+}
+
+int Stream::receive() {
+    int e = avcodec_receive_frame(codec, frame);
+
+    if (e != AVERROR(EAGAIN)) {
+        return e;
+    }
+
+    if (eof) {
+        return AVERROR_EOF;
+    }
+
+    if (av_read_frame(format, packet) < 0) {
+        eof = true;
+        avcodec_send_packet(codec, nullptr);
+
+        return e;
+    }
+
+    if (packet->stream_index == index) {
+        avcodec_send_packet(codec, packet);
+    }
+
+    av_packet_unref(packet);
+
+    return e;
+}
+
+double Stream::seconds(i64 timestamp) const {
+    return (double)timestamp * timeBase() - start;
+}
+
+double Stream::timeBase() const {
+    return av_q2d(format->streams[index]->time_base);
+}
+
+Video::Video(Player* player_)
+    : player(player_)
+    , stream(player_, AVMEDIA_TYPE_VIDEO)
+{
+    pooledGuard(*player->pool, [this] {
+        sws_freeContext(scaler);
+    });
+}
+
+void Video::run() {
     try {
-        start(*pool);
         for (;;) {
-            void* value = nullptr;
-            if (input->tryDequeue(&value)) {
-                accept((Message*)value);
-            } else if (!step()) {
-                if (!input->dequeue(&value)) {
-                    return;
+            void* item;
+
+            if (!player->videoInbox->tryDequeue(&item)) {
+                if (step()) {
+                    continue;
                 }
-                accept((Message*)value);
+
+                player->videoInbox->dequeue(&item);
+            }
+
+            ScopedPtr<Message> message{(Message*)item};
+
+            if (cast<Stop>(message.ptr)) {
+                return;
+            }
+
+            if (Control* control = cast<Control>(message.ptr)) {
+                apply(*control);
+            } else if (Surface* surface = cast<Surface>(message.ptr)) {
+                give(surface->image);
             }
         }
     } catch (...) {
-        Failure* failure = makeMessage<Failure>();
-        failure->text = Buffer(Exception::current());
-        output.send(failure);
-    }
-    // The UI owns process exit; no worker tears down another worker's state.
-    for (;;) {
-        void* value = nullptr;
-        if (!input->dequeue(&value)) {
-            return;
-        }
-        discard((Message*)value);
+        player->post(new Failure(Exception::current()));
     }
 }
 
-bool Worker::control(Message* message) {
-    if (Seek* command = cast<Seek>(message)) {
-        generation = command->generation;
-        playing = command->playing;
-        seek(command->position);
-        output.send(command);
-        return true;
-    }
-    if (Playback* command = cast<Playback>(message)) {
-        STD_VERIFY(command->generation == generation);
-        playing = command->playing;
-        playback();
-        output.send(command);
-        return true;
-    }
-    return false;
-}
-
-void Demux::start(ObjPool& pool) {
-    ffcheck(avformat_open_input(&format, path, nullptr, nullptr));
-    ffcheck(avformat_find_stream_info(format, nullptr));
-    indexes[0] = av_find_best_stream(format, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
-    indexes[1] = av_find_best_stream(format, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
-    if (indexes[0] < 0 && indexes[1] < 0) {
-        fail(StringView(u8"file has no video or audio stream"));
-    }
-    origin = format->start_time == AV_NOPTS_VALUE ? 0 : (double)format->start_time / AV_TIME_BASE;
-    File* file = makeMessage<File>();
-    file->duration = format->duration == AV_NOPTS_VALUE ? 0 : (double)format->duration / AV_TIME_BASE;
-    file->audio = indexes[1] >= 0;
-    file->video = indexes[0] >= 0;
-    for (int i = 0; i < 2; i++) {
-        if (indexes[i] < 0) {
-            ended[i] = true;
-            continue;
-        }
-        AVStream* source = format->streams[indexes[i]];
-        Stream* stream = makeMessage<Stream>();
-        ffcheck(avcodec_parameters_copy(stream->parameters, source->codecpar));
-        stream->timeBase = source->time_base;
-        stream->frameRate = av_guess_frame_rate(format, source, nullptr);
-        stream->origin = origin;
-        send(streams[i], stream);
-        for (size_t j = 0; j < packetCount; j++) {
-            Packet* packet = pool.make<Packet>();
-            packet->stream = i;
-            available[i].pushBack(packet);
-        }
-    }
-    if (indexes[0] >= 0) {
-        file->width = format->streams[indexes[0]]->codecpar->width;
-        file->height = format->streams[indexes[0]]->codecpar->height;
-    }
-    pending = av_packet_alloc();
-    STD_VERIFY(pending);
-    output.send(file);
-}
-
-void Demux::accept(Message* message) {
-    if (control(message)) {
+void Video::apply(const Control& control) {
+    if (control.generation == generation) {
         return;
     }
-    Packet* packet = cast<Packet>(message);
-    STD_VERIFY(packet);
-    available[packet->stream].pushBack(packet);
-}
 
-bool Demux::step() {
-    if (eof) {
-        for (int i = 0; i < 2; i++) {
-            if (!ended[i] && !available[i].empty()) {
-                Packet* packet = (Packet*)available[i].popFront();
-                packet->generation = generation;
-                packet->eof = true;
-                ended[i] = true;
-                send(streams[i], packet);
-                return true;
-            }
-        }
-        return false;
-    }
-    if (pendingReady) {
-        int stream = pending->stream_index == indexes[0] ? 0 : 1;
-        if (available[stream].empty()) {
-            return false;
-        }
-        Packet* packet = (Packet*)available[stream].popFront();
-        packet->generation = generation;
-        packet->eof = false;
-        av_packet_move_ref(packet->packet, pending);
-        pendingReady = false;
-        send(streams[stream], packet);
-        return true;
-    }
-    // One packet may be held while its receiving decoder has no credit.
-    int status = av_read_frame(format, pending);
-    if (status == AVERROR_EOF) {
-        eof = true;
-    } else {
-        ffcheck(status);
-        if (pending->stream_index != indexes[0] && pending->stream_index != indexes[1]) {
-            av_packet_unref(pending);
-        } else {
-            pendingReady = true;
-        }
-    }
-    return true;
-}
+    generation = control.generation;
+    target = control.position;
+    next = target;
 
-void Demux::seek(double position) {
-    av_packet_unref(pending);
-    pendingReady = false;
-    i64 timestamp = (i64)((position + origin) * AV_TIME_BASE);
-    ffcheck(avformat_seek_file(format, -1, INT64_MIN, timestamp, timestamp, 0));
-    eof = false;
-    for (int i = 0; i < 2; i++) {
-        ended[i] = indexes[i] < 0;
-    }
-}
-
-void Demux::playback() {
-}
-
-void Decoder::start(ObjPool&) {
-    frame = av_frame_alloc();
-    STD_VERIFY(frame);
-}
-
-void Decoder::open(Stream& stream) {
-    const AVCodec* implementation = avcodec_find_decoder(stream.parameters->codec_id);
-    if (!implementation) {
-        fail(StringView(u8"unsupported media codec"));
-    }
-    codec = avcodec_alloc_context3(implementation);
-    STD_VERIFY(codec);
-    ffcheck(avcodec_parameters_to_context(codec, stream.parameters));
-    codec->pkt_timebase = stream.timeBase;
-    ffcheck(avcodec_open2(codec, implementation, nullptr));
-    timeBase = stream.timeBase;
-    origin = stream.origin;
-}
-
-void Decoder::returnPacket(Packet* packet) {
-    av_packet_unref(packet->packet);
-    send(demux, packet);
-}
-
-void Decoder::reset(double position) {
-    target = position;
-    draining = false;
-    exhausted = false;
-    if (codec) {
-        avcodec_flush_buffers(codec);
-    }
-    av_frame_unref(frame);
-    while (!packets.empty()) {
-        returnPacket((Packet*)packets.popFront());
-    }
-}
-
-bool Decoder::feed() {
-    if (packets.empty()) {
-        return false;
-    }
-    Packet* packet = (Packet*)packets.front();
-    int status = avcodec_send_packet(codec, packet->eof ? nullptr : packet->packet);
-    if (status == AVERROR(EAGAIN)) {
-        return true;
-    }
-    if (status != AVERROR_EOF) {
-        ffcheck(status);
-    }
-    draining = packet->eof;
-    packets.popFront();
-    returnPacket(packet);
-    return true;
-}
-
-void Video::accept(Message* message) {
-    if (control(message)) {
+    if (stream.index < 0) {
         return;
     }
-    if (Stream* stream = cast<Stream>(message)) {
-        open(*stream);
-        double rate = av_q2d(stream->frameRate);
-        if (rate > 0 && rate <= 1000) {
-            frameDuration = 1 / rate;
-        }
-        discard(stream);
-    } else if (Packet* packet = cast<Packet>(message)) {
-        if (packet->generation != generation) {
-            returnPacket(packet);
-        } else {
-            packets.pushBack(packet);
-        }
-    } else {
-        VideoImage* image = cast<VideoImage>(message);
-        STD_VERIFY(image);
-        images.pushBack(image);
+
+    stream.seek(target);
+    decoded = false;
+    ended = false;
+}
+
+void Video::give(VideoImage* image) {
+    if (wantWidth && (image->width != wantWidth || image->height != wantHeight)) {
+        player->post(new Surface(image));
+
+        return;
     }
+
+    idle.pushBack(image);
+}
+
+void Video::refuse() {
+    Vector<VideoImage*> kept;
+
+    for (VideoImage* image : idle) {
+        if (image->width == wantWidth && image->height == wantHeight) {
+            kept.pushBack(image);
+        } else {
+            player->post(new Surface(image));
+        }
+    }
+
+    idle.xchg(kept);
 }
 
 bool Video::step() {
-    if (!codec || exhausted || (!playing && !preview) || images.empty()) {
+    if (stream.index < 0 || ended) {
         return false;
     }
-    if (!frameReady) {
-        int status = avcodec_receive_frame(codec, frame);
-        if (status == AVERROR(EAGAIN)) {
-            return feed();
-        }
-        if (status == AVERROR_EOF) {
-            exhausted = true;
-            End* end = makeMessage<End>();
-            end->generation = generation;
-            end->position = endPts;
-            output.send(end);
-            return true;
-        }
-        ffcheck(status);
-        frameReady = true;
+
+    if (decoded) {
+        return deliver();
+    }
+
+    int e = stream.receive();
+
+    if (e == AVERROR(EAGAIN)) {
         return true;
     }
-    double pts = frame->best_effort_timestamp == AV_NOPTS_VALUE ? nextPts : frame->best_effort_timestamp * av_q2d(timeBase) - origin;
-    double length = frame->duration > 0 ? frame->duration * av_q2d(timeBase) : frameDuration;
-    nextPts = pts + length;
-    endPts = nextPts;
-    if (pts + length <= target) {
+
+    if (e == AVERROR_EOF) {
+        ended = true;
+        player->post(new End(generation));
+
+        return false;
+    }
+
+    if (e < 0) {
+        failAv(StringView(u8"video decoding"), e);
+    }
+
+    AVFrame* frame = stream.frame;
+    double length = frame->duration > 0 ? (double)frame->duration * stream.timeBase() : 0.;
+
+    pts = frame->best_effort_timestamp != AV_NOPTS_VALUE ? stream.seconds(frame->best_effort_timestamp) : next;
+    next = pts + length;
+
+    if (length > 0. ? pts + length <= target : pts < target) {
         av_frame_unref(frame);
-        frameReady = false;
+
         return true;
     }
-    VideoImage* image = (VideoImage*)images.popFront();
-    if (image->width != (u32)frame->width || image->height != (u32)frame->height) {
-        Resize* resize = makeMessage<Resize>();
-        resize->image = image;
-        resize->width = frame->width;
-        resize->height = frame->height;
-        output.send(resize);
-        return true;
-    }
-    scaler = sws_getCachedContext(scaler, frame->width, frame->height, (AVPixelFormat)frame->format, frame->width, frame->height, AV_PIX_FMT_RGBA, SWS_BILINEAR, nullptr, nullptr, nullptr);
-    if (!scaler) {
-        fail(StringView(u8"cannot create video pixel converter"));
-    }
-    int colorspace = frame->colorspace == AVCOL_SPC_BT709 ? SWS_CS_ITU709 : frame->colorspace == AVCOL_SPC_BT2020_NCL ? SWS_CS_BT2020 : SWS_CS_ITU601;
-    const int* coefficients = sws_getCoefficients(colorspace);
-    ffcheck(sws_setColorspaceDetails(scaler, coefficients, frame->color_range == AVCOL_RANGE_JPEG, coefficients, 1, 0, 1 << 16, 1 << 16));
-    uint8_t* destination[] = {(uint8_t*)image->data, nullptr, nullptr, nullptr};
-    int strides[] = {(int)image->stride, 0, 0, 0};
-    ffcheck(sws_scale(scaler, frame->data, frame->linesize, 0, frame->height, destination, strides));
-    image->image->prepare();
-    image->pts = pts;
-    image->duration = length;
-    image->generation = generation;
-    image->aspect = av_q2d(frame->sample_aspect_ratio);
-    if (!(image->aspect > 0)) {
-        image->aspect = 1;
-    }
-    av_frame_unref(frame);
-    frameReady = false;
-    preview = false;
-    output.send(image);
+
+    decoded = true;
+    deliver();
+
     return true;
 }
 
-void Video::seek(double position) {
-    reset(position);
-    frameReady = false;
-    preview = true;
-    nextPts = position;
-    endPts = position;
-}
+bool Video::deliver() {
+    AVFrame* frame = stream.frame;
+    u32 width = (u32)frame->width;
+    u32 height = (u32)frame->height;
 
-void Video::playback() {
-}
+    if (width != wantWidth || height != wantHeight) {
+        wantWidth = width;
+        wantHeight = height;
+        refuse();
+    }
 
-namespace {
-    static void alcheck() {
-        ALenum error = alGetError();
-        if (error != AL_NO_ERROR) {
-            fail(StringView(StringBuilder() << StringView(u8"OpenAL error ") << (i64)error));
+    if (idle.empty()) {
+        if (width != askedWidth || height != askedHeight) {
+            askedWidth = width;
+            askedHeight = height;
+            player->post(new Resize(width, height));
         }
-    }
 
-    static void AL_APIENTRY audioEvent(ALenum, ALuint, ALuint, ALsizei, const ALchar*, void* context) noexcept {
-        AudioEvent& event = *(AudioEvent*)context;
-        void* token = nullptr;
-        if (event.token->tryDequeue(&token)) {
-            // One pulse in flight, with a slot reserved in the audio mailbox.
-            if (!event.input->tryEnqueue(token)) {
-                abort();
-            }
-        }
-    }
-}
-
-void Audio::start(ObjPool& owner) {
-    Decoder::start(owner);
-    pool = &owner;
-    clock = owner.make<Clock>();
-    event.input = input;
-    event.token = Channel::create(&owner, 1);
-    event.token->enqueue(owner.make<AudioPulse>());
-}
-
-void Audio::openOutput(ObjPool&) {
-    device = alcOpenDevice(nullptr);
-    if (!device) {
-        fail(StringView(u8"cannot open audio output"));
-    }
-    context = alcCreateContext(device, nullptr);
-    if (!context || !alcMakeContextCurrent(context)) {
-        fail(StringView(u8"cannot create OpenAL context"));
-    }
-    if (!alIsExtensionPresent("AL_SOFT_events") || !alIsExtensionPresent("AL_SOFT_source_latency")) {
-        fail(StringView(u8"audio output requires OpenAL Soft events and source latency"));
-    }
-    auto events = (LPALEVENTCONTROLSOFT)alGetProcAddress("alEventControlSOFT");
-    auto callback = (LPALEVENTCALLBACKSOFT)alGetProcAddress("alEventCallbackSOFT");
-    getLatency = (LPALGETSOURCEDVSOFT)alGetProcAddress("alGetSourcedvSOFT");
-    const ALenum types[] = {AL_EVENT_TYPE_BUFFER_COMPLETED_SOFT, AL_EVENT_TYPE_SOURCE_STATE_CHANGED_SOFT, AL_EVENT_TYPE_DISCONNECTED_SOFT};
-    callback(audioEvent, &event);
-    events(3, types, AL_TRUE);
-    alGenSources(1, &source);
-    alGenBuffers(audioBufferCount, buffers);
-    alSourcei(source, AL_SOURCE_RELATIVE, AL_TRUE);
-    alSourcef(source, AL_ROLLOFF_FACTOR, 0);
-    for (ALuint buffer : buffers) {
-        available.pushBack(buffer);
-    }
-    alcheck();
-}
-
-void Audio::accept(Message* message) {
-    if (control(message)) {
-        return;
-    }
-    if (Stream* stream = cast<Stream>(message)) {
-        open(*stream);
-        openOutput(*pool);
-        discard(stream);
-    } else if (Packet* packet = cast<Packet>(message)) {
-        if (packet->generation != generation) {
-            returnPacket(packet);
-        } else {
-            packets.pushBack(packet);
-        }
-    } else if (AudioPulse* pulse = cast<AudioPulse>(message)) {
-        // Return the token before querying OpenAL. A completion after this
-        // point queues another pulse; earlier ones are covered by service().
-        send(event.token, pulse);
-        service();
-    } else {
-        Clock* returned = cast<Clock>(message);
-        STD_VERIFY(returned && !clock);
-        clock = returned;
-    }
-}
-
-void Audio::service() {
-    if (!source) {
-        return;
-    }
-    ALCint connected = ALC_TRUE;
-    if (alcIsExtensionPresent(device, "ALC_EXT_disconnect")) {
-        alcGetIntegerv(device, ALC_CONNECTED, 1, &connected);
-    }
-    if (!connected) {
-        fail(StringView(u8"audio output disconnected"));
-    }
-    ALint processed = 0;
-    alGetSourcei(source, AL_BUFFERS_PROCESSED, &processed);
-    while (processed-- > 0) {
-        ALuint buffer;
-        alSourceUnqueueBuffers(source, 1, &buffer);
-        STD_VERIFY(!queued.empty() && queued[0].buffer == buffer);
-        played = queued[0].pts + (double)queued[0].samples / audioRate;
-        for (size_t i = 1; i < queued.length(); i++) {
-            queued.mut(i - 1) = queued[i];
-        }
-        queued.popBack();
-        available.pushBack(buffer);
-    }
-    alcheck();
-    clockDirty = true;
-}
-
-void Audio::publishClock() {
-    if (!clock || !clockDirty || !source) {
-        return;
-    }
-    ALdouble offset[2]{};
-    getLatency(source, AL_SEC_OFFSET_LATENCY_SOFT, offset);
-    ALint state;
-    alGetSourcei(source, AL_SOURCE_STATE, &state);
-    alcheck();
-    latency = offset[1];
-    clock->generation = generation;
-    clock->at = monotonicNowUs();
-    clock->running = playing && state == AL_PLAYING;
-    clock->ended = exhausted && resamplerEnded && pcmAt == pcmSamples && queued.empty();
-    if (queued.empty()) {
-        clock->position = played;
-        clock->limit = played;
-    } else {
-        clock->position = queued[0].pts + offset[0] - (state == AL_PLAYING ? latency : 0);
-        clock->limit = queued.back().pts + (double)queued.back().samples / audioRate;
-    }
-    if (clock->position < target) {
-        clock->position = target;
-    }
-    output.send(clock);
-    clock = nullptr;
-    clockDirty = false;
-}
-
-void Audio::convert() {
-    if (!resampler || frame->sample_rate != inputRate || frame->format != inputFormat || av_channel_layout_compare(&frame->ch_layout, &inputLayout)) {
-        swr_free(&resampler);
-        av_channel_layout_uninit(&inputLayout);
-        ffcheck(av_channel_layout_copy(&inputLayout, &frame->ch_layout));
-        inputRate = frame->sample_rate;
-        inputFormat = (AVSampleFormat)frame->format;
-        AVChannelLayout stereo = AV_CHANNEL_LAYOUT_STEREO;
-        ffcheck(swr_alloc_set_opts2(&resampler, &stereo, AV_SAMPLE_FMT_S16, audioRate, &inputLayout, inputFormat, inputRate, 0, nullptr));
-        ffcheck(swr_init(resampler));
-    }
-    i64 delay = swr_get_delay(resampler, inputRate);
-    i64 capacity = av_rescale_rnd(delay + frame->nb_samples, audioRate, inputRate, AV_ROUND_UP);
-    if (capacity < 0 || capacity > (1 << 20)) {
-        fail(StringView(u8"invalid decoded audio size"));
-    }
-    pcm.grow((size_t)capacity * 4);
-    uint8_t* destination = (uint8_t*)pcm.mutData();
-    pcmSamples = swr_convert(resampler, &destination, (int)capacity, (const uint8_t**)frame->extended_data, frame->nb_samples);
-    ffcheck(pcmSamples);
-    pcmPts = frame->best_effort_timestamp == AV_NOPTS_VALUE ? nextPts : frame->best_effort_timestamp * av_q2d(timeBase) - origin - (double)delay / inputRate;
-    nextPts = pcmPts + (double)pcmSamples / audioRate;
-    pcmAt = pcmPts < target ? (int)fmin((double)pcmSamples, ceil((target - pcmPts) * audioRate)) : 0;
-    av_frame_unref(frame);
-}
-
-void Audio::queueSamples() {
-    int count = pcmSamples - pcmAt;
-    if (count > audioBufferSamples) {
-        count = audioBufferSamples;
-    }
-    ALuint buffer = available.popBack();
-    alBufferData(buffer, AL_FORMAT_STEREO16, (u8*)pcm.data() + (size_t)pcmAt * 4, count * 4, audioRate);
-    alSourceQueueBuffers(source, 1, &buffer);
-    queued.pushBack({buffer, pcmPts + (double)pcmAt / audioRate, count});
-    pcmAt += count;
-    alcheck();
-    ALint state;
-    alGetSourcei(source, AL_SOURCE_STATE, &state);
-    if (playing && state != AL_PLAYING) {
-        alSourcePlay(source);
-        alcheck();
-    }
-    clockDirty = true;
-}
-
-bool Audio::step() {
-    publishClock();
-    if (!codec || available.empty()) {
         return false;
     }
-    if (pcmAt < pcmSamples) {
-        queueSamples();
-        return true;
-    }
-    if (exhausted) {
-        if (resamplerEnded) {
-            return false;
-        }
-        pcm.grow(audioBufferSamples * 4);
-        uint8_t* destination = (uint8_t*)pcm.mutData();
-        pcmSamples = resampler ? swr_convert(resampler, &destination, audioBufferSamples, nullptr, 0) : 0;
-        ffcheck(pcmSamples);
-        pcmAt = 0;
-        pcmPts = nextPts;
-        nextPts += (double)pcmSamples / audioRate;
-        resamplerEnded = pcmSamples == 0;
-        clockDirty = true;
-        return true;
-    }
-    int status = avcodec_receive_frame(codec, frame);
-    if (status == AVERROR(EAGAIN)) {
-        return feed();
-    }
-    if (status == AVERROR_EOF) {
-        exhausted = true;
-        return true;
-    }
-    ffcheck(status);
-    convert();
+
+    VideoImage* image = idle.popBack();
+    AVRational sar = frame->sample_aspect_ratio;
+
+    convert(*image);
+    image->render->prepare();
+    player->post(new Frame(image, generation, pts, (double)width / height * (sar.num > 0 && sar.den > 0 ? av_q2d(sar) : 1.)));
+    av_frame_unref(frame);
+    decoded = false;
+
     return true;
 }
 
-void Audio::seek(double position) {
-    reset(position);
-    pcmSamples = 0;
-    pcmAt = 0;
-    pcmPts = position;
-    nextPts = position;
-    played = position;
-    resamplerEnded = false;
-    if (source) {
+void Video::convert(VideoImage& image) {
+    AVFrame* frame = stream.frame;
+    AVPixelFormat input = (AVPixelFormat)frame->format;
+
+    scaler = sws_getCachedContext(scaler, frame->width, frame->height, input, frame->width, frame->height, AV_PIX_FMT_RGBA, SWS_BILINEAR, nullptr, nullptr, nullptr);
+
+    if (!scaler) {
+        raiseError(StringView(StringBuilder() << StringView(u8"cannot convert video frames of format ") << StringView(av_get_pix_fmt_name(input))));
+    }
+
+    const AVPixFmtDescriptor* descriptor = av_pix_fmt_desc_get(input);
+
+    if (descriptor && !(descriptor->flags & AV_PIX_FMT_FLAG_RGB)) {
+        int space = SWS_CS_DEFAULT;
+
+        if (frame->colorspace == AVCOL_SPC_BT709) {
+            space = SWS_CS_ITU709;
+        } else if (frame->colorspace == AVCOL_SPC_BT2020_NCL || frame->colorspace == AVCOL_SPC_BT2020_CL) {
+            space = SWS_CS_BT2020;
+        }
+
+        sws_setColorspaceDetails(scaler, sws_getCoefficients(space), frame->color_range == AVCOL_RANGE_JPEG, sws_getCoefficients(SWS_CS_DEFAULT), 1, 0, 1 << 16, 1 << 16);
+    }
+
+    uint8_t* planes[4] = {image.data, nullptr, nullptr, nullptr};
+    int strides[4] = {(int)image.stride, 0, 0, 0};
+
+    sws_scale(scaler, (const uint8_t* const*)frame->data, frame->linesize, 0, frame->height, planes, strides);
+}
+
+Audio::Audio(Player* player_)
+    : player(player_)
+    , stream(player_, AVMEDIA_TYPE_AUDIO)
+{
+    pooledGuard(*player->pool, [this] {
+        swr_free(&resampler);
+        av_channel_layout_uninit(&layout);
+    });
+
+    if (stream.index < 0) {
+        return;
+    }
+
+    rate = stream.codec->sample_rate;
+
+    if (rate <= 0) {
+        raiseError(StringView(StringBuilder() << StringView(player->path) << StringView(u8": the audio stream has no sample rate")));
+    }
+
+    device = alcOpenDevice(nullptr);
+
+    if (!device) {
+        raiseError(StringView(u8"cannot open the audio device"));
+    }
+
+    pooledGuard(*player->pool, [this] {
+        alcCloseDevice(device);
+    });
+
+    context = alcCreateContext(device, nullptr);
+
+    if (!context) {
+        raiseError(StringView(u8"cannot create an audio context"));
+    }
+
+    pooledGuard(*player->pool, [this] {
+        alcMakeContextCurrent(nullptr);
+        alcDestroyContext(context);
+    });
+
+    if (!alcMakeContextCurrent(context)) {
+        raiseError(StringView(u8"cannot make the audio context current"));
+    }
+
+    if (!alIsExtensionPresent("AL_SOFT_source_latency") || !alIsExtensionPresent("AL_SOFT_events")) {
+        raiseError(StringView(u8"OpenAL lacks AL_SOFT_source_latency or AL_SOFT_events"));
+    }
+
+    LPALEVENTCONTROLSOFT eventControl = (LPALEVENTCONTROLSOFT)alGetProcAddress("alEventControlSOFT");
+    LPALEVENTCALLBACKSOFT eventCallback = (LPALEVENTCALLBACKSOFT)alGetProcAddress("alEventCallbackSOFT");
+
+    sourceOffsets = (LPALGETSOURCEDVSOFT)alGetProcAddress("alGetSourcedvSOFT");
+
+    if (!eventControl || !eventCallback || !sourceOffsets) {
+        raiseError(StringView(u8"OpenAL lacks the functions of its extensions"));
+    }
+
+    alGenBuffers(audioBuffers, buffers);
+    checkAl();
+    pooledGuard(*player->pool, [this] {
+        alDeleteBuffers(audioBuffers, buffers);
+    });
+    alGenSources(1, &source);
+    checkAl();
+    pooledGuard(*player->pool, [this] {
         alSourceStop(source);
-        alSourcei(source, AL_BUFFER, 0);
-        alcheck();
-        queued.clear();
-        available.clear();
-        for (ALuint buffer : buffers) {
-            available.pushBack(buffer);
-        }
-        if (resampler) {
-            swr_close(resampler);
-            ffcheck(swr_init(resampler));
-        }
-        clockDirty = true;
+        alDeleteSources(1, &source);
+    });
+
+    const ALenum types[] = {AL_EVENT_TYPE_BUFFER_COMPLETED_SOFT, AL_EVENT_TYPE_SOURCE_STATE_CHANGED_SOFT};
+
+    eventControl(2, types, AL_TRUE);
+    eventCallback(audioEvent, player);
+    pooledGuard(*player->pool, [eventCallback] {
+        eventCallback(nullptr, nullptr);
+    });
+    checkAl();
+
+    for (ALuint buffer : buffers) {
+        idle.pushBack(buffer);
     }
 }
 
-void Audio::playback() {
-    if (source) {
-        if (playing) {
-            if (!queued.empty()) {
-                alSourcePlay(source);
-            }
-        } else {
-            alSourcePause(source);
-        }
-        alcheck();
-        service();
-    }
-}
-
-WakePlayer::WakePlayer(Player* value)
-    : player(value)
-{
-}
-
-void WakePlayer::ready() {
-    player->controller->wake();
-}
-
-RetiredImage::RetiredImage(Player* owner, VideoImage* value)
-    : player(owner)
-    , image(value)
-{
-}
-
-void RetiredImage::run() {
-    player->retired(image);
-}
-
-void Player::trace(const char* event, double value) {
-    ui->trace(StringView(StringBuilder() << StringView(event) << StringView(u8" generation=") << generation << StringView(u8" position_ms=") << (i64)(value * 1000)));
-}
-
-void Player::init(ObjPool& owner, const char* filename) {
-    pool = &owner;
-    path = filename;
-    ui = Ui::create(owner, StringView(u8"play"), {800_d, 500_d});
-    inbox = Channel::create(&owner, channelCapacity);
-    wake = ui->platform()->createLoopWake(owner, *owner.make<WakePlayer>(this));
-    for (Channel*& channel : workers) {
-        channel = Channel::create(&owner, channelCapacity);
-    }
-    Demux* demux = owner.make<Demux>();
-    Video* video = owner.make<Video>();
-    Audio* audioWorker = owner.make<Audio>();
-    Worker* threads[] = {demux, video, audioWorker};
-    demux->path = path;
-    demux->streams[0] = workers[1];
-    demux->streams[1] = workers[2];
-    video->demux = workers[0];
-    audioWorker->demux = workers[0];
-    // create() runs until the controller first parks, before any wake can arrive.
-    controller = ui->platform()->scheduler()->create(owner, *this, 256 * 1024);
-    for (int i = 0; i < 3; i++) {
-        threads[i]->input = workers[i];
-        threads[i]->output = {inbox, wake};
-        Thread::create(&owner, *threads[i]);
-    }
-}
-
-void Player::resize(VideoImage& image, u32 width, u32 height) {
-    checkImageSize(width, height, ui->maxTextureSide());
-    STD_VERIFY(!image.busy && !image.held);
-    delete image.pixels;
-    image.pixels = ObjPool::fromMemoryRaw();
-    image.width = width;
-    image.height = height;
-    image.stride = ((size_t)width * 4 + 255) & ~(size_t)255;
-    image.size = (image.stride * height + 65535) & ~(size_t)65535;
-    image.data = image.pixels->allocateOverAligned(image.size, 65536);
-    image.image = ui->bindImage(*image.pixels, width, height, image.data, image.size, image.stride, *image.retired);
-}
-
-void Player::release(VideoImage* image) {
-    image->held = false;
-    if (!image->busy) {
-        send(workers[1], image);
-    }
-}
-
-void Player::retired(VideoImage* image) {
-    STD_VERIFY(image->busy);
-    image->busy = false;
-    if (!image->held) {
-        send(workers[1], image);
-    }
-}
-
-void Player::controls() {
-    if (!loaded || !error.empty()) {
-        return;
-    }
-    // Each worker has at most one control in flight. UI changes while it
-    // runs collapse into the latest requested position and playback state.
-    // Reset the decoders before allowing demux to issue the new generation.
-    const int order[] = {1, 2, 0};
-    for (int i : order) {
-        Sent& state = sent[i];
-        if (state.pending) {
-            continue;
-        }
-        if (i == 0 && (sent[1].generation != generation || sent[2].generation != generation)) {
-            continue;
-        }
-        if (state.generation != generation) {
-            Seek* command = makeMessage<Seek>();
-            command->worker = i;
-            command->generation = generation;
-            command->position = seekPosition;
-            command->playing = playing;
-            state.pending = true;
-            state.generation = generation;
-            state.playing = playing;
-            send(workers[i], command);
-        } else if (state.playing != playing) {
-            Playback* command = makeMessage<Playback>();
-            command->worker = i;
-            command->generation = generation;
-            command->playing = playing;
-            state.pending = true;
-            state.playing = playing;
-            send(workers[i], command);
-        }
-    }
-}
-
-void Player::accept(Message* message) {
-    if (VideoImage* image = cast<VideoImage>(message)) {
-        if (image->generation != generation) {
-            release(image);
-        } else {
-            image->held = true;
-            ready.pushBack(image);
-        }
-        return;
-    }
-    if (Clock* clock = cast<Clock>(message)) {
-        if (clock->generation == generation) {
-            clockPosition = clock->position;
-            clockAt = clock->at;
-            clockLimit = clock->limit;
-            clockRunning = clock->running;
-            audioEnded = clock->ended;
-            haveClock = true;
-        }
-        send(workers[2], clock);
-        return;
-    }
-    if (File* file = cast<File>(message)) {
-        duration = file->duration;
-        audio = file->audio;
-        video = file->video;
-        loaded = true;
-        if (video) {
-            for (size_t i = 0; i < imageCount; i++) {
-                VideoImage* image = pool->make<VideoImage>();
-                image->retired = pool->make<RetiredImage>(this, image);
-                if (file->width && file->height) {
-                    resize(*image, file->width, file->height);
-                }
-                send(workers[1], image);
-            }
-        } else {
-            videoEnded = true;
-        }
-        trace("opened", duration);
-        ui->requestFrame();
-    } else if (Resize* request = cast<Resize>(message)) {
-        resize(*request->image, request->width, request->height);
-        send(workers[1], request->image);
-    } else if (Seek* command = cast<Seek>(message)) {
-        sent[command->worker].pending = false;
-    } else if (Playback* command = cast<Playback>(message)) {
-        sent[command->worker].pending = false;
-    } else if (End* end = cast<End>(message)) {
-        if (end->generation == generation) {
-            videoEnded = true;
-            videoEnd = end->position;
-        }
-    } else if (Failure* failure = cast<Failure>(message)) {
-        error = failure->text;
-        playing = false;
-        ui->trace(StringView(error));
-        ui->requestFrame();
-    } else {
-        STD_VERIFY(false);
-    }
-    discard(message);
-}
-
-void Player::show(VideoImage* image) {
-    VideoImage* previous = shown;
-    shown = image;
-    if (previous) {
-        release(previous);
-    }
-    if (!audio && !haveClock) {
-        clockPosition = fmax(seekPosition, image->pts);
-        clockAt = monotonicNowUs();
-        clockRunning = playing;
-        haveClock = true;
-    }
-    preview = false;
-    trace("show", image->pts);
-    ui->requestFrame();
-}
-
-double Player::position(u64 now) const {
-    if (!haveClock) {
-        return seekPosition;
-    }
-    double value = clockPosition;
-    if (playing && (clockRunning || audioEnded)) {
-        value += (double)(now - clockAt) / 1000000;
-    }
-    if (audio && !audioEnded && value > clockLimit) {
-        value = clockLimit;
-    }
-    if (duration > 0 && value > duration) {
-        value = duration;
-    }
-    return fmax(0, value);
-}
-
-bool Player::ended(double at) const {
-    double end = fmax(videoEnd, clockLimit);
-    return loaded && videoEnded && (!audio || audioEnded) && ready.empty() && at >= (duration > 0 ? fmin(duration, end) : end);
-}
-
-void Player::run() {
+void Audio::run() {
     try {
         for (;;) {
-            void* item = nullptr;
-            while (inbox->tryDequeue(&item)) {
-                accept((Message*)item);
+            void* item;
+
+            if (!player->audioInbox->tryDequeue(&item)) {
+                if (step()) {
+                    continue;
+                }
+
+                player->audioInbox->dequeue(&item);
             }
-            controls();
-            if (quit) {
+
+            ScopedPtr<Message> message{(Message*)item};
+
+            if (cast<Stop>(message.ptr)) {
+                if (stream.index >= 0) {
+                    alSourceStop(source);
+                }
+
                 return;
             }
-            u64 now = monotonicNowUs();
-            double at = position(now);
-            size_t count = 0;
-            if (!ready.empty() && preview) {
-                count = 1;
+
+            if (stream.index < 0) {
+                continue;
             }
-            if (playing && (!audio || haveClock)) {
-                while (count < ready.length() && ready[count]->pts <= at) {
-                    count++;
-                }
-            }
-            if (count) {
-                for (size_t i = 0; i + 1 < count; i++) {
-                    release(ready[i]);
-                }
-                show(ready[count - 1]);
-                for (size_t i = count; i < ready.length(); i++) {
-                    ready.mut(i - count) = ready[i];
-                }
-                for (size_t i = 0; i < count; i++) {
-                    ready.popBack();
-                }
-            }
-            if (ended(at) && playing) {
-                clockPosition = at;
-                clockAt = now;
-                playing = false;
-                clockRunning = false;
-                trace("ended", at);
-                ui->requestFrame();
-                controls();
-            }
-            u64 wait = 0;
-            if (playing && haveClock && (clockRunning || audioEnded) && error.empty()) {
-                if (now >= nextUi) {
-                    nextUi = now + 100000;
-                    ui->requestFrame();
-                }
-                wait = nextUi > now ? nextUi - now : 1;
-                if (!ready.empty()) {
-                    double until = ready[0]->pts - position(now);
-                    if (until > 0) {
-                        u64 frameWait = (u64)ceil(until * 1000000);
-                        if (frameWait < wait) {
-                            wait = frameWait;
-                        }
-                    }
-                }
-            }
-            plt::Fiber* self = ui->platform()->scheduler()->current();
-            if (wait) {
-                self->parkFor(wait);
-            } else {
-                self->park();
+
+            if (Control* control = cast<Control>(message.ptr)) {
+                apply(*control);
+            } else if (cast<Pulse>(message.ptr)) {
+                service();
             }
         }
     } catch (...) {
-        error = Buffer(Exception::current());
-        playing = false;
-        ui->trace(StringView(error));
-        ui->requestFrame();
+        player->post(new Failure(Exception::current()));
     }
 }
 
-void Player::seek(double value, bool resume) {
-    if (!loaded || !error.empty()) {
+void Audio::apply(const Control& control) {
+    if (control.generation != generation) {
+        generation = control.generation;
+        target = control.position;
+        alSourceStop(source);
+        alSourcei(source, AL_BUFFER, 0);
+        checkAl();
+        idle.clear();
+
+        for (ALuint buffer : buffers) {
+            idle.pushBack(buffer);
+        }
+
+        ringHead = 0;
+        ringLength = 0;
+        stream.seek(target);
+        swr_free(&resampler);
+        pcm.reset();
+        pcmStart = target;
+        queuedStart = target;
+        skipping = true;
+        drained = false;
+        ended = false;
+    }
+
+    playing = control.playing;
+
+    if (!playing && state() == AL_PLAYING) {
+        alSourcePause(source);
+        checkAl();
+    }
+
+    start();
+    report();
+}
+
+void Audio::service() {
+    ALint processed = 0;
+
+    alGetSourcei(source, AL_BUFFERS_PROCESSED, &processed);
+    checkAl();
+
+    for (; processed > 0 && ringLength > 0; processed--) {
+        ALuint buffer;
+
+        alSourceUnqueueBuffers(source, 1, &buffer);
+        checkAl();
+        queuedStart += (double)ring[ringHead] / rate;
+        ringHead = (ringHead + 1) % audioBuffers;
+        ringLength--;
+        idle.pushBack(buffer);
+    }
+
+    finish();
+
+    if (!ended) {
+        report();
+    }
+}
+
+bool Audio::step() {
+    if (stream.index < 0 || ended) {
+        return false;
+    }
+
+    size_t have = samples();
+
+    if (have >= bufferSamples() || (drained && have > 0)) {
+        if (idle.empty()) {
+            return false;
+        }
+
+        enqueue();
+
+        return true;
+    }
+
+    if (drained) {
+        finish();
+
+        return false;
+    }
+
+    int e = stream.receive();
+
+    if (e == AVERROR(EAGAIN)) {
+        return true;
+    }
+
+    if (e == AVERROR_EOF) {
+        drained = true;
+        start();
+
+        return true;
+    }
+
+    if (e < 0) {
+        failAv(StringView(u8"audio decoding"), e);
+    }
+
+    convert();
+
+    return true;
+}
+
+void Audio::convert() {
+    AVFrame* frame = stream.frame;
+
+    if (!resampler || frame->format != format || frame->sample_rate != inputRate || av_channel_layout_compare(&frame->ch_layout, &layout)) {
+        AVChannelLayout stereo;
+
+        swr_free(&resampler);
+        av_channel_layout_default(&stereo, 2);
+
+        int e = swr_alloc_set_opts2(&resampler, &stereo, AV_SAMPLE_FMT_S16, rate, &frame->ch_layout, (AVSampleFormat)frame->format, frame->sample_rate, 0, nullptr);
+
+        if (e >= 0) {
+            e = swr_init(resampler);
+        }
+
+        if (e < 0) {
+            failAv(StringView(u8"audio conversion"), e);
+        }
+
+        format = frame->format;
+        inputRate = frame->sample_rate;
+        av_channel_layout_uninit(&layout);
+        av_channel_layout_copy(&layout, &frame->ch_layout);
+    }
+
+    if (pcm.empty() && frame->best_effort_timestamp != AV_NOPTS_VALUE) {
+        pcmStart = stream.seconds(frame->best_effort_timestamp);
+    }
+
+    int room = swr_get_out_samples(resampler, frame->nb_samples);
+    size_t used = pcm.used();
+
+    pcm.grow(used + (size_t)room * sampleBytes);
+
+    uint8_t* out = (uint8_t*)pcm.mutData() + used;
+    int converted = swr_convert(resampler, &out, room, (const uint8_t**)frame->extended_data, frame->nb_samples);
+
+    if (converted < 0) {
+        failAv(StringView(u8"audio conversion"), converted);
+    }
+
+    pcm.seekAbsolute(used + (size_t)converted * sampleBytes);
+
+    if (!skipping) {
         return;
     }
-    seekPosition = fmax(0, duration > 0 ? fmin(value, fmax(0, duration - 0.001)) : value);
-    generation++;
-    playing = resume;
-    haveClock = false;
-    clockRunning = false;
-    audioEnded = false;
-    videoEnded = !video;
-    videoEnd = 0;
-    clockLimit = seekPosition;
-    preview = true;
-    for (VideoImage* image : ready) {
+
+    if (pcmStart + (double)samples() / rate <= target) {
+        pcm.reset();
+
+        return;
+    }
+
+    if (pcmStart < target) {
+        drop((size_t)((target - pcmStart) * rate));
+    }
+
+    skipping = false;
+}
+
+void Audio::drop(size_t taken) {
+    size_t bytes = taken * sampleBytes;
+
+    memmove(pcm.mutData(), (const uint8_t*)pcm.data() + bytes, pcm.used() - bytes);
+    pcm.seekAbsolute(pcm.used() - bytes);
+    pcmStart += (double)taken / rate;
+}
+
+void Audio::enqueue() {
+    size_t taken = samples() < bufferSamples() ? samples() : bufferSamples();
+    ALuint buffer = idle.popBack();
+
+    alBufferData(buffer, AL_FORMAT_STEREO16, pcm.data(), (ALsizei)(taken * sampleBytes), rate);
+    alSourceQueueBuffers(source, 1, &buffer);
+    checkAl();
+
+    if (ringLength == 0) {
+        queuedStart = pcmStart;
+    }
+
+    ring[(ringHead + ringLength) % audioBuffers] = taken;
+    ringLength++;
+    drop(taken);
+    start();
+}
+
+void Audio::start() {
+    if (!playing || ringLength == 0) {
+        return;
+    }
+
+    ALint now = state();
+
+    if (now == AL_PLAYING) {
+        return;
+    }
+
+    if (now == AL_PAUSED || idle.empty() || drained) {
+        alSourcePlay(source);
+        checkAl();
+        report();
+    }
+}
+
+void Audio::finish() {
+    if (drained && !ended && pcm.empty() && ringLength == 0) {
+        ended = true;
+        report();
+    }
+}
+
+void Audio::report() {
+    ALint now = state();
+    double offsets[2] = {0., 0.};
+
+    if (ringLength > 0) {
+        sourceOffsets(source, AL_SEC_OFFSET_LATENCY_SOFT, offsets);
+        checkAl();
+    }
+
+    bool running = now == AL_PLAYING;
+
+    player->post(new Clock(generation, queuedStart + offsets[0] - (running ? offsets[1] : 0.), monotonicNowUs(), running, ended));
+}
+
+ALint Audio::state() {
+    ALint value = AL_INITIAL;
+
+    alGetSourcei(source, AL_SOURCE_STATE, &value);
+    checkAl();
+
+    return value;
+}
+
+size_t Audio::samples() const {
+    return pcm.used() / sampleBytes;
+}
+
+size_t Audio::bufferSamples() const {
+    return (size_t)rate / bufferRate;
+}
+
+Screen::Screen(Player* player_)
+    : player(player_)
+    , hasVideo(player_->video->stream.index >= 0)
+    , hasAudio(player_->audio->stream.index >= 0)
+    , duration(fmax(player_->video->stream.duration, player_->audio->stream.duration))
+{
+    if (!hasVideo && !hasAudio) {
+        raiseError(StringView(StringBuilder() << StringView(player->path) << StringView(u8": no audio or video")));
+    }
+
+    fiber = player->ui->platform()->scheduler()->create(*player->pool, *this, controllerStack);
+    player->ui->trace(StringView(StringBuilder() << StringView(u8"opened duration_ms=") << milliseconds(duration) << StringView(u8" video=") << (i64)hasVideo << StringView(u8" audio=") << (i64)hasAudio));
+}
+
+void Screen::run() {
+    plt::Scheduler& scheduler = *player->ui->platform()->scheduler();
+
+    for (;;) {
+        u64 wait = 0;
+
+        try {
+            drain();
+            wait = present();
+        } catch (...) {
+            halt(Exception::current());
+        }
+
+        if (wait) {
+            scheduler.current()->parkFor(wait);
+        } else {
+            scheduler.current()->park();
+        }
+    }
+}
+
+void Screen::resume() {
+    fiber->wake();
+}
+
+bool Screen::frame() {
+    if (failed) {
+        return !player->ui->drawErrorPanel(StringView(error));
+    }
+
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape) || ImGui::IsKeyPressed(ImGuiKey_Q)) {
+        return false;
+    }
+
+    keys();
+    draw();
+
+    return true;
+}
+
+void Screen::drain() {
+    void* item;
+
+    while (player->screenInbox->tryDequeue(&item)) {
+        ScopedPtr<Message> message{(Message*)item};
+
+        if (failed) {
+            continue;
+        }
+
+        if (Frame* frame = cast<Frame>(message.ptr)) {
+            if (frame->generation == generation) {
+                waiting.pushBack(frame);
+                message.drop();
+            } else {
+                release(frame->image);
+            }
+        } else if (Surface* surface = cast<Surface>(message.ptr)) {
+            release(surface->image);
+        } else if (Resize* resize = cast<Resize>(message.ptr)) {
+            makeSurfaces(resize->width, resize->height);
+        } else if (Clock* clock = cast<Clock>(message.ptr)) {
+            applyClock(*clock);
+        } else if (End* end = cast<End>(message.ptr)) {
+            videoEnded = videoEnded || end->generation == generation;
+        } else if (Failure* failure = cast<Failure>(message.ptr)) {
+            halt(StringView(failure->text));
+        }
+    }
+}
+
+u64 Screen::present() {
+    for (Surfaces* set : spent) {
+        player->ui->trace(StringView(StringBuilder() << StringView(u8"unmapped ") << (i64)set->width << StringView(u8"x") << (i64)set->height));
+        delete set->pool;
+    }
+
+    spent.clear();
+
+    if (failed) {
+        return 0;
+    }
+
+    u64 now = monotonicNowUs();
+
+    if (!waiting.empty() && (!shown || shown->generation != generation)) {
+        show(takeFirst());
+    }
+
+    if (playing && !ended && !clockRunning && !audioMaster() && shown && shown->generation == generation) {
+        setClock(clockBase > shown->pts ? clockBase : shown->pts, true, now);
+    }
+
+    double at = position(now);
+
+    if (clockRunning) {
+        while (!waiting.empty() && waiting[0]->pts <= at) {
+            Frame* frame = takeFirst();
+
+            if (!waiting.empty() && waiting[0]->pts <= at) {
+                release(frame->image);
+                delete frame;
+            } else {
+                show(frame);
+            }
+        }
+    }
+
+    finishIfEnded(now);
+    at = position(now);
+
+    i64 second = (i64)floor(at);
+
+    if (second != drawnSecond) {
+        drawnSecond = second;
+        player->ui->requestFrame();
+    }
+
+    if (!clockRunning) {
+        return 0;
+    }
+
+    u64 wait = microseconds((double)(second + 1) - at);
+
+    if (!waiting.empty()) {
+        u64 next = microseconds(waiting[0]->pts - at);
+
+        wait = next < wait ? next : wait;
+    }
+
+    return wait;
+}
+
+void Screen::finishIfEnded(u64 now) {
+    if (!playing || ended) {
+        return;
+    }
+
+    if (hasVideo && !(videoEnded && waiting.empty())) {
+        return;
+    }
+
+    if (hasAudio && !audioEnded) {
+        return;
+    }
+
+    ended = true;
+    playing = false;
+    setClock(position(now), false, now);
+    player->ui->trace(StringView(StringBuilder() << StringView(u8"ended generation=") << (i64)generation));
+    player->ui->requestFrame();
+}
+
+void Screen::show(Frame* frame) {
+    Frame* previous = shown;
+
+    shown = frame;
+
+    if (previous) {
+        if (previous->image->draws == 0) {
+            release(previous->image);
+        }
+
+        delete previous;
+    }
+
+    player->ui->trace(StringView(StringBuilder() << StringView(u8"show generation=") << (i64)frame->generation << StringView(u8" position_ms=") << milliseconds(frame->pts)));
+    player->ui->requestFrame();
+}
+
+Frame* Screen::takeFirst() {
+    Frame* first = waiting[0];
+
+    for (size_t i = 1; i < waiting.length(); i++) {
+        waiting.mut(i - 1) = waiting[i];
+    }
+
+    waiting.popBack();
+
+    return first;
+}
+
+void Screen::release(VideoImage* image) {
+    if (failed) {
+        return;
+    }
+
+    Surfaces* set = image->set;
+
+    if (set == surfaces) {
+        player->videoInbox->enqueue(new Surface(image));
+
+        return;
+    }
+
+    if (++set->home == surfaceCount) {
+        spent.pushBack(set);
+        player->wake->signal();
+    }
+}
+
+void Screen::retired(VideoImage* image) {
+    if (--image->draws == 0 && (!shown || shown->image != image)) {
         release(image);
     }
-    ready.clear();
-    trace("seek", seekPosition);
-    controller->wake();
-    ui->requestFrame();
 }
 
-void Player::toggle() {
+void Screen::applyClock(const Clock& clock) {
+    if (clock.generation != generation) {
+        return;
+    }
+
+    audioEnded = clock.ended;
+    setClock(clock.position, clock.running && !clock.ended, clock.at);
+}
+
+void Screen::makeSurfaces(u32 width, u32 height) {
+    ScopedPtr<ObjPool> owner{ObjPool::fromMemoryRaw()};
+    Surfaces* set = owner->make<Surfaces>(player, owner.ptr, width, height);
+
+    owner.drop();
+    surfaces = set;
+
+    for (VideoImage* image : set->images) {
+        release(image);
+    }
+}
+
+void Screen::seek(double to, bool play) {
+    if (failed) {
+        return;
+    }
+
+    double end = duration > 0. ? duration : to;
+
+    to = to < 0. ? 0. : to > end ? end : to;
+    generation++;
+    target = to;
+    playing = play;
+    ended = false;
+    videoEnded = false;
+    audioEnded = false;
+    setClock(to, false, monotonicNowUs());
+
+    for (Frame* frame : waiting) {
+        release(frame->image);
+        delete frame;
+    }
+
+    waiting.clear();
+    player->ui->trace(StringView(StringBuilder() << StringView(u8"seek generation=") << (i64)generation << StringView(u8" position_ms=") << milliseconds(to)));
+    sendControl(player->videoInbox);
+    sendControl(player->audioInbox);
+    player->ui->requestFrame();
+    resume();
+}
+
+void Screen::toggle() {
+    if (failed) {
+        return;
+    }
+
+    if (ended) {
+        seek(0., true);
+
+        return;
+    }
+
     u64 now = monotonicNowUs();
-    double at = position(now);
-    if (!playing && ended(at)) {
-        seek(0, true);
-        return;
-    }
+
     playing = !playing;
-    if (!audio) {
-        clockPosition = at;
-        clockAt = now;
-        clockRunning = playing;
+
+    if (!audioMaster()) {
+        setClock(position(now), false, now);
     }
-    trace(playing ? "play" : "pause", at);
-    controller->wake();
-    ui->requestFrame();
+
+    player->ui->trace(StringView(StringBuilder() << (playing ? StringView(u8"play generation=") : StringView(u8"pause generation=")) << (i64)generation));
+    sendControl(player->audioInbox);
+    player->ui->requestFrame();
+    resume();
 }
 
-void Player::draw() {
-    if (!error.empty()) {
-        if (ui->drawErrorPanel(StringView(error))) {
-            quit = true;
-        }
+void Screen::sendControl(Channel* to) {
+    to->enqueue(new Control(generation, target, playing));
+}
+
+void Screen::halt(StringView text) {
+    if (failed) {
         return;
     }
-    ImGuiViewport* viewport = ImGui::GetMainViewport();
-    ImGui::SetNextWindowPos(viewport->Pos);
-    ImGui::SetNextWindowSize(viewport->Size);
-    ImGui::Begin("##play", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
-    float controlsHeight = ImGui::GetFrameHeightWithSpacing() * 2 + ImGui::GetStyle().WindowPadding.y;
-    ImVec2 available = ImGui::GetContentRegionAvail();
-    ImVec2 size(available.x, fmaxf(1, available.y - controlsHeight));
-    ImVec2 lo = ImGui::GetCursorScreenPos();
-    if (shown) {
-        double aspect = (double)shown->width * shown->aspect / shown->height;
-        float width = fminf(size.x, (float)(size.y * aspect));
-        float height = (float)(width / aspect);
-        ImVec2 begin(lo.x + (size.x - width) / 2, lo.y + (size.y - height) / 2);
-        shown->busy = true;
-        shown->image->draw(*ImGui::GetWindowDrawList(), begin, ImVec2(begin.x + width, begin.y + height));
+
+    failed = true;
+    error = Buffer(text);
+    sysE << StringView(u8"im play: ") << text << endL;
+    player->ui->trace(StringView(StringBuilder() << StringView(u8"failed: ") << text));
+    player->videoInbox->enqueue(new Stop());
+    player->audioInbox->enqueue(new Stop());
+    player->ui->requestFrame();
+}
+
+bool Screen::audioMaster() const {
+    return hasAudio && !audioEnded;
+}
+
+double Screen::position(u64 now) const {
+    if (!clockRunning || now <= clockAt) {
+        return clockBase;
     }
-    ImGui::Dummy(size);
-    if (ImGui::Button(playing ? "Pause" : "Play") || ImGui::IsKeyPressed(ImGuiKey_Space, false)) {
+
+    return clockBase + (double)(now - clockAt) / 1e6;
+}
+
+void Screen::setClock(double base, bool running, u64 at) {
+    clockBase = base;
+    clockAt = at;
+    clockRunning = running;
+}
+
+void Screen::keys() {
+    double at = position(monotonicNowUs());
+
+    if (ImGui::IsKeyPressed(ImGuiKey_Space, false)) {
         toggle();
     }
-    ImGui::SameLine();
-    if (ImGui::Button("Stop") || ImGui::IsKeyPressed(ImGuiKey_Home, false)) {
-        seek(0, false);
+
+    if (ImGui::IsKeyPressed(ImGuiKey_RightArrow)) {
+        seek(at + seekStep, playing);
     }
-    ImGui::SameLine();
-    if (ImGui::Button("-10 s") || ImGui::IsKeyPressed(ImGuiKey_LeftArrow)) {
-        seek(position(monotonicNowUs()) - 10, playing);
+
+    if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow)) {
+        seek(at - seekStep, playing);
     }
-    ImGui::SameLine();
-    if (ImGui::Button("+10 s") || ImGui::IsKeyPressed(ImGuiKey_RightArrow)) {
-        seek(position(monotonicNowUs()) + 10, playing);
+
+    if (ImGui::IsKeyPressed(ImGuiKey_Home, false)) {
+        seek(0., false);
     }
-    ImGui::SameLine();
+
+    if (ImGui::IsKeyPressed(ImGuiKey_F, false) || ImGui::IsKeyPressed(ImGuiKey_F11, false)) {
+        fullscreen = !fullscreen;
+        player->ui->requestFullscreen(fullscreen);
+    }
+}
+
+void Screen::draw() {
+    Ui& ui = *player->ui;
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+    float pad = ui.px(barPadding);
+    float bar = ImGui::GetFrameHeight() + 2.f * pad;
     double at = position(monotonicNowUs());
-    ImGui::Text("%02d:%02d / %02d:%02d", (int)at / 60, (int)at % 60, (int)duration / 60, (int)duration % 60);
-    float slider = (float)at;
-    ImGui::SetNextItemWidth(-1);
-    if (duration > 0 && ImGui::SliderFloat("##position", &slider, 0, (float)duration, "")) {
-        seek(slider, playing);
+
+    ImGui::SetNextWindowPos(vp->Pos);
+    ImGui::SetNextWindowSize(vp->Size);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGui::Begin("##play", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoSavedSettings);
+    ImGui::PopStyleVar();
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec2 lo = vp->Pos;
+    ImVec2 hi(vp->Pos.x + vp->Size.x, vp->Pos.y + vp->Size.y - bar);
+    float width = hi.x - lo.x;
+    float height = hi.y - lo.y;
+
+    dl->AddRectFilled(lo, hi, IM_COL32(0, 0, 0, 255));
+
+    if (shown && width >= 1.f && height >= 1.f) {
+        float aspect = (float)shown->aspect;
+        float w = width;
+        float h = w / aspect;
+
+        if (h > height) {
+            h = height;
+            w = h * aspect;
+        }
+
+        ImVec2 p0(floorf(lo.x + (width - w) / 2.f), floorf(lo.y + (height - h) / 2.f));
+
+        shown->image->draws++;
+        shown->image->render->draw(*dl, p0, ImVec2(p0.x + floorf(w), p0.y + floorf(h)));
+    } else {
+        const char* text = hasVideo ? "opening" : "no video";
+        ImVec2 extent = ImGui::CalcTextSize(text);
+
+        dl->AddText(ImVec2(lo.x + (width - extent.x) / 2.f, lo.y + (height - extent.y) / 2.f), ImGui::GetColorU32(ImGuiCol_TextDisabled), text);
     }
+
+    ImGui::SetCursorScreenPos(ImVec2(lo.x + pad, hi.y + pad));
+
+    if (ImGui::Button(playing ? "Pause##toggle" : "Play##toggle", ImVec2(ui.px(buttonWidth), 0.f))) {
+        toggle();
+    }
+
+    ImGui::SameLine();
+
+    if (ImGui::Button("Stop", ImVec2(ui.px(buttonWidth), 0.f))) {
+        seek(0., false);
+    }
+
+    StringBuilder time;
+
+    appendTime(time, at);
+    time << StringView(u8" / ");
+    appendTime(time, duration);
+
+    float label = ImGui::CalcTextSize(time.cStr()).x;
+
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(fmaxf(1.f, ImGui::GetContentRegionAvail().x - label - ImGui::GetStyle().ItemSpacing.x - pad));
+    ImGui::BeginDisabled(duration <= 0.);
+
+    float value = scrubbing ? scrub : (float)at;
+
+    ImGui::SliderFloat("##position", &value, 0.f, (float)fmax(duration, 0.), "", ImGuiSliderFlags_NoInput);
+
+    if (ImGui::IsItemActive()) {
+        scrubbing = true;
+        scrub = value;
+    }
+
+    if (ImGui::IsItemDeactivated()) {
+        scrubbing = false;
+
+        if (ImGui::IsItemDeactivatedAfterEdit()) {
+            seek(scrub, playing);
+        }
+    }
+
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted(time.cStr());
     ImGui::End();
-    if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
-        quit = true;
-    }
+}
+
+CallScreen::CallScreen(Player* player_)
+    : player(player_)
+{
+}
+
+void CallScreen::ready() {
+    player->screen->resume();
+}
+
+Player::Player(ObjPool& pool_, Ui& ui_, const char* path_)
+    : pool(&pool_)
+    , ui(&ui_)
+    , path(path_)
+    , videoInbox(Channel::create(pool, channelCapacity))
+    , audioInbox(Channel::create(pool, channelCapacity))
+    , screenInbox(Channel::create(pool, channelCapacity))
+    , wake(ui->platform()->createLoopWake(*pool, *pool->make<CallScreen>(this)))
+    , video(pool->make<Video>(this))
+    , audio(pool->make<Audio>(this))
+    , screen(pool->make<Screen>(this))
+{
+    Thread::create(pool, *video, pool->allocateOverAligned(threadStack, 4096), threadStack);
+    Thread::create(pool, *audio, pool->allocateOverAligned(threadStack, 4096), threadStack);
+}
+
+void Player::post(Message* message) {
+    screenInbox->enqueue(message);
+    wake->signal();
 }
 
 int mainPlay(ObjPool& pool, int argc, char** argv) {
     if (argc != 2) {
         sysE << StringView(u8"usage: im play <file>") << endL;
+
         return 2;
     }
-    Player* player = pool.make<Player>();
-    player->init(pool, argv[1]);
+
+    Ui& ui = *Ui::create(pool, StringView(u8"play"), {windowWidth, windowHeight});
+    Player& player = *pool.make<Player>(pool, ui, argv[1]);
     auto body = makeRunable([&] {
         UiEvent event;
-        while (player->ui->next(event)) {
-            if (event.kind == UiEvent::Kind::Close) {
-                break;
-            }
-            player->draw();
-            if (player->quit) {
-                break;
+
+        while (ui.next(event)) {
+            if (event.kind == UiEvent::Kind::Close || !player.screen->frame()) {
+                return;
             }
         }
-        player->quit = true;
-        player->controller->wake();
     });
-    return player->ui->run(body);
+    int result = ui.run(body);
+
+    return player.screen->failed ? 1 : result;
 }

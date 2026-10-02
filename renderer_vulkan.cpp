@@ -95,6 +95,11 @@ namespace {
     struct VulkanImage;
     struct Gpu;
 
+    struct ImageUse {
+        VulkanImage* image;
+        u64 serial;
+    };
+
     struct PollGpu final: public plt::TimerCallback {
         Gpu* gpu;
         explicit PollGpu(Gpu* gpu);
@@ -116,7 +121,7 @@ namespace {
         plt::Window* window = nullptr;
         PollGpu* timer = nullptr;
         Vector<VulkanImage*> drawn;
-        Vector<VulkanImage*> inFlight;
+        Vector<ImageUse> uses;
         u64 submitted = 0;
         u64 completed = 0;
         bool acquired = false;
@@ -1726,8 +1731,6 @@ namespace {
         bool coherent = true;
         bool dirty = false;
         bool initialized = true;
-        bool queued = false;
-        bool watching = false;
         u64 lastUse = 0;
         Runable* retired = nullptr;
 
@@ -1755,7 +1758,7 @@ void PollGpu::ready() {
 }
 
 void Gpu::schedule() {
-    if (retry || !inFlight.empty()) {
+    if (retry || !uses.empty()) {
         platform->poller()->timeout(1000, *timer);
     }
 }
@@ -1771,16 +1774,20 @@ void Gpu::poll() {
             }
         }
     }
-    for (size_t i = 0; i < inFlight.length();) {
-        VulkanImage* image = inFlight[i];
-        if (image->queued || image->lastUse > completed) {
-            i++;
-            continue;
+    Vector<ImageUse> done;
+    size_t kept = 0;
+    for (const ImageUse& use : uses) {
+        if (use.serial <= completed) {
+            done.pushBack(use);
+        } else {
+            uses.mut(kept++) = use;
         }
-        inFlight.mut(i) = inFlight.back();
-        inFlight.popBack();
-        image->watching = false;
-        image->retired->run();
+    }
+    while (uses.length() > kept) {
+        uses.popBack();
+    }
+    for (const ImageUse& use : done) {
+        use.image->retired->run();
     }
 }
 
@@ -1788,10 +1795,8 @@ void Gpu::recordImages(VkCommandBuffer command) {
     for (VulkanImage* image : drawn) {
         image->record(command);
         image->lastUse = submitted + 1;
-        image->queued = false;
-        if (image->retired && !image->watching) {
-            image->watching = true;
-            inFlight.pushBack(image);
+        if (image->retired) {
+            uses.pushBack(ImageUse{image, submitted + 1});
         }
     }
     drawn.clear();
@@ -1947,6 +1952,12 @@ RenderImage* VulkanRenderer::bind(ObjPool& pool, u32 width, u32 height, const vo
 }
 
 VulkanImage::~VulkanImage() noexcept {
+    for (const VulkanImage* image : gpu->drawn) {
+        STD_INSIST(image != this);
+    }
+    for (const ImageUse& use : gpu->uses) {
+        STD_INSIST(use.image != this);
+    }
     if (lastUse > gpu->completed) {
         vkDeviceWaitIdle(gpu->device);
         gpu->completed = gpu->submitted;
@@ -1964,10 +1975,7 @@ VulkanImage::~VulkanImage() noexcept {
 }
 
 void VulkanImage::draw(ImDrawList& list, ImVec2 lo, ImVec2 hi) {
-    if (!queued) {
-        queued = true;
-        gpu->drawn.pushBack(this);
-    }
+    gpu->drawn.pushBack(this);
     if (hdr) {
         ImageDraw draw{gpu, texture.imageSet, lo.x, lo.y, hi.x, hi.y, gpu->sdrWhiteNits};
         list.AddCallback(drawImage, &draw, sizeof(draw));

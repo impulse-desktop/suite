@@ -62,9 +62,6 @@ struct Renderer {
     virtual u32 maxTextures() = 0;
     virtual RenderImage* upload(stl::ObjPool& pool, u32 width, u32 height, const void* rgba, bool hdr) = 0;
     virtual RenderImage* import(stl::ObjPool& pool, SharedImage& source, bool hdr) = 0;
-    // retired runs on the UI when the image's pending draws finish. Its
-    // caller also releases the displayed image before returning it to a
-    // producer. The source memory and callback must outlive the image.
     virtual RenderImage* bind(stl::ObjPool& pool, u32 width, u32 height, const void* data, size_t size, size_t stride, stl::Runable& retired) = 0;
 
     static Renderer* create(stl::ObjPool& pool, plt::Platform& platform, plt::Window& window, const RendererOptions& options = {});

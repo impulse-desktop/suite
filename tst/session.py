@@ -743,11 +743,13 @@ def is_jxl(path):
     return data[:2] == b"\xff\x0a" or data[:12] == b"\x00\x00\x00\x0cJXL \r\n\x87\n"
 
 
-def write_video(path, seconds=12, audio=True):
+def write_video(path, seconds=12, audio=True, sizes=None, codec=None):
     """Indexed raw AVI with changing RGB frames and optional PCM audio.
 
     No encoder dependency: this exercises demux, decode, clocks and seeking
     with known frame times, including builds without external FFmpeg tools.
+    sizes makes the frames PNGs of those sizes, one size per second; codec
+    names another FourCC for the raw frames.
     """
     def chunk(kind, data):
         return kind + struct.pack("<I", len(data)) + data + b"\0" * (len(data) % 2)
@@ -760,9 +762,11 @@ def write_video(path, seconds=12, audio=True):
     frame_size = width * height * 3
     main = struct.pack("<14I", 1000000 // fps, frame_size * fps, 0, 0x10, count, 0,
                        2 if audio else 1, frame_size, width, height, 0, 0, 0, 0)
-    video_header = struct.pack("<4s4sIHHIIIIIIIIhhhh", b"vids", b"DIB ", 0, 0, 0, 0,
+    fourcc = codec or (b"MPNG" if sizes else b"DIB ")
+    compression = 0 if fourcc == b"DIB " else int.from_bytes(fourcc, "little")
+    video_header = struct.pack("<4s4sIHHIIIIIIIIhhhh", b"vids", fourcc, 0, 0, 0, 0,
                                1, fps, 0, count, frame_size, 0xffffffff, 0, 0, 0, width, height)
-    video_format = struct.pack("<IiiHHIIiiII", 40, width, height, 1, 24, 0, frame_size, 0, 0, 0, 0)
+    video_format = struct.pack("<IiiHHIIiiII", 40, width, height, 1, 24, compression, frame_size, 0, 0, 0, 0)
     headers = chunk(b"avih", main) + group(b"strl", chunk(b"strh", video_header) + chunk(b"strf", video_format))
     pcm = b""
     if audio:
@@ -774,7 +778,12 @@ def write_video(path, seconds=12, audio=True):
     data, index = bytearray(), bytearray()
     for i in range(count):
         # The changing red channel catches stale texture contents.
-        samples = [(b"00db", bytes((32, 96, i % 256)) * (width * height))]
+        if sizes:
+            w, h = sizes[min(i // fps, len(sizes) - 1)]
+            frame = png(w, h, bytes((i % 256, 96, 32)) * (w * h))
+            samples = [(b"00dc", frame)]
+        else:
+            samples = [(b"00dc" if codec else b"00db", bytes((32, 96, i % 256)) * (width * height))]
         if audio:
             samples.append((b"01wb", pcm))
         for kind, payload in samples:

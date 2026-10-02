@@ -35,9 +35,7 @@ for mode in ("av", "video", "audio"):
 with Session("play_cli", tool="play") as s:
     code, log = s.run()
     assert code == 2 and "usage: im play <file>" in log, (code, log)
-    s.launch(str(s.artifacts / "missing.avi"), ALSOFT_DRIVERS="null")
-    s.focus()
-    s.logged("No such file or directory")
-    s.close()
+    code, log = s.run(str(s.artifacts / "missing.avi"), ALSOFT_DRIVERS="null")
+    assert code == 1 and "im play: " in log and "No such file or directory" in log, (code, log)
 
 print("OK: A/V, silent and audio-only EOF, replay, seek and CLI errors")

@@ -43,7 +43,7 @@ namespace {
 
     struct Retired final: public Runable {
         Ui* ui = nullptr;
-        bool pending = false;
+        int pending = 0;
         void run() override;
     };
 
@@ -92,7 +92,7 @@ namespace {
                     }
                 }
                 images[i]->prepare();
-                callbacks[i].pending = true;
+                callbacks[i].pending += 2;
                 ImDrawList& list = *ImGui::GetBackgroundDrawList();
                 images[i]->draw(list, ImVec2(0, 0), ImVec2(16, 16));
                 images[i]->draw(list, ImVec2(16, 0), ImVec2(32, 16));
@@ -100,7 +100,7 @@ namespace {
             submitted = true;
         }
         verify(iteration == 12);
-        sysO << StringView(u8"OK: bound images, automatic retirement, reuse and pixel readback") << endL;
+        sysO << StringView(u8"OK: bound images, one retirement per draw, reuse and pixel readback") << endL;
     }
 
     static void checkRenderer(ObjPool& pool, Ui& ui, bool hdr) {
@@ -173,8 +173,8 @@ namespace {
 }
 
 void Retired::run() {
-    verify(pending);
-    pending = false;
+    verify(pending > 0);
+    pending--;
     ui->requestFrame();
 }
 
