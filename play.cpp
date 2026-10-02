@@ -463,8 +463,8 @@ namespace {
         for (int c = 0; c < descriptor->nb_components; c++) {
             const AVComponentDescriptor& comp = descriptor->comp[c];
             bool chroma = (c == 1 || c == 2) && !rgb && colors >= 3;
-            u64 width = chroma ? AV_CEIL_RSHIFT((u64)frame->width, descriptor->log2_chroma_w) : (u64)frame->width;
-            u64 height = chroma ? AV_CEIL_RSHIFT((u64)frame->height, descriptor->log2_chroma_h) : (u64)frame->height;
+            u64 width = (u64)(chroma ? AV_CEIL_RSHIFT(frame->width, (int)descriptor->log2_chroma_w) : frame->width);
+            u64 height = (u64)(chroma ? AV_CEIL_RSHIFT(frame->height, (int)descriptor->log2_chroma_h) : frame->height);
             u64 bits = comp.shift + comp.depth;
             u64 row = descriptor->flags & AV_PIX_FMT_FLAG_BITSTREAM ? ((width - 1) * comp.step + comp.offset) / 8 + 1 : (width - 1) * comp.step + comp.offset + (bits > 16 || (descriptor->flags & AV_PIX_FMT_FLAG_FLOAT) ? 4 : bits > 8 ? 2 : 1 + ((descriptor->flags & AV_PIX_FMT_FLAG_BE) ? 1 : 0));
             const uint8_t* data = frame->data[comp.plane];
