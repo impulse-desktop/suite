@@ -2140,7 +2140,26 @@ RenderImage* VulkanRenderer::import(ObjPool& pool, SharedImage& source, bool hdr
     formatQuery.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
     formatSupport.pNext = &externalSupport;
 
-    if (vkGetPhysicalDeviceImageFormatProperties2(gpu->phys, &formatQuery, &formatSupport) != VK_SUCCESS || !(externalSupport.externalMemoryProperties.externalMemoryFeatures & VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT)) {
+    VkDrmFormatModifierPropertiesListEXT modifiers{VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT};
+    VkFormatProperties2 formatFeatures{VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2};
+    Vector<VkDrmFormatModifierPropertiesEXT> modifierFeatures;
+    VkFormatFeatureFlags features = 0;
+
+    formatFeatures.pNext = &modifiers;
+    vkGetPhysicalDeviceFormatProperties2(gpu->phys, (VkFormat)img.format, &formatFeatures);
+    modifierFeatures.zero(modifiers.drmFormatModifierCount);
+    modifiers.pDrmFormatModifierProperties = modifierFeatures.mutData();
+    vkGetPhysicalDeviceFormatProperties2(gpu->phys, (VkFormat)img.format, &formatFeatures);
+
+    for (u32 i = 0; i < modifiers.drmFormatModifierCount; i++) {
+        if (modifierFeatures[i].drmFormatModifier == img.modifier) {
+            features = modifierFeatures[i].drmFormatModifierTilingFeatures;
+        }
+    }
+
+    VkFormatFeatureFlags needed = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT;
+
+    if ((features & needed) != needed || vkGetPhysicalDeviceImageFormatProperties2(gpu->phys, &formatQuery, &formatSupport) != VK_SUCCESS || !(externalSupport.externalMemoryProperties.externalMemoryFeatures & VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT)) {
         fail(StringView(u8"vulkan cannot import the shared screenshot's format"));
     }
 

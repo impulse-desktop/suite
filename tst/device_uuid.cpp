@@ -3,7 +3,31 @@
 #include <string.h>
 #include <vulkan/vulkan.h>
 
+static bool sampleable(VkPhysicalDevice device, VkFormat format) {
+    VkDrmFormatModifierPropertiesListEXT list = {};
+    list.sType = VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT;
+    VkFormatProperties2 properties = {};
+    properties.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2;
+    properties.pNext = &list;
+    vkGetPhysicalDeviceFormatProperties2(device, format, &properties);
+    VkDrmFormatModifierPropertiesEXT* modifiers = (VkDrmFormatModifierPropertiesEXT*)calloc(list.drmFormatModifierCount + 1, sizeof(VkDrmFormatModifierPropertiesEXT));
+    list.pDrmFormatModifierProperties = modifiers;
+    vkGetPhysicalDeviceFormatProperties2(device, format, &properties);
+    const VkFormatFeatureFlags needed = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT;
+    bool found = false;
+    for (uint32_t i = 0; i < list.drmFormatModifierCount; i++) {
+        if (modifiers[i].drmFormatModifier == 0 && (modifiers[i].drmFormatModifierTilingFeatures & needed) == needed) {
+            found = true;
+        }
+    }
+    free(modifiers);
+    return found;
+}
+
 static bool importable(VkPhysicalDevice device, VkFormat format) {
+    if (!sampleable(device, format)) {
+        return false;
+    }
     VkPhysicalDeviceImageDrmFormatModifierInfoEXT modifier = {};
     modifier.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_DRM_FORMAT_MODIFIER_INFO_EXT;
     modifier.drmFormatModifier = 0;

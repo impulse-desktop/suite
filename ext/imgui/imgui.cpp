@@ -15346,7 +15346,8 @@ void ImGui::MarkIniSettingsDirty()
     if (g.SettingsDirtyTimer <= 0.0f)
     {
         g.SettingsDirtyTimer = g.IO.IniSavingRate;
-        g.SettingsTimer.Schedule(g.SettingsDirtyTimer);
+        if (g.IO.IniFilename != NULL)
+            g.SettingsTimer.Schedule(g.SettingsDirtyTimer);
     }
 }
 
