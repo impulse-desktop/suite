@@ -28,13 +28,15 @@ struct ImagePixels {
     u32 height = 0;
     stl::Buffer rgba;
     stl::Buffer rgb16;
+    stl::Buffer rgbaf;
 };
 
 enum class PixelLayout : u8 {
     Rgba8,
     Bgra8,
     Rgb10A2,
-    Bgr10A2
+    Bgr10A2,
+    Rgba16f
 };
 
 void unpackPixels(const void* data, u32 width, u32 height, size_t stride, PixelLayout layout, ImagePixels& out);
@@ -49,6 +51,8 @@ struct RenderImage {
     virtual void read(int x0, int y0, int x1, int y1, ImagePixels& out) = 0;
 };
 
+struct RenderShader {};
+
 struct RendererOptions {
     bool hdr = false;
     float sdrWhiteNits = 203.f;
@@ -58,11 +62,16 @@ struct RendererOptions {
 struct Renderer {
     virtual bool beginFrame(u32 width, u32 height) = 0;
     virtual bool endFrame(ImDrawData* draw) = 0;
+
     virtual u32 maxTextureSide() = 0;
     virtual u32 maxTextures() = 0;
+
     virtual RenderImage* upload(stl::ObjPool& pool, u32 width, u32 height, const void* rgba, bool hdr) = 0;
     virtual RenderImage* import(stl::ObjPool& pool, SharedImage& source, bool hdr) = 0;
     virtual RenderImage* bind(stl::ObjPool& pool, u32 width, u32 height, const void* data, size_t size, size_t stride, stl::Runable& retired) = 0;
+    virtual RenderImage* shade(stl::ObjPool& pool, RenderShader& shader, u32 width, u32 height, const void* data, size_t size, const void* uniform, size_t uniformSize, stl::Runable& retired) = 0;
+
+    virtual RenderShader* compileShader(stl::ObjPool& pool, const void* code, size_t size) = 0;
 
     static Renderer* create(stl::ObjPool& pool, plt::Platform& platform, plt::Window& window, const RendererOptions& options = {});
 };

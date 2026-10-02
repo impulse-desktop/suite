@@ -52,15 +52,26 @@ namespace {
         ~SurfaceImage() noexcept;
     };
 
+    struct MetalShader final: RenderShader {
+        id<MTLFunction> fragment = nil;
+        id<MTLRenderPipelineState> pipeline = nil;
+        id<MTLRenderPipelineState> readPipeline = nil;
+    };
+
     struct MetalImage final: RenderImage {
         MetalRenderer* renderer = nullptr;
         id<MTLTexture> texture = nil;
         PixelLayout layout = PixelLayout::Rgba8;
         bool hdr = false;
+        u32 width = 0;
+        u32 height = 0;
         const void* source = nullptr;
         size_t sourceStride = 0;
+        size_t sourceSize = 0;
         size_t bufferStride = 0;
         id<MTLBuffer> buffer = nil;
+        MetalShader* shader = nullptr;
+        id<MTLBuffer> uniform = nil;
         id<MTLCommandBuffer> lastUse = nil;
         Runable* retired = nullptr;
         bool hostImported = false;
@@ -70,6 +81,7 @@ namespace {
         void prepare() override;
         void draw(ImDrawList& list, ImVec2 lo, ImVec2 hi) override;
         void read(int x0, int y0, int x1, int y1, ImagePixels& out) override;
+        void readShaded(int x0, int y0, int x1, int y1, ImagePixels& out);
     };
 
     struct ImageDraw {
@@ -103,6 +115,7 @@ namespace {
         id<MTLRenderCommandEncoder> encoder = nil;
         id<MTLRenderPipelineState> uiPipeline = nil;
         id<MTLRenderPipelineState> imagePipeline = nil;
+        id<MTLLibrary> shadeLibrary = nil;
         bool hdr = false;
         float sdrWhiteNits = 203.f;
         ImDrawData* drawing = nullptr;
@@ -117,6 +130,9 @@ namespace {
         RenderImage* import(ObjPool& pool, SharedImage& source, bool hdr) override;
 
         RenderImage* bind(ObjPool& pool, u32 width, u32 height, const void* data, size_t size, size_t stride, Runable& retired) override;
+        RenderShader* compileShader(ObjPool& pool, const void* code, size_t size) override;
+        RenderImage* shade(ObjPool& pool, RenderShader& shader, u32 width, u32 height, const void* data, size_t size, const void* uniform, size_t uniformSize, Runable& retired) override;
+        id<MTLRenderPipelineState> shadePipeline(MetalShader& shader, MTLPixelFormat format);
         void setupHdr();
         void drawHdr(ImDrawData& draw);
         bool clip(const ImDrawCmd& command);
@@ -133,6 +149,20 @@ namespace {
         const ImageDraw& draw = *(const ImageDraw*)command->UserCallbackData;
         draw.image->renderer->drawImage(draw, *command);
     }
+
+    static constexpr const char* shadeShaders = R"metal(
+#include <metal_stdlib>
+using namespace metal;
+struct ShadeOut {
+    float4 position [[position]];
+    float2 uv [[user(locn0)]];
+};
+vertex ShadeOut shadeVertex(uint index [[vertex_id]], constant float4& transform [[buffer(0)]], constant float4& rect [[buffer(1)]]) {
+    const float2 corners[] = {float2(0,0), float2(1,0), float2(1,1), float2(0,0), float2(1,1), float2(0,1)};
+    float2 uv = corners[index];
+    return {float4(mix(rect.xy, rect.zw, uv) * transform.xy + transform.zw, 0, 1), uv};
+}
+)metal";
 
     static constexpr const char* hdrShaders = R"metal(
 #include <metal_stdlib>
@@ -227,7 +257,12 @@ MetalImage::~MetalImage() noexcept {
 }
 
 void MetalImage::prepare() {
-    if (source) {
+    if (source && shader) {
+        if (!hostImported) {
+            memcpy(buffer.contents, source, sourceSize);
+        }
+        dirty = true;
+    } else if (source) {
         if (!hostImported) {
             for (size_t y = 0; y < texture.height; y++) {
                 memcpy((u8*)buffer.contents + y * bufferStride, (const u8*)source + y * sourceStride, texture.width * 4);
@@ -239,7 +274,7 @@ void MetalImage::prepare() {
 
 void MetalImage::draw(ImDrawList& list, ImVec2 lo, ImVec2 hi) {
     renderer->drawn.pushBack(this);
-    if (hdr) {
+    if (hdr || shader) {
         ImageDraw draw{this, lo, hi};
         list.AddCallback(drawImage, &draw, sizeof(draw));
         list.AddCallback(ImDrawCallback_ResetRenderState, nullptr);
@@ -249,6 +284,11 @@ void MetalImage::draw(ImDrawList& list, ImVec2 lo, ImVec2 hi) {
 }
 
 void MetalImage::read(int x0, int y0, int x1, int y1, ImagePixels& out) {
+    if (shader) {
+        checkImageRegion(width, height, x0, y0, x1, y1);
+        readShaded(x0, y0, x1, y1, out);
+        return;
+    }
     checkImageRegion((u32)texture.width, (u32)texture.height, x0, y0, x1, y1);
     @autoreleasepool {
         u32 width = (u32)(x1 - x0);
@@ -371,9 +411,16 @@ void MetalRenderer::drawImage(const ImageDraw& image, const ImDrawCmd& command) 
     }
     float transform[] = {2.f / drawing->DisplaySize.x, -2.f / drawing->DisplaySize.y, -1.f - 2.f * drawing->DisplayPos.x / drawing->DisplaySize.x, 1.f + 2.f * drawing->DisplayPos.y / drawing->DisplaySize.y};
     float rect[] = {image.lo.x, image.lo.y, image.hi.x, image.hi.y};
-    [encoder setRenderPipelineState:imagePipeline];
     [encoder setVertexBytes:transform length:sizeof(transform) atIndex:0];
     [encoder setVertexBytes:rect length:sizeof(rect) atIndex:1];
+    if (MetalShader* shader = image.image->shader) {
+        [encoder setRenderPipelineState:shader->pipeline];
+        [encoder setFragmentBuffer:image.image->buffer offset:0 atIndex:0];
+        [encoder setFragmentBuffer:image.image->uniform offset:0 atIndex:1];
+        [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        return;
+    }
+    [encoder setRenderPipelineState:imagePipeline];
     [encoder setFragmentBytes:&sdrWhiteNits length:sizeof(sdrWhiteNits) atIndex:0];
     [encoder setFragmentTexture:image.image->texture atIndex:0];
     [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
@@ -505,7 +552,9 @@ bool MetalRenderer::endFrame(ImDrawData* draw) {
             fail(StringView(u8"cannot begin Metal command buffer"));
         }
         for (MetalImage* image : drawn) {
-            if (image->dirty) {
+            if (image->shader) {
+                image->dirty = false;
+            } else if (image->dirty) {
                 id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
                 if (!blit) {
                     fail(StringView(u8"cannot begin Metal image upload"));
@@ -525,7 +574,9 @@ bool MetalRenderer::endFrame(ImDrawData* draw) {
         if (hdr) {
             drawHdr(*draw);
         } else {
+            drawing = draw;
             ImGui_ImplMetal_RenderDrawData(draw, command, encoder);
+            drawing = nullptr;
         }
         [encoder endEncoding];
         encoder = nil;
@@ -572,6 +623,119 @@ RenderImage* MetalRenderer::bind(ObjPool& pool, u32 width, u32 height, const voi
             fail(StringView(u8"cannot allocate bound Metal image"));
         }
         return image;
+    }
+}
+
+id<MTLRenderPipelineState> MetalRenderer::shadePipeline(MetalShader& shader, MTLPixelFormat format) {
+    NSError* error = nil;
+    if (!shadeLibrary) {
+        shadeLibrary = [device newLibraryWithSource:[NSString stringWithUTF8String:shadeShaders] options:nil error:&error];
+        if (!shadeLibrary) {
+            fail(StringView(StringBuilder() << StringView(u8"Metal shade vertex: ") << StringView(error.localizedDescription.UTF8String)));
+        }
+    }
+    MTLRenderPipelineDescriptor* descriptor = [[MTLRenderPipelineDescriptor alloc] init];
+    descriptor.vertexFunction = [shadeLibrary newFunctionWithName:@"shadeVertex"];
+    descriptor.fragmentFunction = shader.fragment;
+    descriptor.colorAttachments[0].pixelFormat = format;
+    id<MTLRenderPipelineState> pipeline = [device newRenderPipelineStateWithDescriptor:descriptor error:&error];
+    if (!pipeline) {
+        fail(StringView(StringBuilder() << StringView(u8"Metal shade pipeline: ") << StringView(error.localizedDescription.UTF8String)));
+    }
+    return pipeline;
+}
+
+RenderShader* MetalRenderer::compileShader(ObjPool& pool, const void* code, size_t size) {
+    if (!code || !size) {
+        fail(StringView(u8"invalid shader code"));
+    }
+    @autoreleasepool {
+        NSString* source = [[NSString alloc] initWithBytes:code length:size encoding:NSUTF8StringEncoding];
+        NSError* error = nil;
+        id<MTLLibrary> library = source ? [device newLibraryWithSource:source options:nil error:&error] : nil;
+        if (!library) {
+            fail(StringView(StringBuilder() << StringView(u8"Metal shader: ") << StringView(error ? error.localizedDescription.UTF8String : "not UTF-8")));
+        }
+        MetalShader* shader = pool.make<MetalShader>();
+        shader->fragment = [library newFunctionWithName:@"main0"];
+        if (!shader->fragment) {
+            fail(StringView(u8"Metal shader has no main0"));
+        }
+        shader->pipeline = shadePipeline(*shader, hdr ? MTLPixelFormatRGBA16Float : layer.pixelFormat);
+        return shader;
+    }
+}
+
+RenderImage* MetalRenderer::shade(ObjPool& pool, RenderShader& shader, u32 width, u32 height, const void* data, size_t size, const void* uniform, size_t uniformSize, Runable& retired) {
+    checkImageSize(width, height, maxTextureSide());
+    if (!data || !size || size % 4 || !uniform || !uniformSize || uniformSize > 4096) {
+        fail(StringView(u8"invalid shaded image source"));
+    }
+    @autoreleasepool {
+        MetalImage* image = pool.make<MetalImage>();
+        image->renderer = this;
+        image->layout = PixelLayout::Rgba16f;
+        image->width = width;
+        image->height = height;
+        image->source = data;
+        image->sourceSize = size;
+        image->shader = static_cast<MetalShader*>(&shader);
+        image->retired = &retired;
+        size_t page = (size_t)getpagesize();
+        if ((uintptr_t)data % page == 0 && size % page == 0) {
+            image->buffer = [device newBufferWithBytesNoCopy:const_cast<void*>(data) length:size options:MTLResourceStorageModeShared deallocator:nil];
+            image->hostImported = image->buffer != nil;
+        }
+        if (!image->hostImported) {
+            image->buffer = [device newBufferWithLength:size options:MTLResourceStorageModeShared];
+        }
+        image->uniform = [device newBufferWithBytes:uniform length:uniformSize options:MTLResourceStorageModeShared];
+        if (!image->buffer || !image->uniform) {
+            fail(StringView(u8"cannot allocate shaded Metal image"));
+        }
+        return image;
+    }
+}
+
+void MetalImage::readShaded(int x0, int y0, int x1, int y1, ImagePixels& out) {
+    @autoreleasepool {
+        u32 w = (u32)(x1 - x0);
+        u32 h = (u32)(y1 - y0);
+        if (!shader->readPipeline) {
+            shader->readPipeline = renderer->shadePipeline(*shader, MTLPixelFormatRGBA16Float);
+        }
+        MTLTextureDescriptor* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float width:w height:h mipmapped:NO];
+        descriptor.storageMode = MTLStorageModePrivate;
+        descriptor.usage = MTLTextureUsageRenderTarget;
+        id<MTLTexture> target = [renderer->device newTextureWithDescriptor:descriptor];
+        size_t stride = ((size_t)w * 8 + 255) & ~(size_t)255;
+        id<MTLBuffer> readback = [renderer->device newBufferWithLength:stride * h options:MTLResourceStorageModeShared];
+        id<MTLCommandBuffer> command = [renderer->queue commandBuffer];
+        if (!target || !readback || !command) {
+            fail(StringView(u8"cannot allocate Metal readback"));
+        }
+        MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        pass.colorAttachments[0].texture = target;
+        pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        id<MTLRenderCommandEncoder> encoder = [command renderCommandEncoderWithDescriptor:pass];
+        float transform[] = {2.f / (float)w, -2.f / (float)h, -1.f - 2.f * (float)x0 / (float)w, 1.f + 2.f * (float)y0 / (float)h};
+        float rect[] = {0.f, 0.f, (float)width, (float)height};
+        [encoder setRenderPipelineState:shader->readPipeline];
+        [encoder setViewport:MTLViewport{0, 0, (double)w, (double)h, 0, 1}];
+        [encoder setVertexBytes:transform length:sizeof(transform) atIndex:0];
+        [encoder setVertexBytes:rect length:sizeof(rect) atIndex:1];
+        [encoder setFragmentBuffer:buffer offset:0 atIndex:0];
+        [encoder setFragmentBuffer:uniform offset:0 atIndex:1];
+        [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [encoder endEncoding];
+        id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
+        [blit copyFromTexture:target sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(w, h, 1) toBuffer:readback destinationOffset:0 destinationBytesPerRow:stride destinationBytesPerImage:stride * h];
+        [blit endEncoding];
+        [command commit];
+        [command waitUntilCompleted];
+        checkCommand(command);
+        unpackPixels(readback.contents, w, h, stride, PixelLayout::Rgba16f, out);
     }
 }
 

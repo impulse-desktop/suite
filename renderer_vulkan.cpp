@@ -152,6 +152,9 @@ namespace {
         VkDescriptorSetLayout imageSetLayout = VK_NULL_HANDLE;
         VkPipelineLayout imagePipelineLayout = VK_NULL_HANDLE;
         VkPipeline imagePipeline = VK_NULL_HANDLE;
+        VkDescriptorSetLayout shadeSetLayout = VK_NULL_HANDLE;
+        VkPipelineLayout shadePipelineLayout = VK_NULL_HANDLE;
+        VkRenderPass readPass = VK_NULL_HANDLE;
 
         static Gpu* create(stl::ObjPool& pool, const GpuOptions& options);
 
@@ -165,7 +168,7 @@ namespace {
 
         u32 findMemoryType(u32 typeBits, VkMemoryPropertyFlags props);
         void finishTexture(VkFormat format, Texture& tex);
-        void createTexture(u32 w, u32 h, Texture& tex);
+        void createTexture(u32 w, u32 h, Texture& tex, VkFormat format = VK_FORMAT_R8G8B8A8_UNORM, VkImageUsageFlags usage = 0);
         void uploadTexture(u32 w, u32 h, const u8* rgba, Texture& tex);
         void destroyTexture(Texture& tex);
 
@@ -175,6 +178,8 @@ namespace {
         void track(VkFence fence);
         void landed(Flight* flight);
         void recordImages(VkCommandBuffer command);
+        VkShaderModule shaderModule(const u32* code, size_t bytes);
+        VkPipeline vertexlessPipeline(const u32* vertCode, size_t vertBytes, const u32* fragCode, size_t fragBytes, VkPipelineLayout layout, VkRenderPass pass);
         void frameRender(ImDrawData* draw);
         void framePresent();
 
@@ -187,14 +192,14 @@ namespace {
         void createPresentPass();
         void destroyFrames();
         void destroyPresenter();
-        VkShaderModule shaderModule(const u32* code, size_t bytes);
         void destroySceneTarget();
-        VkPipeline vertexlessPipeline(const u32* vertCode, size_t vertBytes, const u32* fragCode, size_t fragBytes, VkPipelineLayout layout, VkRenderPass pass);
         void destroyLinearHdr();
     };
 
     struct ImageDraw {
         Gpu* gpu;
+        VkPipeline pipeline;
+        VkPipelineLayout layout;
         VkDescriptorSet texture;
         float x0, y0, x1, y1;
         float sdrWhiteNits;
@@ -520,7 +525,7 @@ u32 Gpu::selectQueueFamily(VkPhysicalDevice candidate) {
     count = chaos->count(StringView(u8"queue-families"), count);
 
     for (u32 i = 0; i < count; i++) {
-        if (families[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
+        if ((families[i].queueFlags & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT)) == (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT)) {
             return i;
         }
     }
@@ -1217,6 +1222,63 @@ void Gpu::setupVulkan(ObjPool& pool, const GpuOptions& wants) {
     pooledGuard(pool, [this] {
         vkDestroyDescriptorPool(device, descPool, alloc);
     });
+
+    VkDescriptorSetLayoutBinding shadeBindings[2] = {
+        {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+        {1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+    };
+    VkDescriptorSetLayoutCreateInfo shadeLayout{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+
+    shadeLayout.bindingCount = 2;
+    shadeLayout.pBindings = shadeBindings;
+    vkc(vkCreateDescriptorSetLayout(device, &shadeLayout, alloc, &shadeSetLayout));
+    pooledGuard(pool, [this] {
+        vkDestroyDescriptorSetLayout(device, shadeSetLayout, alloc);
+    });
+
+    VkPushConstantRange shadeRange{VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(ImagePush)};
+    VkPipelineLayoutCreateInfo shadePipeline{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+
+    shadePipeline.setLayoutCount = 1;
+    shadePipeline.pSetLayouts = &shadeSetLayout;
+    shadePipeline.pushConstantRangeCount = 1;
+    shadePipeline.pPushConstantRanges = &shadeRange;
+    vkc(vkCreatePipelineLayout(device, &shadePipeline, alloc, &shadePipelineLayout));
+    pooledGuard(pool, [this] {
+        vkDestroyPipelineLayout(device, shadePipelineLayout, alloc);
+    });
+
+    VkAttachmentDescription target{};
+
+    target.format = VK_FORMAT_R16G16B16A16_SFLOAT;
+    target.samples = VK_SAMPLE_COUNT_1_BIT;
+    target.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    target.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    target.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    target.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    target.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    target.finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+
+    VkAttachmentReference color{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    VkSubpassDescription subpass{};
+
+    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.colorAttachmentCount = 1;
+    subpass.pColorAttachments = &color;
+
+    VkSubpassDependency written{0, VK_SUBPASS_EXTERNAL, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, 0};
+    VkRenderPassCreateInfo readInfo{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+
+    readInfo.attachmentCount = 1;
+    readInfo.pAttachments = &target;
+    readInfo.subpassCount = 1;
+    readInfo.pSubpasses = &subpass;
+    readInfo.dependencyCount = 1;
+    readInfo.pDependencies = &written;
+    vkc(vkCreateRenderPass(device, &readInfo, alloc, &readPass));
+    pooledGuard(pool, [this] {
+        vkDestroyRenderPass(device, readPass, alloc);
+    });
 }
 
 VkSurfaceKHR Gpu::createSurface(plt::Window& window) {
@@ -1472,18 +1534,18 @@ void Gpu::finishTexture(VkFormat format, Texture& tex) {
     }
 }
 
-void Gpu::createTexture(u32 w, u32 h, Texture& tex) {
+void Gpu::createTexture(u32 w, u32 h, Texture& tex, VkFormat format, VkImageUsageFlags usage) {
     VkImageCreateInfo ici = {};
 
     ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     ici.imageType = VK_IMAGE_TYPE_2D;
-    ici.format = VK_FORMAT_R8G8B8A8_UNORM;
+    ici.format = format;
     ici.extent = {w, h, 1};
     ici.mipLevels = 1;
     ici.arrayLayers = 1;
     ici.samples = VK_SAMPLE_COUNT_1_BIT;
     ici.tiling = VK_IMAGE_TILING_OPTIMAL;
-    ici.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    ici.usage = usage | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     vkc(vkCreateImage(device, &ici, alloc, &tex.image));
@@ -1650,8 +1712,8 @@ namespace {
         VkRect2D scissor{{(i32)clipX0, (i32)clipY0}, {(u32)(clipX1 - clipX0), (u32)(clipY1 - clipY0)}};
 
         vkCmdSetScissor(state->CommandBuffer, 0, 1, &scissor);
-        vkCmdBindPipeline(state->CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.gpu->imagePipeline);
-        vkCmdBindDescriptorSets(state->CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.gpu->imagePipelineLayout, 0, 1, &draw.texture, 0, nullptr);
+        vkCmdBindPipeline(state->CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.pipeline);
+        vkCmdBindDescriptorSets(state->CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.layout, 0, 1, &draw.texture, 0, nullptr);
 
         ImagePush push;
 
@@ -1664,7 +1726,7 @@ namespace {
         push.rect[2] = draw.x1;
         push.rect[3] = draw.y1;
         push.sdrWhiteNits = draw.sdrWhiteNits;
-        vkCmdPushConstants(state->CommandBuffer, draw.gpu->imagePipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
+        vkCmdPushConstants(state->CommandBuffer, draw.layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
         vkCmdDraw(state->CommandBuffer, 6, 1, 0, 0);
     }
 }
@@ -1679,6 +1741,8 @@ namespace {
         RenderImage* import(ObjPool& pool, SharedImage& source, bool hdr) override;
 
         RenderImage* bind(ObjPool& pool, u32 width, u32 height, const void* data, size_t size, size_t stride, Runable& retired) override;
+        RenderShader* compileShader(ObjPool& pool, const void* code, size_t size) override;
+        RenderImage* shade(ObjPool& pool, RenderShader& shader, u32 width, u32 height, const void* data, size_t size, const void* uniform, size_t uniformSize, Runable& retired) override;
         bool beginFrame(u32 width, u32 height) override;
         bool endFrame(ImDrawData* draw) override;
         u32 maxTextureSide() override;
@@ -1736,6 +1800,15 @@ namespace {
         u8 deviceUuid[VK_UUID_SIZE] = {};
     };
 
+    struct VulkanShader final: RenderShader {
+        Gpu* gpu = nullptr;
+        Buffer code;
+        VkPipeline pipeline = VK_NULL_HANDLE;
+        VkPipeline readPipeline = VK_NULL_HANDLE;
+
+        ~VulkanShader() noexcept;
+    };
+
     struct VulkanImage final: RenderImage {
         Gpu* gpu = nullptr;
         Texture texture;
@@ -1746,6 +1819,13 @@ namespace {
 
         const void* source = nullptr;
         size_t stride = 0;
+        size_t bytes = 0;
+        VkBufferUsageFlags usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+        VulkanShader* shader = nullptr;
+        VkBuffer uniformBuffer = VK_NULL_HANDLE;
+        VkDeviceMemory uniformMemory = VK_NULL_HANDLE;
+        VkDescriptorPool shadePool = VK_NULL_HANDLE;
+        VkDescriptorSet shadeSet = VK_NULL_HANDLE;
         VkBuffer buffer = VK_NULL_HANDLE;
         VkDeviceMemory bufferMemory = VK_NULL_HANDLE;
         void* map = nullptr;
@@ -1760,7 +1840,9 @@ namespace {
         void prepare() override;
         void allocateBuffer(size_t size);
         bool importHost(size_t size);
+        void setupShade(const void* uniform, size_t uniformSize);
         void record(VkCommandBuffer command);
+        void readShaded(int x0, int y0, int x1, int y1, ImagePixels& out);
         void draw(ImDrawList& list, ImVec2 lo, ImVec2 hi) override;
         void read(int x0, int y0, int x1, int y1, ImagePixels& out) override;
     };
@@ -1851,8 +1933,8 @@ bool VulkanImage::importHost(size_t size) {
     external.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
     VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     info.pNext = &external;
-    info.size = (VkDeviceSize)stride * height;
-    info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    info.size = bytes;
+    info.usage = usage;
     if (vkCreateBuffer(gpu->device, &info, gpu->alloc, &buffer) != VK_SUCCESS) {
         return false;
     }
@@ -1913,8 +1995,8 @@ void VulkanImage::allocateBuffer(size_t size) {
     }
     coherent = true;
     VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-    info.size = (VkDeviceSize)stride * height;
-    info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    info.size = bytes;
+    info.usage = usage;
     gpu->vkc(vkCreateBuffer(gpu->device, &info, gpu->alloc, &buffer));
     VkMemoryRequirements requirements;
     vkGetBufferMemoryRequirements(gpu->device, buffer, &requirements);
@@ -1929,7 +2011,7 @@ void VulkanImage::allocateBuffer(size_t size) {
 void VulkanImage::prepare() {
     if (source) {
         if (!hostImported) {
-            memcpy(map, source, stride * height);
+            memcpy(map, source, bytes);
         }
         dirty = true;
     }
@@ -1944,6 +2026,10 @@ void VulkanImage::record(VkCommandBuffer command) {
         range.memory = bufferMemory;
         range.size = VK_WHOLE_SIZE;
         gpu->vkc(vkFlushMappedMemoryRanges(gpu->device, 1, &range));
+    }
+    if (shader) {
+        dirty = false;
+        return;
     }
     VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
     barrier.oldLayout = initialized ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED;
@@ -1980,11 +2066,43 @@ RenderImage* VulkanRenderer::bind(ObjPool& pool, u32 width, u32 height, const vo
     image->height = height;
     image->source = data;
     image->stride = stride;
+    image->bytes = stride * height;
     image->retired = &retired;
     image->initialized = false;
     gpu->createTexture(width, height, image->texture);
     gpu->finishTexture(VK_FORMAT_R8G8B8A8_UNORM, image->texture);
     image->allocateBuffer(size);
+    return image;
+}
+
+RenderShader* VulkanRenderer::compileShader(ObjPool& pool, const void* code, size_t size) {
+    if (!code || !size || size % 4) {
+        fail(StringView(u8"invalid shader code"));
+    }
+    VulkanShader* shader = pool.make<VulkanShader>();
+    shader->gpu = gpu;
+    shader->code.append(code, size);
+    shader->pipeline = gpu->vertexlessPipeline(gpu_image_vert_spv, sizeof(gpu_image_vert_spv), (const u32*)shader->code.data(), size, gpu->shadePipelineLayout, gpu->linearHdr ? gpu->scenePass : gpu->present.renderPass);
+    return shader;
+}
+
+RenderImage* VulkanRenderer::shade(ObjPool& pool, RenderShader& shader, u32 width, u32 height, const void* data, size_t size, const void* uniform, size_t uniformSize, Runable& retired) {
+    checkImageSize(width, height, maxTextureSide());
+    if (!data || !size || size % 4 || !uniform || !uniformSize || uniformSize > 4096) {
+        fail(StringView(u8"invalid shaded image source"));
+    }
+    VulkanImage* image = pool.make<VulkanImage>();
+    image->gpu = gpu;
+    image->width = width;
+    image->height = height;
+    image->layout = PixelLayout::Rgba16f;
+    image->source = data;
+    image->bytes = size;
+    image->usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    image->shader = static_cast<VulkanShader*>(&shader);
+    image->retired = &retired;
+    image->allocateBuffer(size);
+    image->setupShade(uniform, uniformSize);
     return image;
 }
 
@@ -2005,13 +2123,94 @@ VulkanImage::~VulkanImage() noexcept {
     if (bufferMemory) {
         vkFreeMemory(gpu->device, bufferMemory, gpu->alloc);
     }
+    if (uniformBuffer) {
+        vkDestroyBuffer(gpu->device, uniformBuffer, gpu->alloc);
+    }
+    if (uniformMemory) {
+        vkFreeMemory(gpu->device, uniformMemory, gpu->alloc);
+    }
+    if (shadePool) {
+        vkDestroyDescriptorPool(gpu->device, shadePool, gpu->alloc);
+    }
     gpu->destroyTexture(texture);
+}
+
+VulkanShader::~VulkanShader() noexcept {
+    if (pipeline) {
+        vkDestroyPipeline(gpu->device, pipeline, gpu->alloc);
+    }
+    if (readPipeline) {
+        vkDestroyPipeline(gpu->device, readPipeline, gpu->alloc);
+    }
+}
+
+void VulkanImage::setupShade(const void* uniform, size_t uniformSize) {
+    VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+
+    info.size = uniformSize;
+    info.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+    gpu->vkc(vkCreateBuffer(gpu->device, &info, gpu->alloc, &uniformBuffer));
+
+    VkMemoryRequirements requirements;
+
+    vkGetBufferMemoryRequirements(gpu->device, uniformBuffer, &requirements);
+
+    VkMemoryAllocateInfo memory{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+
+    memory.allocationSize = requirements.size;
+    memory.memoryTypeIndex = gpu->findMemoryType(requirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    gpu->vkc(vkAllocateMemory(gpu->device, &memory, gpu->alloc, &uniformMemory));
+    gpu->vkc(vkBindBufferMemory(gpu->device, uniformBuffer, uniformMemory, 0));
+
+    void* mapped = nullptr;
+
+    gpu->vkc(vkMapMemory(gpu->device, uniformMemory, 0, VK_WHOLE_SIZE, 0, &mapped));
+    memcpy(mapped, uniform, uniformSize);
+    vkUnmapMemory(gpu->device, uniformMemory);
+
+    VkDescriptorPoolSize sizes[2] = {
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1},
+        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1},
+    };
+    VkDescriptorPoolCreateInfo pool{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+
+    pool.maxSets = 1;
+    pool.poolSizeCount = 2;
+    pool.pPoolSizes = sizes;
+    gpu->vkc(vkCreateDescriptorPool(gpu->device, &pool, gpu->alloc, &shadePool));
+
+    VkDescriptorSetAllocateInfo allocate{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+
+    allocate.descriptorPool = shadePool;
+    allocate.descriptorSetCount = 1;
+    allocate.pSetLayouts = &gpu->shadeSetLayout;
+    gpu->vkc(vkAllocateDescriptorSets(gpu->device, &allocate, &shadeSet));
+
+    VkDescriptorBufferInfo source{buffer, 0, VK_WHOLE_SIZE};
+    VkDescriptorBufferInfo constants{uniformBuffer, 0, uniformSize};
+    VkWriteDescriptorSet writes[2] = {};
+
+    for (u32 i = 0; i < 2; i++) {
+        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[i].dstSet = shadeSet;
+        writes[i].dstBinding = i;
+        writes[i].descriptorCount = 1;
+    }
+    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    writes[0].pBufferInfo = &source;
+    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    writes[1].pBufferInfo = &constants;
+    vkUpdateDescriptorSets(gpu->device, 2, writes, 0, nullptr);
 }
 
 void VulkanImage::draw(ImDrawList& list, ImVec2 lo, ImVec2 hi) {
     gpu->drawn.pushBack(this);
-    if (hdr) {
-        ImageDraw draw{gpu, texture.imageSet, lo.x, lo.y, hi.x, hi.y, gpu->sdrWhiteNits};
+    if (shader) {
+        ImageDraw draw{gpu, shader->pipeline, gpu->shadePipelineLayout, shadeSet, lo.x, lo.y, hi.x, hi.y, gpu->sdrWhiteNits};
+        list.AddCallback(drawImage, &draw, sizeof(draw));
+        list.AddCallback(ImDrawCallback_ResetRenderState, nullptr);
+    } else if (hdr) {
+        ImageDraw draw{gpu, gpu->imagePipeline, gpu->imagePipelineLayout, texture.imageSet, lo.x, lo.y, hi.x, hi.y, gpu->sdrWhiteNits};
         list.AddCallback(drawImage, &draw, sizeof(draw));
         list.AddCallback(ImDrawCallback_ResetRenderState, nullptr);
     } else {
@@ -2304,11 +2503,16 @@ RenderImage* VulkanRenderer::import(ObjPool& pool, SharedImage& source, bool hdr
 
 void VulkanImage::read(int x0, int y0, int x1, int y1, ImagePixels& out) {
     checkImageRegion(width, height, x0, y0, x1, y1);
+    if (shader) {
+        readShaded(x0, y0, x1, y1, out);
+        return;
+    }
     const Texture& tex = texture;
     out.width = (u32)(x1 - x0);
     out.height = (u32)(y1 - y0);
 
-    VkDeviceSize bytes = (VkDeviceSize)out.width * out.height * sizeof(u32);
+    size_t pixel = layout == PixelLayout::Rgba16f ? 8 : 4;
+    VkDeviceSize bytes = (VkDeviceSize)out.width * out.height * pixel;
     VkBuffer buffer = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
     ScopedGuard readback = [&] mutable -> void {
@@ -2403,7 +2607,160 @@ void VulkanImage::read(int x0, int y0, int x1, int y1, ImagePixels& out) {
         }
     };
     gpu->vkc(vkMapMemory(gpu->device, memory, 0, bytes, 0, &map));
-    unpackPixels(map, out.width, out.height, (size_t)out.width * 4, layout, out);
+    unpackPixels(map, out.width, out.height, (size_t)out.width * pixel, layout, out);
+}
+
+void VulkanImage::readShaded(int x0, int y0, int x1, int y1, ImagePixels& out) {
+    u32 w = (u32)(x1 - x0);
+    u32 h = (u32)(y1 - y0);
+    VkDevice device = gpu->device;
+
+    if (!shader->readPipeline) {
+        shader->readPipeline = gpu->vertexlessPipeline(gpu_image_vert_spv, sizeof(gpu_image_vert_spv), (const u32*)shader->code.data(), shader->code.length(), gpu->shadePipelineLayout, gpu->readPass);
+    }
+
+    if (!coherent) {
+        VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
+        range.memory = bufferMemory;
+        range.size = VK_WHOLE_SIZE;
+        gpu->vkc(vkFlushMappedMemoryRanges(device, 1, &range));
+    }
+
+    Texture target;
+
+    gpu->createTexture(w, h, target, VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+    STD_DEFER {
+        gpu->destroyTexture(target);
+    };
+
+    VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    VkImageView view = VK_NULL_HANDLE;
+
+    vci.image = target.image;
+    vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    vci.format = VK_FORMAT_R16G16B16A16_SFLOAT;
+    vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    gpu->vkc(vkCreateImageView(device, &vci, gpu->alloc, &view));
+    STD_DEFER {
+        vkDestroyImageView(device, view, gpu->alloc);
+    };
+
+    VkFramebufferCreateInfo fci{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+    VkFramebuffer framebuffer = VK_NULL_HANDLE;
+
+    fci.renderPass = gpu->readPass;
+    fci.attachmentCount = 1;
+    fci.pAttachments = &view;
+    fci.width = w;
+    fci.height = h;
+    fci.layers = 1;
+    gpu->vkc(vkCreateFramebuffer(device, &fci, gpu->alloc, &framebuffer));
+    STD_DEFER {
+        vkDestroyFramebuffer(device, framebuffer, gpu->alloc);
+    };
+
+    VkDeviceSize bytes = (VkDeviceSize)w * h * 8;
+    VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    VkBuffer readback = VK_NULL_HANDLE;
+
+    bci.size = bytes;
+    bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    gpu->vkc(vkCreateBuffer(device, &bci, gpu->alloc, &readback));
+    STD_DEFER {
+        vkDestroyBuffer(device, readback, gpu->alloc);
+    };
+
+    VkMemoryRequirements req;
+
+    vkGetBufferMemoryRequirements(device, readback, &req);
+
+    VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    VkDeviceMemory readbackMemory = VK_NULL_HANDLE;
+
+    mai.allocationSize = req.size;
+    mai.memoryTypeIndex = gpu->findMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    gpu->vkc(vkAllocateMemory(device, &mai, gpu->alloc, &readbackMemory));
+    STD_DEFER {
+        vkFreeMemory(device, readbackMemory, gpu->alloc);
+    };
+    gpu->vkc(vkBindBufferMemory(device, readback, readbackMemory, 0));
+
+    VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+    VkCommandPool pool = VK_NULL_HANDLE;
+
+    pci.queueFamilyIndex = gpu->queueFamily;
+    pci.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    gpu->vkc(vkCreateCommandPool(device, &pci, gpu->alloc, &pool));
+    STD_DEFER {
+        vkQueueWaitIdle(gpu->queue);
+        vkDestroyCommandPool(device, pool, gpu->alloc);
+    };
+
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    VkCommandBufferAllocateInfo cai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+
+    cai.commandPool = pool;
+    cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cai.commandBufferCount = 1;
+    gpu->vkc(vkAllocateCommandBuffers(device, &cai, &cmd));
+
+    VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+
+    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    gpu->vkc(vkBeginCommandBuffer(cmd, &begin));
+
+    VkClearValue clear{};
+    VkRenderPassBeginInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+
+    rp.renderPass = gpu->readPass;
+    rp.framebuffer = framebuffer;
+    rp.renderArea.extent = {w, h};
+    rp.clearValueCount = 1;
+    rp.pClearValues = &clear;
+    vkCmdBeginRenderPass(cmd, &rp, VK_SUBPASS_CONTENTS_INLINE);
+
+    VkViewport viewport{0, 0, (float)w, (float)h, 0, 1};
+    VkRect2D scissor{{0, 0}, {w, h}};
+    ImagePush push;
+
+    push.scale[0] = 2.f / (float)w;
+    push.scale[1] = 2.f / (float)h;
+    push.translate[0] = -1.f - (float)x0 * push.scale[0];
+    push.translate[1] = -1.f - (float)y0 * push.scale[1];
+    push.rect[0] = 0.f;
+    push.rect[1] = 0.f;
+    push.rect[2] = (float)width;
+    push.rect[3] = (float)height;
+    push.sdrWhiteNits = gpu->sdrWhiteNits;
+    vkCmdSetViewport(cmd, 0, 1, &viewport);
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shader->readPipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, gpu->shadePipelineLayout, 0, 1, &shadeSet, 0, nullptr);
+    vkCmdPushConstants(cmd, gpu->shadePipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
+    vkCmdDraw(cmd, 6, 1, 0, 0);
+    vkCmdEndRenderPass(cmd);
+
+    VkBufferImageCopy copy = {};
+
+    copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    copy.imageExtent = {w, h, 1};
+    vkCmdCopyImageToBuffer(cmd, target.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback, 1, &copy);
+    gpu->vkc(vkEndCommandBuffer(cmd));
+
+    VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+
+    submit.commandBufferCount = 1;
+    submit.pCommandBuffers = &cmd;
+    gpu->vkc(vkQueueSubmit(gpu->queue, 1, &submit, VK_NULL_HANDLE));
+    gpu->vkc(vkQueueWaitIdle(gpu->queue));
+
+    void* map = nullptr;
+
+    gpu->vkc(vkMapMemory(device, readbackMemory, 0, bytes, 0, &map));
+    STD_DEFER {
+        vkUnmapMemory(device, readbackMemory);
+    };
+    unpackPixels(map, w, h, (size_t)w * 8, PixelLayout::Rgba16f, out);
 }
 
 RenderImage* VulkanRenderer::upload(ObjPool& pool, u32 width, u32 height, const void* rgba, bool hdr) {

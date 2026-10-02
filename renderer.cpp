@@ -2,6 +2,7 @@
 
 #include "error.h"
 
+#include <math.h>
 #include <string.h>
 
 #if defined(__APPLE__)
@@ -24,11 +25,50 @@ void checkImageRegion(u32 width, u32 height, int x0, int y0, int x1, int y1) {
     }
 }
 
+namespace {
+    static float halfToFloat(u16 half) {
+        u32 exponent = (half >> 10) & 31;
+        u32 mantissa = half & 1023;
+        float value = exponent == 0 ? ldexpf((float)mantissa, -24) : exponent == 31 ? (mantissa ? NAN : INFINITY) : ldexpf((float)(mantissa | 1024), (int)exponent - 25);
+
+        return half >> 15 ? -value : value;
+    }
+
+    static void unpackHalves(const void* data, u32 width, u32 height, size_t stride, ImagePixels& out) {
+        out.rgbaf.zero((size_t)width * height * 4 * sizeof(float));
+        u8* rgba = (u8*)out.rgba.mutData();
+        u16* rgb = (u16*)out.rgb16.mutData();
+        float* rgbaf = (float*)out.rgbaf.mutData();
+
+        for (u32 y = 0; y < height; y++) {
+            for (u32 x = 0; x < width; x++) {
+                size_t at = (size_t)y * width + x;
+                for (u32 c = 0; c < 4; c++) {
+                    u16 half;
+                    memcpy(&half, (const u8*)data + y * stride + x * 8 + c * 2, 2);
+                    float value = halfToFloat(half);
+                    float clamped = value > 0.f ? (value < 1.f ? value : 1.f) : 0.f;
+                    rgbaf[at * 4 + c] = value;
+                    rgba[at * 4 + c] = (u8)(clamped * 255.f + 0.5f);
+                    if (c < 3) {
+                        rgb[at * 3 + c] = (u16)(clamped * 65535.f + 0.5f);
+                    }
+                }
+            }
+        }
+    }
+}
+
 void unpackPixels(const void* data, u32 width, u32 height, size_t stride, PixelLayout layout, ImagePixels& out) {
     out.width = width;
     out.height = height;
     out.rgba.zero((size_t)width * height * 4);
     out.rgb16.zero((size_t)width * height * 3 * sizeof(u16));
+    out.rgbaf.reset();
+    if (layout == PixelLayout::Rgba16f) {
+        unpackHalves(data, width, height, stride, out);
+        return;
+    }
     u8* rgba = (u8*)out.rgba.mutData();
     u16* rgb = (u16*)out.rgb16.mutData();
     bool packed = layout == PixelLayout::Rgb10A2 || layout == PixelLayout::Bgr10A2;

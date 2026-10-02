@@ -13,7 +13,7 @@ plt_build = os.path.join("ext", "plt", "build.py")
 
 
 build.cflags += ["-O2", "-g"]
-build.cxxflags += ["-std=c++23"]
+build.cxxflags += ["-std=c++26"]
 
 build.includes += [
     # <plt/...>: the vendored platform layer's headers by their namespaced path
@@ -107,6 +107,45 @@ for shader, stage in [] if darwin else [
             "--variable-name", f"{shader}_{stage}_spv", "-o", f"$(B)/shaders/{shader}_{stage}.spv.h",
         ],
     ))
+
+
+# the player's color conversion: video.frag is one Jinja template for every
+# variant (fetch x transfer x output); video_shaders.py renders and compiles
+# each, and lists the codes the template knows for the player to check
+video_inputs = ["$(S)/video.frag", "$(S)/video_shaders.py", *build.glob("$(S)/ext/jinja2/*.py"), *build.glob("$(S)/ext/markupsafe/*.py")]
+video_variants = [line.split() for line in subprocess.check_output(["python3", "video_shaders.py", "variants", "video.frag"], text=True).splitlines()]
+video_rules = [command(
+    name="video_codes",
+    inputs=video_inputs,
+    outputs=["$(B)/shaders/video_codes.h"],
+    descr="SH",
+    cmd=["python3", "$(S)/video_shaders.py", "codes", "$(S)/video.frag", "$(B)/shaders/video_codes.h"],
+)]
+if darwin:
+    video_rules.append(command(
+        name="video_msl",
+        inputs=video_inputs,
+        outputs=["$(B)/shaders/video_msl.h"],
+        descr="SH",
+        cmd=["python3", "$(S)/video_shaders.py", "metal", "$(S)/video.frag", "$(B)/shaders/video_msl.h", "glslangValidator", "spirv-cross"],
+    ))
+else:
+    video_variant_rules = [command(
+        name="video_" + "_".join(variant),
+        inputs=video_inputs,
+        outputs=["$(B)/shaders/video_" + "_".join(variant) + ".spv.h"],
+        descr="SH",
+        cmd=["python3", "$(S)/video_shaders.py", "compile", "$(S)/video.frag", *variant, "$(B)/shaders/video_" + "_".join(variant) + ".spv.h", "glslangValidator"],
+    ) for variant in video_variants]
+    video_parts = [rule.outputs[0] for rule in video_variant_rules]
+    video_rules += [*video_variant_rules, command(
+        name="video_spv",
+        inputs=[*video_inputs, *video_parts],
+        outputs=["$(B)/shaders/video_spv.h"],
+        deps=video_variant_rules,
+        descr="SH",
+        cmd=["python3", "$(S)/video_shaders.py", "spirv", "$(S)/video.frag", "$(B)/shaders/video_spv.h", *video_parts],
+    )]
 
 
 # ImGui's core and the platform's renderer backend: Vulkan's, or Metal's,
@@ -213,7 +252,7 @@ if darwin:
 # the vendored libraries' own dependencies come along by name: an imported
 # graph hands over its archive, not what the archive wants linked
 im_deps = [
-    *shader_rules, imgui, decode, plt, libstd,
+    *shader_rules, *video_rules, imgui, decode, plt, libstd,
     *platform_deps, *encoders, *media, system,
 ]
 
