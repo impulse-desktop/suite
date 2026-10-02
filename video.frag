@@ -116,11 +116,7 @@
     16: {"system": "linear", "toSignal": [[1, -0.5, 0.5], [1, 0.5, 0], [1, -0.5, -0.5]], "lumaBits": 2},
     17: {"system": "linear", "toSignal": [[1, -0.5, 0.5], [1, 0.5, 0], [1, -0.5, -0.5]], "lumaBits": 1},
 } %}
-{%- set power = {
-    2.2: [[1, 2.2, 1, 0, 0], [1, 2.2, 1, 0, 0], -1],
-    2.4: [[1, 2.4, 1, 0, 0], [1, 2.4, 1, 0, 0], -1],
-    2.8: [[1, 2.8, 1, 0, 0], [1, 2.8, 1, 0, 0], -1],
-} %}
+{%- set power = {2.2: [[1, 2.2, 1, 0, 0]], 2.4: [[1, 2.4, 1, 0, 0]], 2.8: [[1, 2.8, 1, 0, 0]]} %}
 {%- set bt709 = 1.099296826809442 %}
 {%- set bt709Toe = 0.018053968510807 %}
 {%- set curves = {
@@ -130,27 +126,22 @@
     "smpte240Inverse": [[1, 1 / 0.45, 1 / 1.1115, 0.1115 / 1.1115, 0], [1, 1, 0.25, 0, 0], 4 * 0.0228],
     "srgb": [[1.055, 1 / 2.4, 1, 0, 0.055], [12.92, 1, 1, 0, 0], 0.0031308],
     "srgbInverse": [[1, 2.4, 1 / 1.055, 0.055 / 1.055, 0], [1, 1, 1 / 12.92, 0, 0], 0.04045],
-    "dci": [[1, 1 / 2.6, 48 / 52.37, 0, 0], [1, 1 / 2.6, 48 / 52.37, 0, 0], -1],
-    "dciInverse": [[52.37 / 48, 2.6, 1, 0, 0], [52.37 / 48, 2.6, 1, 0, 0], -1],
-    "linear": [[1, 1, 1, 0, 0], [1, 1, 1, 0, 0], -1],
-    "root22": [[1, 1 / 2.2, 1, 0, 0], [1, 1 / 2.2, 1, 0, 0], -1],
-    "root28": [[1, 1 / 2.8, 1, 0, 0], [1, 1 / 2.8, 1, 0, 0], -1],
+    "dci": [[1, 1 / 2.6, 48 / 52.37, 0, 0]],
+    "dciInverse": [[52.37 / 48, 2.6, 1, 0, 0]],
+    "linear": [[1, 1, 1, 0, 0]],
+    "root22": [[1, 1 / 2.2, 1, 0, 0]],
+    "root28": [[1, 1 / 2.8, 1, 0, 0]],
 } %}
+{%- set bt1886 = {"shape": "curve", "eotf": power[2.4], "oetf": curves.bt709, "inverse": curves.bt709Inverse} %}
 {%- set transfers = {
-    1: {"shape": "curve", "eotf": power[2.4], "oetf": curves.bt709, "inverse": curves.bt709Inverse},
-    2: {"shape": "curve", "eotf": power[2.4], "oetf": curves.bt709, "inverse": curves.bt709Inverse},
+    1: bt1886, 2: bt1886, 6: bt1886, 11: bt1886, 12: bt1886, 14: bt1886, 15: bt1886,
     4: {"shape": "curve", "eotf": power[2.2], "oetf": curves.root22, "inverse": power[2.2]},
     5: {"shape": "curve", "eotf": power[2.8], "oetf": curves.root28, "inverse": power[2.8]},
-    6: {"shape": "curve", "eotf": power[2.4], "oetf": curves.bt709, "inverse": curves.bt709Inverse},
     7: {"shape": "curve", "eotf": power[2.4], "oetf": curves.smpte240, "inverse": curves.smpte240Inverse},
     8: {"shape": "curve", "eotf": curves.linear, "oetf": curves.linear, "inverse": curves.linear},
     9: {"shape": "log", "decades": 2},
     10: {"shape": "log", "decades": 2.5},
-    11: {"shape": "curve", "eotf": power[2.4], "oetf": curves.bt709, "inverse": curves.bt709Inverse},
-    12: {"shape": "curve", "eotf": power[2.4], "oetf": curves.bt709, "inverse": curves.bt709Inverse},
     13: {"shape": "curve", "eotf": curves.srgbInverse, "oetf": curves.srgb, "inverse": curves.srgbInverse},
-    14: {"shape": "curve", "eotf": power[2.4], "oetf": curves.bt709, "inverse": curves.bt709Inverse},
-    15: {"shape": "curve", "eotf": power[2.4], "oetf": curves.bt709, "inverse": curves.bt709Inverse},
     16: {"shape": "pq"},
     17: {"shape": "curve", "eotf": curves.dciInverse, "oetf": curves.dci, "inverse": curves.dciInverse},
     18: {"shape": "hlg"},
@@ -171,25 +162,15 @@
 } %}
 {%- set outputs = {"sdr": 1, "hdr": 9} %}
 {%- set ranges = [0, 1, 2] %}
-{%- set locations = {
-    0: [0, 0.5],
-    1: [0, 0.5],
-    2: [0.5, 0.5],
-    3: [0, 0],
-    4: [0.5, 0],
-    5: [0, 1],
-    6: [0.5, 1],
-} %}
+{%- set locations = {0: [0, 0.5], 1: [0, 0.5], 2: [0.5, 0.5], 3: [0, 0], 4: [0.5, 0], 5: [0, 1], 6: [0.5, 1]} %}
 {%- set components = source.components %}
 {%- set bigEndian = "be" in source.flags %}
+{%- set bits = "bits" in source.flags %}
 {%- set alpha = "alpha" in source.flags %}
 {%- set yuv = source.model == "yuv" %}
-{%- set shifts = {1: 2, 2: 1, 4: 0} %}
+{%- set shifts = {1: 2, 2: 1} %}
 {%- set curved = transfer in ["curve", "identity"] %}
-
-{%- macro hex(depth) -%}
-0x{{ "%x" | format(2 ** depth - 1) }}u
-{%- endmacro %}
+{%- set rows = [["above", "top"], ["below", "bottom"]] %}
 
 {%- macro start(c) -%}
 {%- set plane, step, offset, shift, depth = components[c] -%}
@@ -198,22 +179,26 @@
 
 {%- macro value(c, window) -%}
 {%- set plane, step, offset, shift, depth = components[c] -%}
+{%- set mask = "0x%xu" | format(2 ** depth - 1) -%}
 {%- if "float" in source.flags and depth == 16 -%}
 vec2(unpackHalf2x16({{ "swap16(" ~ window ~ ")" if bigEndian else window }}.x).x, unpackHalf2x16({{ "swap16(" ~ window ~ ")" if bigEndian else window }}.y).x)
 {%- elif "float" in source.flags -%}
 uintBitsToFloat({{ "swap32(" ~ window ~ ")" if bigEndian else window }})
+{%- elif bits and depth == 10 -%}
+vec2(swap32({{ window }}) >> {{ offset }}u & {{ mask }})
+{%- elif bits -%}
+vec2({{ window }} >> place{{ c }} & {{ mask }})
 {%- elif bigEndian and shift + depth > 16 -%}
-vec2(swap32({{ window }}) >> {{ shift }}u & {{ hex(depth) }})
+vec2(swap32({{ window }}) >> {{ shift }}u & {{ mask }})
 {%- elif bigEndian and shift + depth > 8 -%}
-vec2(swap16({{ window }}) >> {{ shift }}u & {{ hex(depth) }})
+vec2(swap16({{ window }}) >> {{ shift }}u & {{ mask }})
 {%- else -%}
-vec2({{ window }}{% if shift %} >> {{ shift }}u{% endif %} & {{ hex(depth) }})
+vec2({{ window }}{% if shift %} >> {{ shift }}u{% endif %} & {{ mask }})
 {%- endif -%}
 {%- endmacro %}
 
-{%- macro planeRows(plane) %}
-    uint top{{ plane }} = (frame.planeOffset[{{ plane }}] + a.y * frame.lineSize[{{ plane }}]) >> 2;
-    uint bottom{{ plane }} = (frame.planeOffset[{{ plane }}] + b.y * frame.lineSize[{{ plane }}]) >> 2;
+{%- macro load(row, plane, index, word=0) -%}
+uvec2(words[{{ row }}{{ plane }} + {{ index }}.x{% if word %} + {{ word }}u{% endif %}], words[{{ row }}{{ plane }} + {{ index }}.y{% if word %} + {{ word }}u{% endif %}])
 {%- endmacro %}
 
 {%- macro grid(name, members, extent) %}
@@ -229,64 +214,59 @@ vec4 {{ name }}(vec2 at) {
 {%- set plane, step, offset, shift, depth = components[c] %}
 {%- if plane not in planes.done %}
 {%- set planes.done = planes.done + [plane] %}
-{{- planeRows(plane) }}
-{%- if "bits" not in source.flags and not (c == 0 and "luma" in source) and step in shifts %}
-{%- if step == 4 %}
-    uvec2 above{{ plane }} = uvec2(words[top{{ plane }} + column.x], words[top{{ plane }} + column.y]);
-    uvec2 below{{ plane }} = uvec2(words[bottom{{ plane }} + column.x], words[bottom{{ plane }} + column.y]);
-{%- else %}
+    uint top{{ plane }} = (frame.planeOffset[{{ plane }}] + a.y * frame.lineSize[{{ plane }}]) >> 2;
+    uint bottom{{ plane }} = (frame.planeOffset[{{ plane }}] + b.y * frame.lineSize[{{ plane }}]) >> 2;
+{%- if bits or c == 0 and "luma" in source %}
+{%- elif step in shifts %}
     uvec2 index{{ plane }} = column >> {{ shifts[step] }};
     uvec2 place{{ plane }} = (column & {{ 4 // step - 1 }}u) * {{ 8 * step }}u;
-    uvec2 above{{ plane }} = uvec2(words[top{{ plane }} + index{{ plane }}.x], words[top{{ plane }} + index{{ plane }}.y]) >> place{{ plane }};
-    uvec2 below{{ plane }} = uvec2(words[bottom{{ plane }} + index{{ plane }}.x], words[bottom{{ plane }} + index{{ plane }}.y]) >> place{{ plane }};
-{%- endif %}
-{%- elif "bits" not in source.flags and not (c == 0 and "luma" in source) and step % 4 == 0 %}
+{%- for row, base in rows %}
+    uvec2 {{ row }}{{ plane }} = {{ load(base, plane, "index" ~ plane) }} >> place{{ plane }};
+{%- endfor %}
+{%- elif step % 4 == 0 %}
     uvec2 index{{ plane }} = column * {{ step // 4 }}u;
 {%- set loaded = namespace(words=[]) %}
-{%- for m in members %}
-{%- set word = (start(m) | int) // 4 %}
-{%- if components[m][0] == plane and word not in loaded.words %}
-{%- set loaded.words = loaded.words + [word] %}
-    uvec2 above{{ plane }}_{{ word }} = uvec2(words[top{{ plane }} + index{{ plane }}.x + {{ word }}u], words[top{{ plane }} + index{{ plane }}.y + {{ word }}u]);
-    uvec2 below{{ plane }}_{{ word }} = uvec2(words[bottom{{ plane }} + index{{ plane }}.x + {{ word }}u], words[bottom{{ plane }} + index{{ plane }}.y + {{ word }}u]);
-{%- endif %}
+{%- for m in members if components[m][0] == plane and (start(m) | int) // 4 not in loaded.words %}
+{%- set loaded.words = loaded.words + [(start(m) | int) // 4] %}
+{%- for row, base in rows %}
+    uvec2 {{ row }}{{ plane }}_{{ loaded.words[-1] }} = {{ load(base, plane, "index" ~ plane, loaded.words[-1]) }};
 {%- endfor %}
+{%- endfor %}
+{%- else %}
+    uvec2 index{{ plane }} = column * {{ step }}u >> 2;
+    uvec2 last{{ plane }} = (column * {{ step }}u + {{ step - 1 }}u) >> 2;
+    uvec2 place{{ plane }} = (column * {{ step }}u & 3u) * 8u;
+{%- for row, base in rows %}
+    uvec2 {{ row }}{{ plane }}_1 = {{ load(base, plane, "last" ~ plane) }};
+    uvec2 {{ row }}{{ plane }}_0 = {{ load(base, plane, "index" ~ plane) }} >> place{{ plane }} | {{ row }}{{ plane }}_1 << (24u - place{{ plane }}) << 8u;
+{%- endfor %}
+    above{{ plane }}_1 >>= place{{ plane }};
+    below{{ plane }}_1 >>= place{{ plane }};
 {%- endif %}
 {%- endif %}
 {%- endfor %}
 {%- for c in members %}
 {%- set plane, step, offset, shift, depth = components[c] %}
 {%- set first = (start(c) | int) %}
-{%- if "bits" in source.flags and depth == 10 %}
-    vec2 rows{{ c }} = mix(vec2(swap32(uvec2(words[top{{ plane }} + column.x], words[top{{ plane }} + column.y])) >> {{ offset }}u & {{ hex(depth) }}), vec2(swap32(uvec2(words[bottom{{ plane }} + column.x], words[bottom{{ plane }} + column.y])) >> {{ offset }}u & {{ hex(depth) }}), f.y);
-{%- elif "bits" in source.flags %}
+{%- if bits and depth == 10 %}
+    vec2 rows{{ c }} = mix({{ value(c, load("top", plane, "column")) }}, {{ value(c, load("bottom", plane, "column")) }}, f.y);
+{%- elif bits or c == 0 and "luma" in source %}
+{%- if bits %}
     uvec2 bit{{ c }} = column * {{ step }}u{% if offset %} + {{ offset }}u{% endif %};
     uvec2 byte{{ c }} = bit{{ c }} >> 3;
     uvec2 place{{ c }} = (byte{{ c }} & 3u) * 8u + {{ 8 - depth }}u - (bit{{ c }} & 7u);
-    vec2 above{{ c }} = vec2(uvec2(words[top{{ plane }} + (byte{{ c }}.x >> 2)], words[top{{ plane }} + (byte{{ c }}.y >> 2)]) >> place{{ c }} & {{ hex(depth) }});
-    vec2 below{{ c }} = vec2(uvec2(words[bottom{{ plane }} + (byte{{ c }}.x >> 2)], words[bottom{{ plane }} + (byte{{ c }}.y >> 2)]) >> place{{ c }} & {{ hex(depth) }});
-    vec2 rows{{ c }} = mix(above{{ c }}, below{{ c }}, f.y);
-{%- elif (c == 0 and "luma" in source) or step not in shifts and step % 4 != 0 %}
-{%- if c == 0 and "luma" in source %}
+{%- else %}
     const uint group[4] = uint[]({{ source.luma[1] | join("u, ") }}u);
     uvec2 byte{{ c }} = (column >> 2) * {{ source.luma[0] }}u + uvec2(group[column.x & 3u], group[column.y & 3u]);
-{%- else %}
-    uvec2 byte{{ c }} = column * {{ step }}u{% if first %} + {{ first }}u{% endif %};
-{%- endif %}
     uvec2 place{{ c }} = (byte{{ c }} & 3u) * 8u;
-    uvec2 above{{ c }} = uvec2(words[top{{ plane }} + (byte{{ c }}.x >> 2)], words[top{{ plane }} + (byte{{ c }}.y >> 2)]) >> place{{ c }};
-    uvec2 below{{ c }} = uvec2(words[bottom{{ plane }} + (byte{{ c }}.x >> 2)], words[bottom{{ plane }} + (byte{{ c }}.y >> 2)]) >> place{{ c }};
-    vec2 rows{{ c }} = mix({{ value(c, "above" ~ c) }}, {{ value(c, "below" ~ c) }}, f.y);
+{%- endif %}
+    uvec2 word{{ c }} = byte{{ c }} >> 2;
+    vec2 rows{{ c }} = mix({{ value(c, load("top", plane, "word" ~ c) ~ " >> place" ~ c if not bits else load("top", plane, "word" ~ c)) }}, {{ value(c, load("bottom", plane, "word" ~ c) ~ " >> place" ~ c if not bits else load("bottom", plane, "word" ~ c)) }}, f.y);
 {%- elif step in shifts %}
-{%- set window = "above" ~ plane ~ (" >> " ~ 8 * first ~ "u" if first else "") %}
-{%- set lower = "below" ~ plane ~ (" >> " ~ 8 * first ~ "u" if first else "") %}
-    vec2 rows{{ c }} = mix({{ value(c, "(" ~ window ~ ")" if first else window) }}, {{ value(c, "(" ~ lower ~ ")" if first else lower) }}, f.y);
+    vec2 rows{{ c }} = mix({{ value(c, "(above" ~ plane ~ " >> " ~ 8 * first ~ "u)" if first else "above" ~ plane) }}, {{ value(c, "(below" ~ plane ~ " >> " ~ 8 * first ~ "u)" if first else "below" ~ plane) }}, f.y);
 {%- else %}
-{%- set word = first // 4 %}
-{%- set within = first % 4 %}
-{%- set window = "above" ~ plane ~ "_" ~ word ~ (" >> " ~ 8 * within ~ "u" if within else "") %}
-{%- set lower = "below" ~ plane ~ "_" ~ word ~ (" >> " ~ 8 * within ~ "u" if within else "") %}
-    vec2 rows{{ c }} = mix({{ value(c, "(" ~ window ~ ")" if within else window) }}, {{ value(c, "(" ~ lower ~ ")" if within else lower) }}, f.y);
+{%- set word, within = first // 4, first % 4 %}
+    vec2 rows{{ c }} = mix({{ value(c, "(above" ~ plane ~ "_" ~ word ~ " >> " ~ 8 * within ~ "u)" if within else "above" ~ plane ~ "_" ~ word) }}, {{ value(c, "(below" ~ plane ~ "_" ~ word ~ " >> " ~ 8 * within ~ "u)" if within else "below" ~ plane ~ "_" ~ word) }}, f.y);
 {%- endif %}
 {%- endfor %}
 {%- set slots = namespace(values=["0.0", "0.0", "0.0", "0.0"]) %}
@@ -317,15 +297,9 @@ layout(std140, set = 0, binding = 1) uniform Frame {
     vec4 bias;
     vec4 sites;
     vec4 weights;
-    vec4 curveUpper;
-    vec4 curveLower;
-    vec4 curveLimits;
-    vec4 oetfUpper;
-    vec4 oetfLower;
-    vec4 oetfLimits;
-    vec4 inverseUpper;
-    vec4 inverseLower;
-    vec4 inverseLimits;
+    vec4 curve[3];
+    vec4 oetf[3];
+    vec4 inverse[3];
     mat3 toOutput;
     vec4 light;
     vec4 luminance;
@@ -347,13 +321,13 @@ vec4 paletteColor(vec2 at) {
     vec2 f = at - base;
     uvec2 a = uvec2(max(ivec2(base), 0));
     uvec2 b = uvec2(min(ivec2(base) + 1, ivec2(frame.size.xy) - 1));
-    uvec2 column = uvec2(a.x, b.x);
-{{- planeRows(0) }}
+    uint top0 = (frame.planeOffset[0] + a.y * frame.lineSize[0]) >> 2;
+    uint bottom0 = (frame.planeOffset[0] + b.y * frame.lineSize[0]) >> 2;
     uint palette = frame.planeOffset[1] >> 2;
-    uvec2 index = column >> 2;
-    uvec2 place = (column & 3u) * 8u;
-    uvec2 above = uvec2(words[top0 + index.x], words[top0 + index.y]) >> place & 0xffu;
-    uvec2 below = uvec2(words[bottom0 + index.x], words[bottom0 + index.y]) >> place & 0xffu;
+    uvec2 index = uvec2(a.x, b.x) >> 2;
+    uvec2 place = (uvec2(a.x, b.x) & 3u) * 8u;
+    uvec2 above = {{ load("top", 0, "index") }} >> place & 0xffu;
+    uvec2 below = {{ load("bottom", 0, "index") }} >> place & 0xffu;
     vec4 left = mix(unpackUnorm4x8(words[palette + above.x]), unpackUnorm4x8(words[palette + below.x]), f.y);
     vec4 right = mix(unpackUnorm4x8(words[palette + above.y]), unpackUnorm4x8(words[palette + below.y]), f.y);
 
@@ -361,34 +335,31 @@ vec4 paletteColor(vec2 at) {
 }
 {%- elif source.model == "bayer" %}
 
-float mosaic(ivec2 at) {
+vec4 mosaic(int y, ivec4 x) {
     ivec2 last = ivec2(frame.size.xy) - 1;
-    uvec2 inside = uvec2(last - abs(last - abs(at)));
-{%- if components[0][1] == 1 %}
-    uint address = frame.planeOffset[0] + inside.y * frame.lineSize[0] + inside.x;
+    uvec4 inside = uvec4(last.x - abs(last.x - abs(x)));
+    uint row = (frame.planeOffset[0] + uint(last.y - abs(last.y - abs(y))) * frame.lineSize[0]) >> 2;
+{%- set step = components[0][1] %}
+    uvec4 texels = uvec4(words[row + inside.x / {{ 4 // step }}u], words[row + inside.y / {{ 4 // step }}u], words[row + inside.z / {{ 4 // step }}u], words[row + inside.w / {{ 4 // step }}u]) >> inside % {{ 4 // step }}u * {{ 8 * step }}u;
 
-    return float(words[address >> 2] >> ((address & 3u) * 8u) & 0xffu);
-{%- else %}
-    uint address = frame.planeOffset[0] + inside.y * frame.lineSize[0] + inside.x * 2u;
-    uvec2 window = uvec2(words[address >> 2] >> ((address & 2u) * 8u));
-
-    return {{ "float(swap16(window).x)" if bigEndian else "float(window.x & 0xffffu)" }};
-{%- endif %}
+    return vec4({{ "texels & 0xffu" if step == 1 else "(texels & 0xffu) << 8 | texels >> 8 & 0xffu" if bigEndian else "texels & 0xffffu" }});
 }
 
-vec3 demosaic(ivec2 at) {
+vec3 demosaic(vec4 above, vec4 middle, vec4 below, float right, ivec2 at) {
     ivec2 red = ivec2(frame.sites.xy);
     ivec2 phase = at & 1;
-    float here = mosaic(at);
-    float horizontal = (mosaic(at - ivec2(1, 0)) + mosaic(at + ivec2(1, 0))) / 2.0;
-    float vertical = (mosaic(at - ivec2(0, 1)) + mosaic(at + ivec2(0, 1))) / 2.0;
+    vec3 u = mix(above.xyz, above.yzw, right);
+    vec3 m = mix(middle.xyz, middle.yzw, right);
+    vec3 d = mix(below.xyz, below.yzw, right);
+    float horizontal = (m.x + m.z) / 2.0;
+    float vertical = (u.y + d.y) / 2.0;
     float cross = (horizontal + vertical) / 2.0;
-    float diagonal = (mosaic(at + ivec2(-1, -1)) + mosaic(at + ivec2(1, -1)) + mosaic(at + ivec2(-1, 1)) + mosaic(at + ivec2(1, 1))) / 4.0;
+    float diagonal = (u.x + u.z + d.x + d.z) / 4.0;
     float onRed = float(all(equal(phase, red)));
     float onBlue = float(!any(equal(phase, red)));
-    vec3 onGreen = mix(vec3(vertical, here, horizontal), vec3(horizontal, here, vertical), float(phase.y == red.y));
+    vec3 onGreen = mix(vec3(vertical, m.y, horizontal), vec3(horizontal, m.y, vertical), float(phase.y == red.y));
 
-    return onRed * vec3(here, cross, diagonal) + onBlue * vec3(diagonal, cross, here) + (1.0 - onRed - onBlue) * onGreen;
+    return onRed * vec3(m.y, cross, diagonal) + onBlue * vec3(diagonal, cross, m.y) + (1.0 - onRed - onBlue) * onGreen;
 }
 
 vec4 bayerCodes(vec2 at) {
@@ -396,8 +367,13 @@ vec4 bayerCodes(vec2 at) {
     vec2 f = at - base;
     ivec2 a = max(ivec2(base), 0);
     ivec2 b = min(ivec2(base) + 1, ivec2(frame.size.xy) - 1);
-    vec3 top = mix(demosaic(a), demosaic(ivec2(b.x, a.y)), f.x);
-    vec3 bottom = mix(demosaic(ivec2(a.x, b.y)), demosaic(b), f.x);
+    ivec4 x = a.x + ivec4(-1, 0, 1, 2);
+    vec4 r0 = mosaic(a.y - 1, x), r1 = mosaic(a.y, x), r2 = mosaic(a.y + 1, x), r3 = mosaic(a.y + 2, x);
+    float right = float(b.x > a.x);
+    float down = float(b.y > a.y);
+    vec4 s0 = mix(r0, r1, down), s1 = mix(r1, r2, down), s2 = mix(r2, r3, down);
+    vec3 top = mix(demosaic(r0, r1, r2, 0.0, a), demosaic(r0, r1, r2, right, ivec2(b.x, a.y)), f.x);
+    vec3 bottom = mix(demosaic(s0, s1, s2, 0.0, ivec2(a.x, b.y)), demosaic(s0, s1, s2, right, b), f.x);
 
     return vec4(mix(top, bottom, f.y), 0.0);
 }
@@ -409,16 +385,16 @@ vec4 bayerCodes(vec2 at) {
 {%- endif %}
 {%- if transfer == "curve" or system == "cl" and curved %}
 
-vec3 piece(vec3 x, vec4 upper, vec4 lower, vec4 limits) {
+vec3 piece(vec3 x, vec4 segments[3]) {
     vec3 v = max(x, 0.0);
-    bvec3 low = lessThanEqual(v, vec3(limits.z));
-    vec3 scale = mix(vec3(upper.x), vec3(lower.x), low);
-    vec3 power = mix(vec3(upper.y), vec3(lower.y), low);
-    vec3 inputScale = mix(vec3(upper.z), vec3(lower.z), low);
-    vec3 inputOffset = mix(vec3(upper.w), vec3(lower.w), low);
-    vec3 offset = mix(vec3(limits.x), vec3(limits.y), low);
+    bvec3 low = lessThanEqual(v, vec3(segments[2].z));
+    vec3 scale = mix(vec3(segments[0].x), vec3(segments[1].x), low);
+    vec3 power = mix(vec3(segments[0].y), vec3(segments[1].y), low);
+    vec3 inputScale = mix(vec3(segments[0].z), vec3(segments[1].z), low);
+    vec3 inputOffset = mix(vec3(segments[0].w), vec3(segments[1].w), low);
+    vec3 offset = mix(vec3(segments[2].x), vec3(segments[2].y), low);
 
-    return min(scale * exp2(power * log2(v * inputScale + inputOffset)) - offset, vec3(limits.w));
+    return min(scale * exp2(power * log2(v * inputScale + inputOffset)) - offset, vec3(segments[2].w));
 }
 {%- endif %}
 {%- if transfer == "pq" %}
@@ -444,7 +420,7 @@ vec3 hlgDisplay(vec3 scene) {
 
 vec3 encodeLight(vec3 light) {
 {%- if curved %}
-    return piece(light, frame.oetfUpper, frame.oetfLower, frame.oetfLimits);
+    return piece(light, frame.oetf);
 {%- elif transfer == "log" %}
     vec3 v = max(light, vec3(1e-30));
 
@@ -462,7 +438,7 @@ vec3 encodeLight(vec3 light) {
 
 vec3 decodeLight(vec3 signal) {
 {%- if curved %}
-    return piece(signal, frame.inverseUpper, frame.inverseLower, frame.inverseLimits);
+    return piece(signal, frame.inverse);
 {%- elif transfer == "log" %}
     return mix(exp2((signal - 1.0) * (3.32192809489 * frame.light.x)), vec3(0.0), lessThanEqual(signal, vec3(0.0)));
 {%- elif transfer == "pq" %}
@@ -499,26 +475,23 @@ void main() {
 {%- else %}
     vec4 codes = pixelCodes(at);
 {%- endif %}
-{%- if system == "cl" %}
-    vec3 signal = constantLuminance(frame.decode * codes.xyz + frame.bias.xyz);
-{%- else %}
-    vec3 signal = frame.decode * codes.xyz + frame.bias.xyz;
-{%- endif %}
+{%- set decoded = "frame.decode * codes.xyz" if yuv else "vec3(codes.x * frame.decode[0].x)" if source.model == "gray" else "codes.xyz * vec3(frame.decode[0].x, frame.decode[1].y, frame.decode[2].z)" %}
+    vec3 signal = {{ "constantLuminance(" ~ decoded ~ " + frame.bias.xyz)" if system == "cl" else decoded ~ " + frame.bias.xyz" }};
     float alpha = {{ "codes.w * frame.bias.w" if alpha else "1.0" }};
 {%- endif %}
 {%- if transfer == "identity" %}
 
-    fColor = vec4(clamp(signal, 0.0, frame.curveLimits.w), alpha);
+    fColor = vec4(clamp(signal, 0.0, frame.curve[2].w), alpha);
 {%- elif transfer == "curve" and conversion == "same" %}
 
-    fColor = vec4(piece(signal, frame.curveUpper, frame.curveLower, frame.curveLimits), alpha);
+    fColor = vec4(piece(signal, frame.curve), alpha);
 {%- else %}
 {%- if system == "ictcp" and transfer == "pq" %}
     vec3 light = {{ inverse_matrix([[1688, 2146, 262], [683, 2951, 462], [99, 309, 3688]], 4096) }} * pqLight({{ inverse_matrix([[2048, 2048, 0], [6610, -13613, 7003], [17933, -17390, -543]], 4096) }} * signal) * frame.light.y;
 {%- elif system == "ictcp" and transfer == "hlg" %}
     vec3 light = hlgDisplay({{ inverse_matrix([[1688, 2146, 262], [683, 2951, 462], [99, 309, 3688]], 4096) }} * hlgScene({{ inverse_matrix([[2048, 2048, 0], [3625, -7465, 3840], [9500, -9212, -288]], 4096) }} * signal));
 {%- elif transfer == "curve" %}
-    vec3 light = piece(signal, frame.curveUpper, frame.curveLower, frame.curveLimits);
+    vec3 light = piece(signal, frame.curve);
 {%- elif transfer == "log" %}
     vec3 light = mix(exp2((signal - 1.0) * (3.32192809489 * frame.light.x)), vec3(0.0), lessThanEqual(signal, vec3(0.0)));
 {%- elif transfer == "pq" %}

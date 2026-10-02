@@ -105,6 +105,10 @@ def layouts(module):
     return every
 
 
+def segments(piece):
+    return [piece[0], piece[0], -1] if len(piece) == 1 else piece
+
+
 def window(shift, depth):
     return 1 if shift + depth <= 8 else 2 if shift + depth <= 16 else 4
 
@@ -292,7 +296,7 @@ def codes(template, header):
         "",
         "static constexpr VideoTransfer videoTransfers[] = {",
     ]
-    flat = lambda piece: numbers([*piece[0], *piece[1], piece[2]]) if piece else numbers([0] * 11)
+    flat = lambda piece: numbers([*segments(piece)[0], *segments(piece)[1], segments(piece)[2]]) if piece else numbers([0] * 11)
     for code, entry in module.transfers.items():
         lines.append(f'    {{{code}, "{entry["shape"]}", {flat(entry.get("eotf"))}, {flat(entry.get("oetf"))}, {flat(entry.get("inverse"))}, {entry.get("decades", 0)}}},')
     lines += ["};", ""]
