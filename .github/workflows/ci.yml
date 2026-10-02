@@ -82,10 +82,18 @@ jobs:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Give lavapipe its dma-bufs
+        # lavapipe exports a fence as a sync file, which the tools wait for
+        # in their event loop, only when it can make dma-bufs through udmabuf
+        run: |
+          [ -e /dev/udmabuf ] || sudo modprobe udmabuf || true
+          test -e /dev/udmabuf
+          sudo chmod 666 /dev/udmabuf
+
       - name: Build the tools and run the scenarios
         run: |
           set -o pipefail
-          docker run --rm \
+          docker run --rm --device /dev/udmabuf \
             --volume "$GITHUB_WORKSPACE:/workspace" --workdir /workspace \
             "$GCC_IMAGE" sh dev/ci_linux.sh test gcc \
             2>&1 | tee "$RUNNER_TEMP/tests-glibc.log"
@@ -184,10 +192,18 @@ jobs:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Give lavapipe its dma-bufs
+        # lavapipe exports a fence as a sync file, which the tools wait for
+        # in their event loop, only when it can make dma-bufs through udmabuf
+        run: |
+          [ -e /dev/udmabuf ] || sudo modprobe udmabuf || true
+          test -e /dev/udmabuf
+          sudo chmod 666 /dev/udmabuf
+
       - name: Build the tools and run the scenarios
         run: |
           set -o pipefail
-          docker run --rm \
+          docker run --rm --device /dev/udmabuf \
             --volume "$GITHUB_WORKSPACE:/workspace" --workdir /workspace \
             "$UBUNTU_IMAGE" sh dev/ci_linux.sh asan clang \
             2>&1 | tee "$RUNNER_TEMP/tests-asan.log"
@@ -230,10 +246,18 @@ jobs:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Give lavapipe its dma-bufs
+        # lavapipe exports a fence as a sync file, which the tools wait for
+        # in their event loop, only when it can make dma-bufs through udmabuf
+        run: |
+          [ -e /dev/udmabuf ] || sudo modprobe udmabuf || true
+          test -e /dev/udmabuf
+          sudo chmod 666 /dev/udmabuf
+
       - name: Build the tools and run the scenarios
         run: |
           set -o pipefail
-          docker run --rm \
+          docker run --rm --device /dev/udmabuf \
             --volume "$GITHUB_WORKSPACE:/workspace" --workdir /workspace \
             "$UBUNTU_IMAGE" sh dev/ci_linux.sh ubsan clang \
             2>&1 | tee "$RUNNER_TEMP/tests-ubsan.log"
@@ -276,10 +300,18 @@ jobs:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Give lavapipe its dma-bufs
+        # lavapipe exports a fence as a sync file, which the tools wait for
+        # in their event loop, only when it can make dma-bufs through udmabuf
+        run: |
+          [ -e /dev/udmabuf ] || sudo modprobe udmabuf || true
+          test -e /dev/udmabuf
+          sudo chmod 666 /dev/udmabuf
+
       - name: Build the tools and run the scenarios with coverage
         run: |
           set -o pipefail
-          docker run --rm \
+          docker run --rm --device /dev/udmabuf \
             --volume "$GITHUB_WORKSPACE:/workspace" --workdir /workspace \
             "$UBUNTU_IMAGE" sh dev/ci_linux.sh coverage clang \
             2>&1 | tee "$RUNNER_TEMP/coverage-ubuntu.log"

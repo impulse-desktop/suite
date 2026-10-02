@@ -2,6 +2,7 @@
 
 #include "ui.h"
 #include "error.h"
+#include "pooled.h"
 #include "timing.h"
 #include "decoder.h"
 
@@ -266,6 +267,7 @@ namespace {
         Ui* ui = nullptr;
         Channel* jobs = nullptr;
         Channel* results = nullptr;
+        Thread* workers[workerCount] = {};
         size_t inFlight = 0;
         u64 showRequest = 0;
         bool showPending = false;
@@ -287,6 +289,7 @@ namespace {
         float tracedScrollY = 0.f;
 
         void startWorkers(ObjPool& pool);
+        void stopWorkers();
         void accept();
         void submit();
         void setThumb(size_t index, u32 side, Image& image);
@@ -616,7 +619,26 @@ void ViewApp::startWorkers(ObjPool& pool) {
     results = Channel::create(&pool, workerCount);
 
     for (size_t i = 0; i < workerCount; i++) {
-        Thread::create(&pool, *pool.make<Worker>(jobs));
+        workers[i] = Thread::create(&pool, *pool.make<Worker>(jobs));
+    }
+
+    pooledGuard(pool, [this] {
+        stopWorkers();
+    });
+}
+
+void ViewApp::stopWorkers() {
+    jobs->close();
+
+    for (Thread* worker : workers) {
+        worker->join();
+    }
+
+    accept();
+
+    if (shown) {
+        delete shown->owner;
+        shown = nullptr;
     }
 }
 

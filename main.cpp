@@ -91,7 +91,7 @@ int main(int argc, char** argv) {
         return usage();
     }
 
-    ObjPool::Ref pool = ObjPool::fromMemory();
+    ObjPool* pool = ObjPool::fromMemoryRaw();
     int result;
 
     try {
@@ -101,6 +101,10 @@ int main(int argc, char** argv) {
 
         result = 1;
     }
+
+#if defined(IM_FOR_TESTS)
+    delete pool;
+#endif
 
     exit(result);
 }

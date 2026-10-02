@@ -6,6 +6,7 @@
 
 #include <std/ios/sys.h>
 #include <std/sys/crt.h>
+#include <std/lib/list.h>
 #include <std/sys/throw.h>
 #include <std/lib/vector.h>
 #include <std/ptr/scoped.h>
@@ -99,7 +100,7 @@ namespace {
         void run() override;
     };
 
-    struct Surfaces {
+    struct Surfaces: public IntrusiveNode {
         ObjPool* pool;
         u32 width;
         u32 height;
@@ -215,6 +216,7 @@ namespace {
         ALCcontext* context = nullptr;
         ALuint source = 0;
         ALuint buffers[audioBuffers] = {};
+        LPALEVENTCALLBACKSOFT eventCallback = nullptr;
         LPALGETSOURCEDVSOFT sourceOffsets = nullptr;
         SwrContext* resampler = nullptr;
         AVChannelLayout layout{};
@@ -258,6 +260,7 @@ namespace {
         bool hasAudio;
         double duration;
         Surfaces* surfaces = nullptr;
+        IntrusiveList sets;
         Vector<Surfaces*> spent;
         Vector<Frame*> waiting;
         Frame* shown = nullptr;
@@ -278,6 +281,7 @@ namespace {
         Buffer error;
 
         explicit Screen(Player* player);
+        ~Screen() noexcept;
         void run() override;
         void resume();
         bool frame();
@@ -319,8 +323,11 @@ namespace {
         Video* video;
         Audio* audio;
         Screen* screen;
+        Thread* videoThread;
+        Thread* audioThread;
 
         Player(ObjPool& pool, Ui& ui, const char* path);
+        ~Player() noexcept;
         void post(Message* message);
     };
 
@@ -816,7 +823,8 @@ Audio::Audio(Player* player_)
     }
 
     LPALEVENTCONTROLSOFT eventControl = (LPALEVENTCONTROLSOFT)alGetProcAddress("alEventControlSOFT");
-    LPALEVENTCALLBACKSOFT eventCallback = (LPALEVENTCALLBACKSOFT)alGetProcAddress("alEventCallbackSOFT");
+
+    eventCallback = (LPALEVENTCALLBACKSOFT)alGetProcAddress("alEventCallbackSOFT");
 
     sourceOffsets = (LPALGETSOURCEDVSOFT)alGetProcAddress("alGetSourcedvSOFT");
 
@@ -840,7 +848,7 @@ Audio::Audio(Player* player_)
 
     eventControl(2, types, AL_TRUE);
     eventCallback(audioEvent, player);
-    pooledGuard(*player->pool, [eventCallback] {
+    pooledGuard(*player->pool, [this] {
         eventCallback(nullptr, nullptr);
     });
     checkAl();
@@ -868,6 +876,7 @@ void Audio::run() {
             if (cast<Stop>(message.ptr)) {
                 if (stream.index >= 0) {
                     alSourceStop(source);
+                    eventCallback(nullptr, nullptr);
                 }
 
                 return;
@@ -1149,6 +1158,18 @@ Screen::Screen(Player* player_)
     player->ui->trace(StringView(StringBuilder() << StringView(u8"opened duration_ms=") << milliseconds(duration) << StringView(u8" video=") << (i64)hasVideo << StringView(u8" audio=") << (i64)hasAudio));
 }
 
+Screen::~Screen() noexcept {
+    for (Frame* frame : waiting) {
+        delete frame;
+    }
+
+    delete shown;
+
+    while (!sets.empty()) {
+        delete static_cast<Surfaces*>(sets.popFront())->pool;
+    }
+}
+
 void Screen::run() {
     plt::Scheduler& scheduler = *player->ui->platform()->scheduler();
 
@@ -1223,6 +1244,7 @@ void Screen::drain() {
 u64 Screen::present() {
     for (Surfaces* set : spent) {
         player->ui->trace(StringView(StringBuilder() << StringView(u8"unmapped ") << (i64)set->width << StringView(u8"x") << (i64)set->height));
+        set->unlink();
         delete set->pool;
     }
 
@@ -1370,6 +1392,7 @@ void Screen::makeSurfaces(u32 width, u32 height) {
     Surfaces* set = owner->make<Surfaces>(player, owner.ptr, width, height);
 
     owner.drop();
+    sets.pushBack(set);
     surfaces = set;
 
     for (VideoImage* image : set->images) {
@@ -1602,9 +1625,26 @@ Player::Player(ObjPool& pool_, Ui& ui_, const char* path_)
     , video(pool->make<Video>(this))
     , audio(pool->make<Audio>(this))
     , screen(pool->make<Screen>(this))
+    , videoThread(Thread::create(pool, *video, pool->allocateOverAligned(threadStack, 4096), threadStack))
+    , audioThread(Thread::create(pool, *audio, pool->allocateOverAligned(threadStack, 4096), threadStack))
 {
-    Thread::create(pool, *video, pool->allocateOverAligned(threadStack, 4096), threadStack);
-    Thread::create(pool, *audio, pool->allocateOverAligned(threadStack, 4096), threadStack);
+}
+
+Player::~Player() noexcept {
+    videoInbox->enqueue(new Stop());
+    audioInbox->enqueue(new Stop());
+    videoThread->join();
+    audioThread->join();
+
+    Channel* inboxes[] = {videoInbox, audioInbox, screenInbox};
+
+    for (Channel* inbox : inboxes) {
+        void* item;
+
+        while (inbox->tryDequeue(&item)) {
+            delete (Message*)item;
+        }
+    }
 }
 
 void Player::post(Message* message) {
