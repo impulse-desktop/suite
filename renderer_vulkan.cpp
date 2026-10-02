@@ -95,9 +95,16 @@ namespace {
     struct VulkanImage;
     struct Gpu;
 
-    struct ImageUse {
-        VulkanImage* image;
-        u64 serial;
+    struct Flight final: public plt::PollCallback {
+        Gpu* gpu;
+        plt::PollWaiter waiter;
+        u64 serial = 0;
+        bool busy = false;
+        Vector<VulkanImage*> images;
+
+        explicit Flight(Gpu* gpu);
+        ~Flight() noexcept;
+        void ready(PollFD event) override;
     };
 
     struct PollGpu final: public plt::TimerCallback {
@@ -117,11 +124,13 @@ namespace {
         VkQueue queue = VK_NULL_HANDLE;
         VkDescriptorPool descPool = VK_NULL_HANDLE;
         Presenter present;
+        ObjPool* pool = nullptr;
         plt::Platform* platform = nullptr;
         plt::Window* window = nullptr;
         PollGpu* timer = nullptr;
+        PFN_vkGetFenceFdKHR fenceFd = nullptr;
         Vector<VulkanImage*> drawn;
-        Vector<ImageUse> uses;
+        Vector<Flight*> flights;
         u64 submitted = 0;
         u64 completed = 0;
         bool acquired = false;
@@ -165,8 +174,8 @@ namespace {
         void createSwapchain(u32 width, u32 height);
         void createSceneTarget(u32 width, u32 height);
         bool acquireFrame();
-        void poll();
-        void schedule();
+        void track(VkFence fence);
+        void landed(u64 serial);
         void recordImages(VkCommandBuffer command);
         void frameRender(ImDrawData* draw);
         void framePresent();
@@ -726,8 +735,11 @@ void Gpu::createSwapchain(u32 width, u32 height) {
         cai.commandBufferCount = 1;
         vkc(vkAllocateCommandBuffers(device, &cai, &frame.commandBuffer));
 
+        VkExportFenceCreateInfo exportInfo{VK_STRUCTURE_TYPE_EXPORT_FENCE_CREATE_INFO};
         VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
 
+        exportInfo.handleTypes = VK_EXTERNAL_FENCE_HANDLE_TYPE_SYNC_FD_BIT;
+        fenceInfo.pNext = &exportInfo;
         fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
         vkc(vkCreateFence(device, &fenceInfo, alloc, &frame.fence));
         VkSemaphoreCreateInfo semaphoreInfo{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
@@ -939,11 +951,9 @@ void Gpu::destroyLinearHdr() {
 }
 
 bool Gpu::acquireFrame() {
-    poll();
     Sync& sync = present.syncs.mut(present.syncIndex);
     if (sync.serial > completed) {
         retry = true;
-        schedule();
         return false;
     }
     if (!acquired) {
@@ -951,7 +961,7 @@ bool Gpu::acquireFrame() {
         if (e == VK_NOT_READY || e == VK_TIMEOUT || e == VK_ERROR_OUT_OF_DATE_KHR) {
             rebuild = e == VK_ERROR_OUT_OF_DATE_KHR;
             retry = true;
-            schedule();
+            platform->poller()->timeout(1000, *timer);
             return false;
         }
         vkc(e);
@@ -961,7 +971,6 @@ bool Gpu::acquireFrame() {
     Frame& frame = present.frames.mut(present.frameIndex);
     if (frame.serial > completed) {
         retry = true;
-        schedule();
         return false;
     }
     retry = false;
@@ -1035,7 +1044,7 @@ void Gpu::frameRender(ImDrawData* draw) {
     vkc(vkQueueSubmit(queue, 1, &si, fd.fence));
     fd.serial = ++submitted;
     sync.serial = submitted;
-    schedule();
+    track(fd.fence);
 }
 
 void Gpu::framePresent() {
@@ -1135,11 +1144,12 @@ void Gpu::setupVulkan(ObjPool& pool, const GpuOptions& wants) {
 
     const char* wantedExts[] = {
         VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+        VK_KHR_EXTERNAL_FENCE_FD_EXTENSION_NAME,
         VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
         VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME,
         VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME,
     };
-    u32 wantedCount = wants.sharedBuffer ? 4 : 1;
+    u32 wantedCount = wants.sharedBuffer ? 5 : 2;
     Vector<const char*> devExts;
 
     for (u32 i = 0; i < wantedCount; i++) {
@@ -1148,6 +1158,16 @@ void Gpu::setupVulkan(ObjPool& pool, const GpuOptions& wants) {
         }
 
         devExts.pushBack(wantedExts[i]);
+    }
+
+    VkPhysicalDeviceExternalFenceInfo fenceQuery{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_FENCE_INFO};
+    VkExternalFenceProperties fenceSupport{VK_STRUCTURE_TYPE_EXTERNAL_FENCE_PROPERTIES};
+
+    fenceQuery.handleType = VK_EXTERNAL_FENCE_HANDLE_TYPE_SYNC_FD_BIT;
+    vkGetPhysicalDeviceExternalFenceProperties(phys, &fenceQuery, &fenceSupport);
+
+    if (!(fenceSupport.externalFenceFeatures & VK_EXTERNAL_FENCE_FEATURE_EXPORTABLE_BIT)) {
+        fail(StringView(u8"vulkan cannot export fences as sync files"));
     }
 
     if (hasDeviceExtension(phys, VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME)) {
@@ -1179,6 +1199,10 @@ void Gpu::setupVulkan(ObjPool& pool, const GpuOptions& wants) {
         vkDestroyDevice(device, alloc);
     });
     vkGetDeviceQueue(device, queueFamily, 0, &queue);
+    fenceFd = (PFN_vkGetFenceFdKHR)vkGetDeviceProcAddr(device, "vkGetFenceFdKHR");
+    if (!fenceFd) {
+        fail(StringView(u8"vulkan lacks vkGetFenceFdKHR"));
+    }
     if (hostAlignment) {
         hostProperties = (PFN_vkGetMemoryHostPointerPropertiesEXT)vkGetDeviceProcAddr(device, "vkGetMemoryHostPointerPropertiesEXT");
     }
@@ -1750,44 +1774,90 @@ PollGpu::PollGpu(Gpu* value)
 }
 
 void PollGpu::ready() {
-    gpu->poll();
     if (gpu->retry) {
         gpu->window->requestFrame();
     }
-    gpu->schedule();
 }
 
-void Gpu::schedule() {
-    if (retry || !uses.empty()) {
-        platform->poller()->timeout(1000, *timer);
+Flight::Flight(Gpu* value)
+    : gpu(value)
+{
+    waiter.fd.fd = -1;
+    waiter.fd.flags = PollFlag::In;
+    waiter.callback = this;
+}
+
+Flight::~Flight() noexcept {
+    if (waiter.fd.fd >= 0) {
+        gpu->platform->poller()->cancel(waiter);
+        close(waiter.fd.fd);
     }
 }
 
-void Gpu::poll() {
-    for (const Frame& frame : present.frames) {
-        if (frame.serial > completed) {
-            VkResult status = vkGetFenceStatus(device, frame.fence);
-            if (status == VK_SUCCESS) {
-                completed = frame.serial;
-            } else if (status != VK_NOT_READY) {
-                vkc(status);
-            }
+void Flight::ready(PollFD) {
+    close(waiter.fd.fd);
+    waiter.fd.fd = -1;
+    gpu->landed(serial);
+}
+
+void Gpu::track(VkFence fence) {
+    Flight* flight = nullptr;
+    for (Flight* candidate : flights) {
+        if (!candidate->busy) {
+            flight = candidate;
+            break;
         }
     }
-    Vector<ImageUse> done;
-    size_t kept = 0;
-    for (const ImageUse& use : uses) {
-        if (use.serial <= completed) {
-            done.pushBack(use);
-        } else {
-            uses.mut(kept++) = use;
+    if (!flight) {
+        flight = pool->make<Flight>(this);
+        flights.pushBack(flight);
+    }
+    flight->serial = submitted;
+    flight->busy = true;
+    for (VulkanImage* image : drawn) {
+        if (image->retired) {
+            flight->images.pushBack(image);
         }
     }
-    while (uses.length() > kept) {
-        uses.popBack();
+    drawn.clear();
+
+    VkFenceGetFdInfoKHR info{VK_STRUCTURE_TYPE_FENCE_GET_FD_INFO_KHR};
+    int fd = -1;
+
+    info.fence = fence;
+    info.handleType = VK_EXTERNAL_FENCE_HANDLE_TYPE_SYNC_FD_BIT;
+    vkc(fenceFd(device, &info, &fd));
+    if (fd < 0) {
+        landed(submitted);
+        return;
     }
-    for (const ImageUse& use : done) {
-        use.image->retired->run();
+    flight->waiter.fd.fd = fd;
+    platform->poller()->arm(flight->waiter);
+}
+
+void Gpu::landed(u64 serial) {
+    if (serial > completed) {
+        completed = serial;
+    }
+    Vector<VulkanImage*> done;
+    for (Flight* flight : flights) {
+        if (!flight->busy || flight->serial > completed) {
+            continue;
+        }
+        if (flight->waiter.fd.fd >= 0) {
+            platform->poller()->cancel(flight->waiter);
+            close(flight->waiter.fd.fd);
+            flight->waiter.fd.fd = -1;
+        }
+        done.append(flight->images.begin(), flight->images.end());
+        flight->images.clear();
+        flight->busy = false;
+    }
+    for (VulkanImage* image : done) {
+        image->retired->run();
+    }
+    if (retry) {
+        window->requestFrame();
     }
 }
 
@@ -1795,11 +1865,7 @@ void Gpu::recordImages(VkCommandBuffer command) {
     for (VulkanImage* image : drawn) {
         image->record(command);
         image->lastUse = submitted + 1;
-        if (image->retired) {
-            uses.pushBack(ImageUse{image, submitted + 1});
-        }
     }
-    drawn.clear();
 }
 
 bool VulkanImage::importHost(size_t size) {
@@ -1955,8 +2021,10 @@ VulkanImage::~VulkanImage() noexcept {
     for (const VulkanImage* image : gpu->drawn) {
         STD_INSIST(image != this);
     }
-    for (const ImageUse& use : gpu->uses) {
-        STD_INSIST(use.image != this);
+    for (const Flight* flight : gpu->flights) {
+        for (const VulkanImage* image : flight->images) {
+            STD_INSIST(image != this);
+        }
     }
     if (lastUse > gpu->completed) {
         vkDeviceWaitIdle(gpu->device);
@@ -2356,6 +2424,7 @@ Renderer* createVulkanRenderer(ObjPool& pool, plt::Platform& platform, plt::Wind
         wants.deviceUuid = static_cast<DmaImage*>(options.shared)->deviceUuid;
     }
     Gpu& gpu = *Gpu::create(pool, wants);
+    gpu.pool = &pool;
     gpu.platform = &platform;
     gpu.window = &window;
     gpu.timer = pool.make<PollGpu>(&gpu);
