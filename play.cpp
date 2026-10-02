@@ -210,9 +210,11 @@ namespace {
         Slots slots;
         Stream stream;
         Vector<VideoImage*> idle;
+        AVFrame* last;
         u64 generation = 1;
         double target = 0.;
         double pts = 0.;
+        double lastPts = 0.;
         double next = 0.;
         bool decoded = false;
         bool ended = false;
@@ -800,10 +802,16 @@ double Stream::timeBase() const {
 Video::Video(Player* player_)
     : player(player_)
     , stream(player_, AVMEDIA_TYPE_VIDEO, &slots)
+    , last(av_frame_alloc())
 {
     pooledGuard(*player->pool, [this] {
+        av_frame_free(&last);
         av_buffer_pool_uninit(&slots.pool);
     });
+
+    if (!last) {
+        fail(StringView(u8"cannot allocate a video frame"));
+    }
 
     for (size_t i = 0; i < framePermits; i++) {
         idle.pushBack(player->pool->make<VideoImage>(player));
@@ -854,6 +862,7 @@ void Video::apply(const Control& control) {
     }
 
     stream.seek(target);
+    av_frame_unref(last);
     decoded = false;
     ended = false;
 }
@@ -870,6 +879,15 @@ bool Video::step() {
     int e = stream.receive();
 
     if (e == AVERROR(EAGAIN)) {
+        return true;
+    }
+
+    if (e == AVERROR_EOF && last->buf[0]) {
+        av_frame_move_ref(stream.frame, last);
+        pts = lastPts;
+        decoded = true;
+        deliver();
+
         return true;
     }
 
@@ -891,11 +909,14 @@ bool Video::step() {
     next = pts + length;
 
     if (length > 0. ? pts + length <= target : pts < target) {
-        av_frame_unref(frame);
+        av_frame_unref(last);
+        av_frame_move_ref(last, frame);
+        lastPts = pts;
 
         return true;
     }
 
+    av_frame_unref(last);
     decoded = true;
     deliver();
 
