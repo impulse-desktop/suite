@@ -10,6 +10,7 @@
 #include <std/str/builder.h>
 #include <std/thr/runable.h>
 #include <std/mem/obj_pool.h>
+#include <std/mem/small_obj_allocator.h>
 
 #include <fcntl.h>
 #include <stdlib.h>
@@ -97,13 +98,11 @@ namespace {
 
     struct Flight final: public plt::PollCallback {
         Gpu* gpu;
+        u64 serial;
         plt::PollWaiter waiter;
-        u64 serial = 0;
-        bool busy = false;
         Vector<VulkanImage*> images;
 
-        explicit Flight(Gpu* gpu);
-        ~Flight() noexcept;
+        Flight(Gpu* gpu, u64 serial, int fd);
         void ready(PollFD event) override;
     };
 
@@ -124,13 +123,12 @@ namespace {
         VkQueue queue = VK_NULL_HANDLE;
         VkDescriptorPool descPool = VK_NULL_HANDLE;
         Presenter present;
-        ObjPool* pool = nullptr;
         plt::Platform* platform = nullptr;
         plt::Window* window = nullptr;
         PollGpu* timer = nullptr;
+        SmallObjAllocator* flights = nullptr;
         PFN_vkGetFenceFdKHR fenceFd = nullptr;
         Vector<VulkanImage*> drawn;
-        Vector<Flight*> flights;
         u64 submitted = 0;
         u64 completed = 0;
         bool acquired = false;
@@ -175,7 +173,7 @@ namespace {
         void createSceneTarget(u32 width, u32 height);
         bool acquireFrame();
         void track(VkFence fence);
-        void landed(u64 serial);
+        void landed(Flight* flight);
         void recordImages(VkCommandBuffer command);
         void frameRender(ImDrawData* draw);
         void framePresent();
@@ -1779,80 +1777,53 @@ void PollGpu::ready() {
     }
 }
 
-Flight::Flight(Gpu* value)
-    : gpu(value)
+Flight::Flight(Gpu* gpu_, u64 serial_, int fd)
+    : gpu(gpu_)
+    , serial(serial_)
 {
-    waiter.fd.fd = -1;
+    waiter.fd.fd = fd;
     waiter.fd.flags = PollFlag::In;
     waiter.callback = this;
-}
 
-Flight::~Flight() noexcept {
-    if (waiter.fd.fd >= 0) {
-        gpu->platform->poller()->cancel(waiter);
-        close(waiter.fd.fd);
+    for (VulkanImage* image : gpu->drawn) {
+        if (image->retired) {
+            images.pushBack(image);
+        }
     }
 }
 
 void Flight::ready(PollFD) {
     close(waiter.fd.fd);
-    waiter.fd.fd = -1;
-    gpu->landed(serial);
+    gpu->landed(this);
 }
 
 void Gpu::track(VkFence fence) {
-    Flight* flight = nullptr;
-    for (Flight* candidate : flights) {
-        if (!candidate->busy) {
-            flight = candidate;
-            break;
-        }
-    }
-    if (!flight) {
-        flight = pool->make<Flight>(this);
-        flights.pushBack(flight);
-    }
-    flight->serial = submitted;
-    flight->busy = true;
-    for (VulkanImage* image : drawn) {
-        if (image->retired) {
-            flight->images.pushBack(image);
-        }
-    }
-    drawn.clear();
-
     VkFenceGetFdInfoKHR info{VK_STRUCTURE_TYPE_FENCE_GET_FD_INFO_KHR};
     int fd = -1;
 
     info.fence = fence;
     info.handleType = VK_EXTERNAL_FENCE_HANDLE_TYPE_SYNC_FD_BIT;
     vkc(fenceFd(device, &info, &fd));
+
+    Flight* flight = flights->make<Flight>(this, submitted, fd);
+
+    drawn.clear();
+
     if (fd < 0) {
-        landed(submitted);
-        return;
+        landed(flight);
+    } else {
+        platform->poller()->arm(flight->waiter);
     }
-    flight->waiter.fd.fd = fd;
-    platform->poller()->arm(flight->waiter);
 }
 
-void Gpu::landed(u64 serial) {
-    if (serial > completed) {
-        completed = serial;
-    }
+void Gpu::landed(Flight* flight) {
     Vector<VulkanImage*> done;
-    for (Flight* flight : flights) {
-        if (!flight->busy || flight->serial > completed) {
-            continue;
-        }
-        if (flight->waiter.fd.fd >= 0) {
-            platform->poller()->cancel(flight->waiter);
-            close(flight->waiter.fd.fd);
-            flight->waiter.fd.fd = -1;
-        }
-        done.append(flight->images.begin(), flight->images.end());
-        flight->images.clear();
-        flight->busy = false;
+
+    if (flight->serial > completed) {
+        completed = flight->serial;
     }
+    done.xchg(flight->images);
+    flights->release(flight);
     for (VulkanImage* image : done) {
         image->retired->run();
     }
@@ -2020,11 +1991,6 @@ RenderImage* VulkanRenderer::bind(ObjPool& pool, u32 width, u32 height, const vo
 VulkanImage::~VulkanImage() noexcept {
     for (const VulkanImage* image : gpu->drawn) {
         STD_INSIST(image != this);
-    }
-    for (const Flight* flight : gpu->flights) {
-        for (const VulkanImage* image : flight->images) {
-            STD_INSIST(image != this);
-        }
     }
     if (lastUse > gpu->completed) {
         vkDeviceWaitIdle(gpu->device);
@@ -2424,7 +2390,7 @@ Renderer* createVulkanRenderer(ObjPool& pool, plt::Platform& platform, plt::Wind
         wants.deviceUuid = static_cast<DmaImage*>(options.shared)->deviceUuid;
     }
     Gpu& gpu = *Gpu::create(pool, wants);
-    gpu.pool = &pool;
+    gpu.flights = SmallObjAllocator::create(&pool);
     gpu.platform = &platform;
     gpu.window = &window;
     gpu.timer = pool.make<PollGpu>(&gpu);
