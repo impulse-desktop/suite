@@ -1953,6 +1953,21 @@ namespace {
         "yuyv422",
     };
 
+    constexpr const char* packedNames[] = {
+        "x2bgr10le",
+        "x2rgb10le",
+    };
+
+    static bool packedByHand(StringView name) {
+        for (const char* packed : packedNames) {
+            if (name == StringView(packed)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     struct Chromaticity {
         int code;
         double rx, ry, gx, gy, bx, by, wx, wy;
@@ -2004,8 +2019,9 @@ namespace {
         RenderShader& compile(const VideoShaderCode& code);
         AVFrame* frame(const Case& kase);
         void scale(AVFrame* frame, const Case& kase);
+        void pack(AVFrame* frame);
         void shade(AVFrame* frame, const char* output, Vector<double>& out);
-        void compare(StringView what, StringView output, const Vector<double>& got, double tolerance, bool relative);
+        void compare(const AVFrame* frame, StringView what, StringView output, const Vector<double>& got, double tolerance, bool relative);
         void verify(AVFrame* frame, StringView what, double tolerance);
         void verifyLinear(AVFrame* frame, StringView what, double tolerance);
         void expectSource(bool alpha);
@@ -2022,6 +2038,16 @@ namespace {
         const double values[4] = {0.15 + 0.7 * u, 0.2 + 0.6 * v, 0.25 + 0.25 * (u + v), 0.3 + 0.7 * u};
 
         return values[c];
+    }
+
+    static double sampleChange(int dx, int dy) {
+        double change = 0.;
+
+        for (int c = 0; c < 4; c++) {
+            change = fmax(change, fabs(sampleValue(dx, dy, c) - sampleValue(0, 0, c)));
+        }
+
+        return change;
     }
 
     static double srgbDecode(double v) {
@@ -2271,8 +2297,29 @@ void FormatCheck::scale(AVFrame* frame, const Case& kase) {
         fail(StringView(StringBuilder() << StringView(u8"swscale cannot produce ") << StringView(descriptor->name)));
     }
 
-    sws_setColorspaceDetails(sws, sws_getCoefficients(SWS_CS_ITU709), 1, sws_getCoefficients(kase.matrix), kase.range == AVCOL_RANGE_JPEG, 0, 1 << 16, 1 << 16);
+    const int* rgbTable = sws_getCoefficients(SWS_CS_ITU709);
+
+    sws_setColorspaceDetails(sws, rgbTable, 1, descriptor->flags & AV_PIX_FMT_FLAG_RGB ? rgbTable : sws_getCoefficients(kase.matrix), kase.range == AVCOL_RANGE_JPEG, 0, 1 << 16, 1 << 16);
     sws_scale(sws, source->data, source->linesize, 0, sampleHeight, frame->data, frame->linesize);
+}
+
+void FormatCheck::pack(AVFrame* frame) {
+    const AVPixFmtDescriptor* descriptor = av_pix_fmt_desc_get((AVPixelFormat)frame->format);
+    u32 line[sampleWidth];
+
+    memZero(frame->buf[0]->data, frame->buf[0]->data + frame->buf[0]->size);
+
+    for (int c = 0; c < descriptor->nb_components; c++) {
+        double scale = exp2(descriptor->comp[c].depth) - 1.;
+
+        for (int y = 0; y < sampleHeight; y++) {
+            for (int x = 0; x < sampleWidth; x++) {
+                line[x] = (u32)lround(sampleValue(x, y, c) * scale);
+            }
+
+            av_write_image_line2(line, frame->data, frame->linesize, descriptor, 0, y, c, sampleWidth, 4);
+        }
+    }
 }
 
 void FormatCheck::shade(AVFrame* frame, const char* output, Vector<double>& out) {
@@ -2293,24 +2340,35 @@ void FormatCheck::shade(AVFrame* frame, const char* output, Vector<double>& out)
     }
 }
 
-void FormatCheck::compare(StringView what, StringView output, const Vector<double>& got, double tolerance, bool relative) {
+void FormatCheck::compare(const AVFrame* frame, StringView what, StringView output, const Vector<double>& got, double tolerance, bool relative) {
+    const AVPixFmtDescriptor* descriptor = av_pix_fmt_desc_get((AVPixelFormat)frame->format);
+    int bandX = (1 << descriptor->log2_chroma_w) - 1;
+    int bandY = (1 << descriptor->log2_chroma_h) - 1;
+    double edge = tolerance + sampleChange(bandX, 0) + sampleChange(0, bandY);
+    double score = 0.;
     double worst = 0.;
+    double allowed = tolerance;
     size_t at = 0;
 
     for (size_t i = 0; i < samplePixels * 4; i++) {
+        int x = (int)(i / 4 % sampleWidth);
+        int y = (int)(i / 4 / sampleWidth);
+        double limit = x >= bandX && x < sampleWidth - bandX && y >= bandY && y < sampleHeight - bandY ? tolerance : edge;
         double error = fabs(got[i] - expected[i]) / (relative ? fmax(1., fabs(expected[i])) : 1.);
 
-        if (!(error <= worst)) {
+        if (!(error / limit <= score) && !isnan(score)) {
+            score = error / limit;
             worst = error;
+            allowed = limit;
             at = i;
         }
     }
 
     checked++;
 
-    if (!(worst <= tolerance)) {
+    if (!(score <= 1.)) {
         failed++;
-        sysE << StringView(u8"play formats: ") << what << StringView(u8" ") << output << StringView(u8" is off by ") << worst << StringView(u8" at ") << (u64)(at / 4 % sampleWidth) << StringView(u8",") << (u64)(at / 4 / sampleWidth) << StringView(u8" channel ") << (u64)(at % 4) << StringView(u8", allowed ") << tolerance << endL;
+        sysE << StringView(u8"play formats: ") << what << StringView(u8" ") << output << StringView(u8" is off by ") << worst << StringView(u8" at ") << (u64)(at / 4 % sampleWidth) << StringView(u8",") << (u64)(at / 4 / sampleWidth) << StringView(u8" channel ") << (u64)(at % 4) << StringView(u8", allowed ") << allowed << endL;
     }
 }
 
@@ -2325,7 +2383,7 @@ void FormatCheck::verify(AVFrame* frame, StringView what, double tolerance) {
         }
     }
 
-    compare(what, StringView(u8"sdr"), got, tolerance, false);
+    compare(frame, what, StringView(u8"sdr"), got, tolerance, false);
     shade(frame, "hdr", got);
 
     Matrix back = invert(toBt2020(1));
@@ -2341,14 +2399,14 @@ void FormatCheck::verify(AVFrame* frame, StringView what, double tolerance) {
         }
     }
 
-    compare(what, StringView(u8"hdr"), got, tolerance, false);
+    compare(frame, what, StringView(u8"hdr"), got, tolerance, false);
 }
 
 void FormatCheck::verifyLinear(AVFrame* frame, StringView what, double tolerance) {
     Vector<double> got;
 
     shade(frame, "hdr", got);
-    compare(what, StringView(u8"hdr"), got, tolerance, true);
+    compare(frame, what, StringView(u8"hdr"), got, tolerance, true);
 }
 
 void FormatCheck::expectSource(bool alpha) {
@@ -2398,6 +2456,8 @@ void FormatCheck::formats() {
                     frame->data[0][y * frame->linesize[0] + x] = (uint8_t)((x * 5 + y * 3) & 255);
                 }
             }
+        } else if (packedByHand(StringView(name))) {
+            pack(frame);
         } else {
             scale(frame, kase);
         }

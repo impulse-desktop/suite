@@ -217,7 +217,7 @@ float chromaComponent(uint c, vec2 at) {
 }
 
 bool fullRange() {
-{%- if fetch == "float" %}
+{%- if fetch == "bitstream" %}
     return true;
 {%- else %}
     return rangeCode() == 2u || (rangeCode() == 0u && (hasFlag(RGB) || colorCount() == 1u));
@@ -226,7 +226,7 @@ bool fullRange() {
 
 float decodeLuma(float code, uint depth) {
 {%- if fetch == "float" %}
-    return code;
+    return fullRange() ? code : (code * 255.0 - 16.0) / 219.0;
 {%- else %}
     float unit = exp2(float(depth) - 8.0);
 
@@ -236,7 +236,7 @@ float decodeLuma(float code, uint depth) {
 
 float decodeChroma(float code, uint depth) {
 {%- if fetch == "float" %}
-    return code - 0.5;
+    return fullRange() ? code - 0.5 : (code * 255.0 - 128.0) / 224.0;
 {%- else %}
     float unit = exp2(float(depth) - 8.0);
 
