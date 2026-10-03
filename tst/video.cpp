@@ -1056,7 +1056,7 @@ void FormatCheck::linearize(const Case& kase) {
 void FormatCheck::shade(AVFrame* frame, const char* output, Vector<double>& out) {
     VideoShader facts = describe(frame, output);
     ScopedPtr<ObjPool> owner{ObjPool::fromMemoryRaw()};
-    RenderImage* image = ui->shadeImage(*owner.ptr, shaderFor(facts), (u32)frame->width, (u32)frame->height, frame->buf[0]->data, frame->buf[0]->size, &facts, sizeof(facts), retired);
+    RenderImage* image = ui->shadeImage(*owner.ptr, shaderFor(facts), (u32)frame->width, (u32)frame->height, frame->buf[0]->data, frame->buf[0]->size, retired);
     ImagePixels pixels;
 
     image->prepare();

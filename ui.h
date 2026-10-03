@@ -59,7 +59,7 @@ struct Ui {
     virtual RenderImage* uploadImage(stl::ObjPool& pool, u32 width, u32 height, const void* rgba, bool hdr) = 0;
     virtual RenderImage* importImage(stl::ObjPool& pool, SharedImage& source, bool hdr) = 0;
     virtual RenderImage* bindImage(stl::ObjPool& pool, u32 width, u32 height, const void* data, size_t size, size_t stride, stl::Runable& retired) = 0;
-    virtual RenderImage* shadeImage(stl::ObjPool& pool, RenderShader& shader, u32 width, u32 height, const void* data, size_t size, const void* uniform, size_t uniformSize, stl::Runable& retired) = 0;
+    virtual RenderImage* shadeImage(stl::ObjPool& pool, RenderShader& shader, u32 width, u32 height, const void* data, size_t size, stl::Runable& retired) = 0;
 
     virtual RenderShader* compileShader(stl::ObjPool& pool, const void* code, size_t size) = 0;
 

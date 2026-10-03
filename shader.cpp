@@ -14,7 +14,7 @@
 using namespace stl;
 
 namespace {
-    enum class Op: u8 {
+    enum class Op : u8 {
         Const,
         Input,
         Add,
@@ -45,7 +45,7 @@ namespace {
         BitsFloat,
     };
 
-    enum class Kind: u8 {
+    enum class Kind : u8 {
         Float,
         Uint,
         Int,
@@ -887,13 +887,14 @@ namespace {
 
             Node* byte = g.mul(column, step);
             Node* place = g.shl(g.band(byte, 3), 3);
-            Node* last = g.load(g.add(row, g.shr(g.add(byte, step - 1), 2)));
+            Node* index = g.add(row, g.shr(byte, 2));
+            Node* next = g.load(g.add(index, 1));
 
             if (first >= 4) {
-                return g.shr(g.shr(last, place), 8 * (first - 4));
+                return g.shr(g.shr(next, place), 8 * (first - 4));
             }
 
-            Node* low = g.bor(g.shr(g.load(g.add(row, g.shr(byte, 2))), place), g.shl(g.shl(last, g.sub(24, place)), 8));
+            Node* low = g.bor(g.shr(g.load(index), place), g.shl(g.shl(next, g.sub(24, place)), 8));
 
             return g.shr(low, 8 * first);
         }
@@ -1557,7 +1558,7 @@ namespace {
 }
 #else
 namespace {
-    enum: u32 {
+    enum : u32 {
         GlslFAbs = 4,
         GlslSAbs = 5,
         GlslFloor = 8,

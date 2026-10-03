@@ -1,12 +1,11 @@
-#include "shader.h"
 #include "error.h"
+#include "shader.h"
 
 #include <std/ios/sys.h>
 #include <std/str/view.h>
 #include <std/mem/obj_pool.h>
 
 #include <string.h>
-
 #include <video_codes.h>
 
 using namespace stl;

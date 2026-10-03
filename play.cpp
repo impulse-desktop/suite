@@ -483,7 +483,7 @@ namespace {
             const uint8_t* data = frame->data[p];
             u64 offset = (u64)(data - buffer->data);
 
-            if (!data || data < buffer->data || lines[p] < 0 || offset + sizes[p] > buffer->size) {
+            if (!data || data < buffer->data || lines[p] < 0 || offset + sizes[p] + sizeof(u32) > buffer->size) {
                 raiseError(StringView(u8"video frame planes exceed their buffer"));
             }
 
@@ -1704,7 +1704,7 @@ void Screen::makeRender(VideoImage* image) {
     RenderShader& shader = shaderFor(shading);
     ScopedPtr<ObjPool> owner{ObjPool::fromMemoryRaw()};
 
-    image->render = player->ui->shadeImage(*owner.ptr, shader, (u32)frame->width, (u32)frame->height, frame->buf[0]->data, frame->buf[0]->size, &shading, sizeof(shading), *image);
+    image->render = player->ui->shadeImage(*owner.ptr, shader, (u32)frame->width, (u32)frame->height, frame->buf[0]->data, frame->buf[0]->size, *image);
     image->render->prepare();
     image->pool = owner.ptr;
     owner.drop();

@@ -1223,14 +1223,11 @@ void Gpu::setupVulkan(ObjPool& pool, const GpuOptions& wants) {
         vkDestroyDescriptorPool(device, descPool, alloc);
     });
 
-    VkDescriptorSetLayoutBinding shadeBindings[2] = {
-        {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
-        {1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
-    };
+    VkDescriptorSetLayoutBinding shadeBinding{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
     VkDescriptorSetLayoutCreateInfo shadeLayout{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
 
-    shadeLayout.bindingCount = 2;
-    shadeLayout.pBindings = shadeBindings;
+    shadeLayout.bindingCount = 1;
+    shadeLayout.pBindings = &shadeBinding;
     vkc(vkCreateDescriptorSetLayout(device, &shadeLayout, alloc, &shadeSetLayout));
     pooledGuard(pool, [this] {
         vkDestroyDescriptorSetLayout(device, shadeSetLayout, alloc);
@@ -1742,7 +1739,7 @@ namespace {
 
         RenderImage* bind(ObjPool& pool, u32 width, u32 height, const void* data, size_t size, size_t stride, Runable& retired) override;
         RenderShader* compileShader(ObjPool& pool, const void* code, size_t size) override;
-        RenderImage* shade(ObjPool& pool, RenderShader& shader, u32 width, u32 height, const void* data, size_t size, const void* uniform, size_t uniformSize, Runable& retired) override;
+        RenderImage* shade(ObjPool& pool, RenderShader& shader, u32 width, u32 height, const void* data, size_t size, Runable& retired) override;
         bool beginFrame(u32 width, u32 height) override;
         bool endFrame(ImDrawData* draw) override;
         u32 maxTextureSide() override;
@@ -1822,8 +1819,6 @@ namespace {
         size_t bytes = 0;
         VkBufferUsageFlags usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
         VulkanShader* shader = nullptr;
-        VkBuffer uniformBuffer = VK_NULL_HANDLE;
-        VkDeviceMemory uniformMemory = VK_NULL_HANDLE;
         VkDescriptorPool shadePool = VK_NULL_HANDLE;
         VkDescriptorSet shadeSet = VK_NULL_HANDLE;
         VkBuffer buffer = VK_NULL_HANDLE;
@@ -1840,7 +1835,7 @@ namespace {
         void prepare() override;
         void allocateBuffer(size_t size);
         bool importHost(size_t size);
-        void setupShade(const void* uniform, size_t uniformSize);
+        void setupShade();
         void record(VkCommandBuffer command);
         void readShaded(int x0, int y0, int x1, int y1, ImagePixels& out);
         void draw(ImDrawList& list, ImVec2 lo, ImVec2 hi) override;
@@ -2086,9 +2081,9 @@ RenderShader* VulkanRenderer::compileShader(ObjPool& pool, const void* code, siz
     return shader;
 }
 
-RenderImage* VulkanRenderer::shade(ObjPool& pool, RenderShader& shader, u32 width, u32 height, const void* data, size_t size, const void* uniform, size_t uniformSize, Runable& retired) {
+RenderImage* VulkanRenderer::shade(ObjPool& pool, RenderShader& shader, u32 width, u32 height, const void* data, size_t size, Runable& retired) {
     checkImageSize(width, height, maxTextureSide());
-    if (!data || !size || size % 4 || !uniform || !uniformSize || uniformSize > 4096) {
+    if (!data || !size || size % 4) {
         fail(StringView(u8"invalid shaded image source"));
     }
     VulkanImage* image = pool.make<VulkanImage>();
@@ -2102,7 +2097,7 @@ RenderImage* VulkanRenderer::shade(ObjPool& pool, RenderShader& shader, u32 widt
     image->shader = static_cast<VulkanShader*>(&shader);
     image->retired = &retired;
     image->allocateBuffer(size);
-    image->setupShade(uniform, uniformSize);
+    image->setupShade();
     return image;
 }
 
@@ -2123,12 +2118,6 @@ VulkanImage::~VulkanImage() noexcept {
     if (bufferMemory) {
         vkFreeMemory(gpu->device, bufferMemory, gpu->alloc);
     }
-    if (uniformBuffer) {
-        vkDestroyBuffer(gpu->device, uniformBuffer, gpu->alloc);
-    }
-    if (uniformMemory) {
-        vkFreeMemory(gpu->device, uniformMemory, gpu->alloc);
-    }
     if (shadePool) {
         vkDestroyDescriptorPool(gpu->device, shadePool, gpu->alloc);
     }
@@ -2144,39 +2133,13 @@ VulkanShader::~VulkanShader() noexcept {
     }
 }
 
-void VulkanImage::setupShade(const void* uniform, size_t uniformSize) {
-    VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-
-    info.size = uniformSize;
-    info.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
-    gpu->vkc(vkCreateBuffer(gpu->device, &info, gpu->alloc, &uniformBuffer));
-
-    VkMemoryRequirements requirements;
-
-    vkGetBufferMemoryRequirements(gpu->device, uniformBuffer, &requirements);
-
-    VkMemoryAllocateInfo memory{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-
-    memory.allocationSize = requirements.size;
-    memory.memoryTypeIndex = gpu->findMemoryType(requirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    gpu->vkc(vkAllocateMemory(gpu->device, &memory, gpu->alloc, &uniformMemory));
-    gpu->vkc(vkBindBufferMemory(gpu->device, uniformBuffer, uniformMemory, 0));
-
-    void* mapped = nullptr;
-
-    gpu->vkc(vkMapMemory(gpu->device, uniformMemory, 0, VK_WHOLE_SIZE, 0, &mapped));
-    memcpy(mapped, uniform, uniformSize);
-    vkUnmapMemory(gpu->device, uniformMemory);
-
-    VkDescriptorPoolSize sizes[2] = {
-        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1},
-        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1},
-    };
+void VulkanImage::setupShade() {
+    VkDescriptorPoolSize sizes{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1};
     VkDescriptorPoolCreateInfo pool{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
 
     pool.maxSets = 1;
-    pool.poolSizeCount = 2;
-    pool.pPoolSizes = sizes;
+    pool.poolSizeCount = 1;
+    pool.pPoolSizes = &sizes;
     gpu->vkc(vkCreateDescriptorPool(gpu->device, &pool, gpu->alloc, &shadePool));
 
     VkDescriptorSetAllocateInfo allocate{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
@@ -2187,20 +2150,14 @@ void VulkanImage::setupShade(const void* uniform, size_t uniformSize) {
     gpu->vkc(vkAllocateDescriptorSets(gpu->device, &allocate, &shadeSet));
 
     VkDescriptorBufferInfo source{buffer, 0, VK_WHOLE_SIZE};
-    VkDescriptorBufferInfo constants{uniformBuffer, 0, uniformSize};
-    VkWriteDescriptorSet writes[2] = {};
+    VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
 
-    for (u32 i = 0; i < 2; i++) {
-        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[i].dstSet = shadeSet;
-        writes[i].dstBinding = i;
-        writes[i].descriptorCount = 1;
-    }
-    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    writes[0].pBufferInfo = &source;
-    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    writes[1].pBufferInfo = &constants;
-    vkUpdateDescriptorSets(gpu->device, 2, writes, 0, nullptr);
+    write.dstSet = shadeSet;
+    write.dstBinding = 0;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    write.pBufferInfo = &source;
+    vkUpdateDescriptorSets(gpu->device, 1, &write, 0, nullptr);
 }
 
 void VulkanImage::draw(ImDrawList& list, ImVec2 lo, ImVec2 hi) {
