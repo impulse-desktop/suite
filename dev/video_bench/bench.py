@@ -73,6 +73,8 @@ CORPUS = [
     ("sota", "gbrp_roundtrip_lanczos3", "gbrp", (0, 0), 0, 2, 13, 1, 0, "sdr", (1280, 720), (2560, 1440), "gbrp_srgb_sdr", "lanczos", "box2"),
     ("sota", "yuv420p_lanczos3_1.42_sota", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (1920, 1080), (2731, 1536), "yuv420p_709_sdr_lanczos3_fast", "lanczos", "chart"),
     ("sota", "yuv420p_down_0.5_sota", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (3840, 2160), (1920, 1080), "yuv420p_709_sdr_hermite", "bilinear", "chart"),
+    ("kernel", "gbrp_roundtrip_sigmoid", "gbrp", (0, 0), 0, 2, 13, 1, 0, "sdr", (1280, 720), (2560, 1440), "gbrp_srgb_sigmoid", "lanczos", "box2"),
+    ("kernel", "yuv420p_sigmoid_1.42", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (1920, 1080), (2731, 1536), "yuv420p_709_sdr_sigmoid", "lanczos", "chart"),
     ("dither", "yuv420p_dither8", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (1920, 1080), (3840, 2160), "yuv420p_709_sdr", "bilinear", "chart", 8, 1),
     ("dither", "yuv420p_lanczos3_dither8", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (1920, 1080), (2731, 1536), "yuv420p_709_sdr_lanczos3_fast", "lanczos", "chart", 8, 2),
     ("scale", "yuv420p_bilinear_1.42", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (1920, 1080), (2731, 1536), "yuv420p_709_sdr"),
@@ -285,8 +287,12 @@ def prepare(case, directory, compiler):
         truth = array.array("f", (chart(c, x, y, TW, TH) for y in range(TH) for x in range(TW) for c in range(3)))
         (directory / "truth.raw").write_bytes(truth.tobytes())
     (directory / "optimum.ubo").write_bytes(struct.pack("<4I", *offsets) + struct.pack("<4I", *lines) + struct.pack("<4I", W, H, -(-W >> sx), -(-H >> sy)) + struct.pack("<4f", WHITE, *case["target"], 0))
-    (directory / "optimum.frag").write_text((HERE / "hand" / f"{case.get('hand', case['name'])}.frag").read_text())
-    subprocess.run(["glslangValidator", "--quiet", "--target-env", "vulkan1.1", "-V", "-S", "frag", str(directory / "optimum.frag"), "-o", str(directory / "optimum.spv")], check=True)
+    hand = HERE / "hand" / case.get("hand", case["name"])
+    stage = "comp" if hand.with_suffix(".comp").exists() else "frag"
+    (directory / f"optimum.{stage}").write_text(hand.with_suffix(f".{stage}").read_text())
+    if stage == "comp":
+        (directory / "optimum.kind").write_text("kernel")
+    subprocess.run(["glslangValidator", "--quiet", "--target-env", "vulkan1.1", "-V", "-S", stage, str(directory / f"optimum.{stage}"), "-o", str(directory / "optimum.spv")], check=True)
     return "_".join((name, *arguments[1:6]))
 
 
@@ -307,17 +313,28 @@ def measure(harness, vertex, directories, rounds):
     return results
 
 
+def recoverable(x, y, W, H):
+    """Away from the chart's zone plate and one-pixel lines, which a 2x box
+    takes past the source's Nyquist and no scaler brings back."""
+    u, v = x / W, y / H
+    return ((u - 0.75) * W) ** 2 + ((v - 0.3) * H) ** 2 >= (0.2 * W) ** 2 and not (0.5 < v < 0.9 and 0.5 < u < 0.95)
+
+
 def error(path, TW, TH, truth):
     raw = path.read_bytes()
     data = memoryview(raw).cast("f" if len(raw) == TW * TH * 16 else "e")
     total = 0.0
+    count = 0
     for y in range(0, TH, 2):
         for x in range(0, TW, 2):
+            if not recoverable(x, y, TW, TH):
+                continue
+            count += 1
             at, known = (y * TW + x) * 4, (y * TW + x) * 3
             for c in range(3):
                 d = data[at + c] - truth[known + c]
                 total += d * d
-    return math.sqrt(total / (((TH + 1) // 2) * ((TW + 1) // 2) * 3))
+    return math.sqrt(total / (count * 3))
 
 
 def compare(placebo, cases, directories, results, rounds):
@@ -341,7 +358,7 @@ def compare(placebo, cases, directories, results, rounds):
         if (directory / "truth.raw").exists():
             TW, TH = case["target"]
             truth = memoryview((directory / "truth.raw").read_bytes()).cast("f")
-            line += f"  rmse ours {error(directory / 'template.raw', TW, TH, truth):.4f}"
+            line += f"  rmse ours {error(directory / 'template.raw', TW, TH, truth):.4f} hand {error(directory / 'optimum.raw', TW, TH, truth):.4f}"
             for preset in ("fast", "default", "high_quality"):
                 line += f" {preset} {error(directory / f'placebo_{preset}.raw', TW, TH, truth):.4f}"
         print(line)
@@ -402,7 +419,7 @@ def main():
         )
     if args.placebo:
         compare(args.placebo, cases, directories, results, args.rounds)
-    groups = [("all", [row for row in rows if row["group"] not in ("scale", "approx", "down", "dither", "sota")])] + [(group, [row for row in rows if row["group"] == group]) for group in dict.fromkeys(row["group"] for row in rows)]
+    groups = [("all", [row for row in rows if row["group"] not in ("scale", "approx", "down", "dither", "sota", "kernel")])] + [(group, [row for row in rows if row["group"] == group]) for group in dict.fromkeys(row["group"] for row in rows)]
     for label, members in groups:
         if members:
             print(

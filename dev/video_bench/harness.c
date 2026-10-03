@@ -14,6 +14,8 @@ static VkQueue queue;
 static VkPhysicalDeviceProperties props;
 static VkDescriptorSetLayout setLayout;
 static VkPipelineLayout pipelineLayout;
+static VkDescriptorSetLayout kernelSetLayout;
+static VkPipelineLayout kernelPipelineLayout;
 static VkCommandPool commandPool;
 static VkShaderModule vertexShader;
 static PFN_vkGetPipelineExecutableStatisticsKHR getStatistics;
@@ -106,7 +108,7 @@ static Target makeTarget(VkFormat format, uint32_t width, uint32_t height, int r
     imageInfo.arrayLayers = 1;
     imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
     imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-    imageInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | (readable ? VK_IMAGE_USAGE_TRANSFER_SRC_BIT : 0);
+    imageInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_STORAGE_BIT | (readable ? VK_IMAGE_USAGE_TRANSFER_SRC_BIT : 0);
     CHECK(vkCreateImage(device, &imageInfo, NULL, &t.image));
     VkMemoryRequirements req;
     vkGetImageMemoryRequirements(device, t.image, &req);
@@ -189,10 +191,10 @@ static VkPipeline makePipeline(VkShaderModule fragment, const Target* t, int sta
     return pipeline;
 }
 
-static void printStatistics(const char* label, VkPipeline pipeline) {
+static void printStatistics(const char* label, VkPipeline pipeline, uint32_t executable) {
     VkPipelineExecutableInfoKHR exec = {VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_INFO_KHR};
     exec.pipeline = pipeline;
-    exec.executableIndex = 1;
+    exec.executableIndex = executable;
     uint32_t count = 0;
     getStatistics(device, &exec, &count, NULL);
     VkPipelineExecutableStatisticKHR stats[64];
@@ -207,10 +209,10 @@ static void printStatistics(const char* label, VkPipeline pipeline) {
     printf("\n");
 }
 
-static void writeAssembly(const char* path, VkPipeline pipeline) {
+static void writeAssembly(const char* path, VkPipeline pipeline, uint32_t executable) {
     VkPipelineExecutableInfoKHR exec = {VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_INFO_KHR};
     exec.pipeline = pipeline;
-    exec.executableIndex = 1;
+    exec.executableIndex = executable;
     uint32_t count = 0;
     getRepresentations(device, &exec, &count, NULL);
     VkPipelineExecutableInternalRepresentationKHR representations[8];
@@ -249,6 +251,97 @@ static VkDescriptorSet makeSet(Buffer* bytes, Buffer* uniform) {
     };
     vkUpdateDescriptorSets(device, 2, writes, 0, NULL);
     return set;
+}
+
+static VkPipeline makeKernel(VkShaderModule shader, int statistics) {
+    VkComputePipelineCreateInfo info = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+    info.flags = statistics ? VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR | VK_PIPELINE_CREATE_CAPTURE_INTERNAL_REPRESENTATIONS_BIT_KHR : 0;
+    info.stage = (VkPipelineShaderStageCreateInfo){VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_COMPUTE_BIT, shader, "main", NULL};
+    info.layout = kernelPipelineLayout;
+    VkPipeline pipeline;
+    CHECK(vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &info, NULL, &pipeline));
+    return pipeline;
+}
+
+static VkDescriptorSet makeKernelSet(Buffer* bytes, Buffer* uniform, VkImageView view) {
+    static VkDescriptorPool pool;
+    if (!pool) {
+        VkDescriptorPoolSize sizes[3] = {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1024}, {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1024}, {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1024}};
+        VkDescriptorPoolCreateInfo poolInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+        poolInfo.maxSets = 1024;
+        poolInfo.poolSizeCount = 3;
+        poolInfo.pPoolSizes = sizes;
+        CHECK(vkCreateDescriptorPool(device, &poolInfo, NULL, &pool));
+    }
+    VkDescriptorSetAllocateInfo allocSet = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    allocSet.descriptorPool = pool;
+    allocSet.descriptorSetCount = 1;
+    allocSet.pSetLayouts = &kernelSetLayout;
+    VkDescriptorSet set;
+    CHECK(vkAllocateDescriptorSets(device, &allocSet, &set));
+    VkDescriptorBufferInfo storage = {bytes->buffer, 0, VK_WHOLE_SIZE};
+    VkDescriptorBufferInfo constants = {uniform->buffer, 0, VK_WHOLE_SIZE};
+    VkDescriptorImageInfo image = {VK_NULL_HANDLE, view, VK_IMAGE_LAYOUT_GENERAL};
+    VkWriteDescriptorSet writes[3] = {
+        {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, set, 0, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, NULL, &storage, NULL},
+        {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, set, 1, 0, 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, NULL, &constants, NULL},
+        {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, set, 2, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &image, NULL, NULL},
+    };
+    vkUpdateDescriptorSets(device, 3, writes, 0, NULL);
+    return set;
+}
+
+static double runKernel(VkPipeline pipeline, VkDescriptorSet set, const Target* t, uint32_t draws, Buffer* readback) {
+    VkCommandBufferAllocateInfo commandInfo = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    commandInfo.commandPool = commandPool;
+    commandInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    commandInfo.commandBufferCount = 1;
+    VkCommandBuffer command;
+    CHECK(vkAllocateCommandBuffers(device, &commandInfo, &command));
+    VkQueryPoolCreateInfo queryInfo = {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+    queryInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
+    queryInfo.queryCount = 2;
+    VkQueryPool queries;
+    CHECK(vkCreateQueryPool(device, &queryInfo, NULL, &queries));
+    VkFenceCreateInfo fenceInfo = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+    VkFence fence;
+    CHECK(vkCreateFence(device, &fenceInfo, NULL, &fence));
+    VkCommandBufferBeginInfo begin = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    CHECK(vkBeginCommandBuffer(command, &begin));
+    VkImageMemoryBarrier toGeneral = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL, 0, VK_ACCESS_SHADER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+        VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, t->image, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+    vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &toGeneral);
+    vkCmdResetQueryPool(command, queries, 0, 2);
+    vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, queries, 0);
+    VkMemoryBarrier between = {VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_WRITE_BIT};
+    for (uint32_t i = 0; i < draws; i++) {
+        if (i) vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &between, 0, NULL, 0, NULL);
+        vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+        vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_COMPUTE, kernelPipelineLayout, 0, 1, &set, 0, NULL);
+        vkCmdDispatch(command, (t->width + 15) / 16, (t->height + 15) / 16, 1);
+    }
+    vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queries, 1);
+    if (readback) {
+        VkImageMemoryBarrier toTransfer = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, t->image, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+        vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &toTransfer);
+        VkBufferImageCopy copy = {0};
+        copy.imageSubresource = (VkImageSubresourceLayers){VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        copy.imageExtent = (VkExtent3D){t->width, t->height, 1};
+        vkCmdCopyImageToBuffer(command, t->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback->buffer, 1, &copy);
+    }
+    CHECK(vkEndCommandBuffer(command));
+    VkSubmitInfo submit = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    submit.commandBufferCount = 1;
+    submit.pCommandBuffers = &command;
+    CHECK(vkQueueSubmit(queue, 1, &submit, fence));
+    CHECK(vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX));
+    uint64_t stamps[2];
+    CHECK(vkGetQueryPoolResults(device, queries, 0, 2, sizeof(stamps), stamps, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT));
+    vkDestroyFence(device, fence, NULL);
+    vkDestroyQueryPool(device, queries, NULL);
+    vkFreeCommandBuffers(device, commandPool, 1, &command);
+    return (double)(stamps[1] - stamps[0]) * props.limits.timestampPeriod / draws;
 }
 
 static double run(VkPipeline pipeline, VkDescriptorSet set, const Target* t, uint32_t draws, Buffer* readback) {
@@ -319,9 +412,11 @@ typedef struct {
     const char* directory;
     Size* size;
     VkShaderModule shaders[2];
+    int kernel[2];
     Buffer bytes;
     Buffer uniforms[2];
     VkDescriptorSet sets[2];
+    VkDescriptorSet kernelSets[3][2];
     VkPipeline pipelines[2][2];
     double best[2][2];
 } Case;
@@ -352,14 +447,14 @@ static Size* sizeOf(uint32_t width, uint32_t height) {
     return s;
 }
 
-static double buildTime(const char* path, const Target* t) {
+static double buildTime(const char* path, const Target* t, int kernel) {
     size_t size;
     uint32_t* code = readFile(path, &size);
     double best = 1e30;
     for (int i = 0; i < 5; i++) {
         double start = seconds();
         VkShaderModule fragment = moduleOf(code, size);
-        VkPipeline pipeline = makePipeline(fragment, t, 0);
+        VkPipeline pipeline = kernel ? makeKernel(fragment, 0) : makePipeline(fragment, t, 0);
         double spent = seconds() - start;
         if (spent < best) best = spent;
         vkDestroyPipeline(device, pipeline, NULL);
@@ -399,6 +494,9 @@ int main(int argc, char** argv) {
     deviceInfo.pQueueCreateInfos = &queueInfo;
     deviceInfo.enabledExtensionCount = 1;
     deviceInfo.ppEnabledExtensionNames = extensions;
+    VkPhysicalDeviceFeatures features = {0};
+    features.shaderStorageImageWriteWithoutFormat = VK_TRUE;
+    deviceInfo.pEnabledFeatures = &features;
     CHECK(vkCreateDevice(gpu, &deviceInfo, NULL, &device));
     vkGetDeviceQueue(device, 0, 0, &queue);
     getStatistics = (PFN_vkGetPipelineExecutableStatisticsKHR)vkGetDeviceProcAddr(device, "vkGetPipelineExecutableStatisticsKHR");
@@ -416,6 +514,19 @@ int main(int argc, char** argv) {
     layoutInfo.setLayoutCount = 1;
     layoutInfo.pSetLayouts = &setLayout;
     CHECK(vkCreatePipelineLayout(device, &layoutInfo, NULL, &pipelineLayout));
+    VkDescriptorSetLayoutBinding kernelBindings[3] = {
+        {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},
+        {1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},
+        {2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},
+    };
+    VkDescriptorSetLayoutCreateInfo kernelSetInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    kernelSetInfo.bindingCount = 3;
+    kernelSetInfo.pBindings = kernelBindings;
+    CHECK(vkCreateDescriptorSetLayout(device, &kernelSetInfo, NULL, &kernelSetLayout));
+    VkPipelineLayoutCreateInfo kernelLayoutInfo = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    kernelLayoutInfo.setLayoutCount = 1;
+    kernelLayoutInfo.pSetLayouts = &kernelSetLayout;
+    CHECK(vkCreatePipelineLayout(device, &kernelLayoutInfo, NULL, &kernelPipelineLayout));
     VkCommandPoolCreateInfo commandPoolInfo = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
     commandPoolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
     CHECK(vkCreateCommandPool(device, &commandPoolInfo, NULL, &commandPool));
@@ -463,10 +574,24 @@ int main(int argc, char** argv) {
             memset(c->uniforms[k].map, 0, 1024);
             memcpy(c->uniforms[k].map, u, size);
             free(u);
-            c->sets[k] = makeSet(&c->bytes, &c->uniforms[k]);
-            VkPipeline pipeline = makePipeline(c->shaders[k], check, 0);
-            run(pipeline, c->sets[k], check, 1, &pixels[k]);
-            vkDestroyPipeline(device, pipeline, NULL);
+            char kind[32];
+            snprintf(kind, sizeof(kind), "%s.kind", labels[k]);
+            FILE* marker = fopen(joined(c->directory, kind), "rb");
+            c->kernel[k] = marker != NULL;
+            if (marker) fclose(marker);
+            if (c->kernel[k]) {
+                c->kernelSets[0][k] = makeKernelSet(&c->bytes, &c->uniforms[k], check->view);
+                for (int t = 0; t < 2; t++)
+                    c->kernelSets[1 + t][k] = makeKernelSet(&c->bytes, &c->uniforms[k], targets[t].view);
+                VkPipeline pipeline = makeKernel(c->shaders[k], 0);
+                runKernel(pipeline, c->kernelSets[0][k], check, 1, &pixels[k]);
+                vkDestroyPipeline(device, pipeline, NULL);
+            } else {
+                c->sets[k] = makeSet(&c->bytes, &c->uniforms[k]);
+                VkPipeline pipeline = makePipeline(c->shaders[k], check, 0);
+                run(pipeline, c->sets[k], check, 1, &pixels[k]);
+                vkDestroyPipeline(device, pipeline, NULL);
+            }
         }
         double worst = 0;
         double squares = 0;
@@ -479,9 +604,13 @@ int main(int argc, char** argv) {
         FILE* truth = fopen(joined(c->directory, "truth.raw"), "rb");
         if (truth) {
             fclose(truth);
-            FILE* dump = fopen(joined(c->directory, "template.raw"), "wb");
-            fwrite(pixels[1].map, 16, (size_t)check->width * check->height, dump);
-            fclose(dump);
+            for (int k = 0; k < 2; k++) {
+                char raw[32];
+                snprintf(raw, sizeof(raw), "%s.raw", labels[k]);
+                FILE* dump = fopen(joined(c->directory, raw), "wb");
+                fwrite(pixels[k].map, 16, (size_t)check->width * check->height, dump);
+                fclose(dump);
+            }
         }
         printf("case %s\n", c->directory);
         printf("difference %s %g\n", c->directory, worst);
@@ -489,20 +618,20 @@ int main(int argc, char** argv) {
         for (int k = 0; k < 2; k++) {
             char shader[32];
             snprintf(shader, sizeof(shader), "%s.spv", labels[k]);
-            printf("build %s %s %.3f\n", c->directory, labels[k], buildTime(joined(c->directory, shader), &targets[1]) * 1e3);
+            printf("build %s %s %.3f\n", c->directory, labels[k], buildTime(joined(c->directory, shader), &targets[1], c->kernel[k]) * 1e3);
         }
         for (int k = 0; k < 2; k++) {
-            VkPipeline statistics = makePipeline(c->shaders[k], &targets[0], 1);
+            VkPipeline statistics = c->kernel[k] ? makeKernel(c->shaders[k], 1) : makePipeline(c->shaders[k], &targets[0], 1);
             printf("%s ", c->directory);
-            printStatistics(labels[k], statistics);
+            printStatistics(labels[k], statistics, c->kernel[k] ? 0 : 1);
             char assembly[32];
             snprintf(assembly, sizeof(assembly), "%s.s", labels[k]);
-            writeAssembly(joined(c->directory, assembly), statistics);
+            writeAssembly(joined(c->directory, assembly), statistics, c->kernel[k] ? 0 : 1);
             vkDestroyPipeline(device, statistics, NULL);
         }
         for (int t = 0; t < 2; t++)
             for (int k = 0; k < 2; k++) {
-                c->pipelines[t][k] = makePipeline(c->shaders[k], &targets[t], 0);
+                c->pipelines[t][k] = c->kernel[k] ? makeKernel(c->shaders[k], 0) : makePipeline(c->shaders[k], &targets[t], 0);
                 c->best[t][k] = 1e30;
             }
         fflush(stdout);
@@ -511,7 +640,7 @@ int main(int argc, char** argv) {
         for (int i = 0; i < count; i++)
             for (int t = 0; t < 2; t++)
                 for (int k = 0; k < 2; k++) {
-                    double ns = run(cases[i].pipelines[t][k], cases[i].sets[k], &cases[i].size->timing[t], draws, NULL);
+                    double ns = cases[i].kernel[k] ? runKernel(cases[i].pipelines[t][k], cases[i].kernelSets[1 + t][k], &cases[i].size->timing[t], draws, NULL) : run(cases[i].pipelines[t][k], cases[i].sets[k], &cases[i].size->timing[t], draws, NULL);
                     if (ns < cases[i].best[t][k]) cases[i].best[t][k] = ns;
                 }
     for (int i = 0; i < count; i++)

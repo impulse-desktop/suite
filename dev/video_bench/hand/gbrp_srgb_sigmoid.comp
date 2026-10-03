@@ -1,0 +1,129 @@
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer Bytes {
+    uint words[];
+};
+
+layout(std140, set = 0, binding = 1) uniform Frame {
+    uvec4 planeOffset;
+    uvec4 lineSize;
+    uvec4 size;
+    vec4 white;
+} frame;
+
+layout(set = 0, binding = 2) uniform writeonly image2D target;
+
+const float center = 0.75;
+const float slope = 6.5;
+const float low = 0.007577241268;
+const float span = 0.8279062958;
+const int SPAN = 24;
+const vec3 evens[3] = vec3[3](vec3(0.0244904064, -0.0226433958, -0.00187803571), vec3(-0.135862093, 0.142553048, -0.00669409677), vec3(0.611371687, -0.119909652, 0.00857213248));
+const vec3 odds[3] = vec3[3](vec3(-0.0319397452, 0.0383419974, -0.00642154827), vec3(0.0905269779, -0.1042344, 0.0137522839), vec3(-0.668230721, 0.191258225, -0.0231172403));
+
+shared vec3 lit[SPAN * SPAN];
+shared vec3 across[SPAN * 16];
+
+vec3 sigmoidize(vec3 x) {
+    return center - log(1.0 / (x * span + low) - 1.0) / slope;
+}
+
+vec3 unsigmoidize(vec3 s) {
+    return (1.0 / (1.0 + exp(slope * (center - s))) - low) / span;
+}
+
+vec3 srgbEncode(vec3 l) {
+    return mix(1.055 * pow(l, vec3(1.0 / 2.4)) - 0.055, 12.92 * l, lessThanEqual(l, vec3(0.0031308)));
+}
+
+uint byteAt(uint plane, ivec2 c) {
+    uint row = (frame.planeOffset[plane] + uint(c.y) * frame.lineSize[plane]) >> 2u;
+    uint x = uint(c.x);
+
+    return (words[row + (x >> 2u)] >> ((x & 3u) * 8u)) & 0xffu;
+}
+
+void weights(float f, out float w[6]) {
+    float t = 2.0 * f - 1.0;
+    float s = t * t;
+
+    for (int k = 0; k < 3; k++) {
+        float e = (evens[k].z * s + evens[k].y) * s + evens[k].x;
+        float o = ((odds[k].z * s + odds[k].y) * s + odds[k].x) * t;
+
+        w[k] = e + o;
+        w[5 - k] = e - o;
+    }
+}
+
+vec3 source(ivec2 c);
+
+void main() {
+    vec2 size = vec2(frame.size.xy);
+    vec2 extent = frame.white.yz;
+    vec2 ratio = size / extent;
+    ivec2 tile = ivec2(gl_WorkGroupID.xy) * 16;
+    ivec2 first = ivec2(floor((vec2(tile) + 0.5) * ratio - 0.5));
+    ivec2 origin = first - 2;
+    ivec2 reach = ivec2(floor((vec2(tile + 15) + 0.5) * ratio - 0.5)) - first + 6;
+    ivec2 last = ivec2(size) - 1;
+    uint local = gl_LocalInvocationIndex;
+
+    for (uint i = local; i < uint(reach.x * reach.y); i += 256u) {
+        ivec2 c = clamp(origin + ivec2(int(i % uint(reach.x)), int(i / uint(reach.x))), ivec2(0), last);
+
+        lit[(int(i) / reach.x) * SPAN + int(i) % reach.x] = sigmoidize(source(c));
+    }
+
+    barrier();
+
+    for (uint i = local; i < uint(reach.y * 16); i += 256u) {
+        int row = int(i) / 16;
+        int column = int(i) % 16;
+        float at = (float(tile.x + column) + 0.5) * ratio.x - 0.5;
+        float base = floor(at);
+        float w[6];
+
+        weights(at - base, w);
+
+        int start = row * SPAN + int(base) - 2 - origin.x;
+        vec3 sum = vec3(0.0);
+
+        for (int k = 0; k < 6; k++) {
+            sum += w[k] * lit[start + k];
+        }
+
+        across[row * 16 + column] = sum;
+    }
+
+    barrier();
+
+    ivec2 p = tile + ivec2(gl_LocalInvocationID.xy);
+
+    if (p.x >= int(extent.x) || p.y >= int(extent.y)) {
+        return;
+    }
+
+    float at = (float(p.y) + 0.5) * ratio.y - 0.5;
+    float base = floor(at);
+    float w[6];
+
+    weights(at - base, w);
+
+    int start = (int(base) - 2 - origin.y) * 16 + int(gl_LocalInvocationID.x);
+    vec3 total = vec3(0.0);
+
+    for (int k = 0; k < 6; k++) {
+        total += w[k] * across[start + k * 16];
+    }
+
+    imageStore(target, p, vec4(srgbEncode(clamp(unsigmoidize(total), 0.0, 1.0)), 1.0));
+}
+
+vec3 source(ivec2 c) {
+    vec3 code = vec3(byteAt(2u, c), byteAt(0u, c), byteAt(1u, c)) / 255.0;
+
+    return mix(pow((code + 0.055) / 1.055, vec3(2.4)), code / 12.92, lessThanEqual(code, vec3(0.04045)));
+}
