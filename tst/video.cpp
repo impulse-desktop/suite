@@ -97,6 +97,8 @@ namespace {
         int checked = 0;
         int failed = 0;
         const char* filter = "bilinear";
+        u32 bucket = 0;
+        u32 buckets = 1;
 
         FormatCheck(ObjPool* pool, Ui* ui);
         VideoShader describe(const AVFrame* frame, const char* output);
@@ -1176,6 +1178,16 @@ void FormatCheck::verifyLinear(AVFrame* frame, StringView what, double tolerance
 }
 
 void FormatCheck::check(const Case& kase, StringView what) {
+    u32 hash = 2166136261u;
+
+    for (const char* c = what.begin(); c != what.end(); c++) {
+        hash = (hash ^ (u8)*c) * 16777619u;
+    }
+
+    if (hash % buckets != bucket) {
+        return;
+    }
+
     try {
         examine(kase, what);
     } catch (...) {
@@ -1447,10 +1459,18 @@ void FormatCheck::primaries() {
 }
 
 int main(int argc, char** argv) {
-    StringView part(argc > 1 ? argv[1] : "");
+    auto number = [](const char* text) {
+        u32 value = 0;
 
-    if (part != StringView(u8"formats") && part != StringView(u8"lanczos") && part != StringView(u8"colors")) {
-        sysE << StringView(u8"usage: video_test formats|lanczos|colors") << endL;
+        for (; *text >= '0' && *text <= '9'; text++) {
+            value = value * 10 + (u32)(*text - '0');
+        }
+
+        return value;
+    };
+
+    if (argc != 3 || !number(argv[2]) || number(argv[1]) >= number(argv[2])) {
+        sysE << StringView(u8"usage: video_test BUCKET BUCKETS") << endL;
 
         return 2;
     }
@@ -1460,18 +1480,21 @@ int main(int argc, char** argv) {
     Ui& ui = *Ui::create(pool, StringView(u8"video-test"), {64_d, 64_d});
     FormatCheck& check = *pool.make<FormatCheck>(&pool, &ui);
     bool crashed = false;
+
+    check.bucket = number(argv[1]);
+    check.buckets = number(argv[2]);
+
     auto body = makeRunable([&] {
         try {
-            if (part == StringView(u8"colors")) {
-                check.matrices();
-                check.locations();
-                check.systems();
-                check.transfers();
-                check.primaries();
-            } else {
-                check.filter = part == StringView(u8"lanczos") ? "lanczos" : "bilinear";
-                check.formats();
-            }
+            check.formats();
+            check.filter = "lanczos";
+            check.formats();
+            check.filter = "bilinear";
+            check.matrices();
+            check.locations();
+            check.systems();
+            check.transfers();
+            check.primaries();
         } catch (...) {
             crashed = true;
             sysE << StringView(u8"video formats: ") << Exception::current() << endL;

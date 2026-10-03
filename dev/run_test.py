@@ -80,6 +80,8 @@ def run(name, args):
     if args.runtime:
         os.makedirs(args.runtime, exist_ok=True)
         env["IM_E2E_TMP"] = os.path.abspath(args.runtime)
+    if args.bucket:
+        env["IM_E2E_BUCKET"] = args.bucket
     # a coverage run names every process's profile after this scenario:
     # pids are reused over a run, and two processes sharing a name means
     # one of them is lost
@@ -128,8 +130,11 @@ def main():
     parser.add_argument("--evidence", default="", help="where a failed scenario's captures and logs are kept, under its name")
     parser.add_argument("--runtime", default="", help="where the scenario's runtime dir goes (short: it holds Wayland sockets)")
     parser.add_argument("--timeout", type=float, default=120)
+    parser.add_argument("--bucket", default="", help="K/N: the scenario runs the K-th of its N buckets of checks")
     args = parser.parse_args()
     name = os.path.basename(args.scenario)[:-len(".py")]
+    if args.bucket:
+        name += "_" + args.bucket.split("/")[0]
     try:
         record = run(name, args)
     except Exception as e:  # never let a runner bug abort the graph

@@ -367,10 +367,19 @@ if not darwin:
     # the fixture and the runner: any change to the harness re-runs every scenario
     harness = ["$(S)/tst/session.py", "$(S)/dev/run_test.py"]
 
+    # a scenario with buckets becomes that many test nodes, each running the
+    # checks whose names hash into its bucket
+    buckets = {"video": 16}
+
+    runs = []
+    for scenario in sorted(set(build.glob("$(S)/tst/*.py")) - set(harness)):
+        base = os.path.basename(scenario)[:-len(".py")]
+        count = buckets.get(base, 0)
+        runs += [(scenario, f"{base}_{k}", f"{k}/{count}") for k in range(count)] if count else [(scenario, base, "")]
+
     test_nodes = []
     test_verdicts = []
-    for scenario in sorted(set(build.glob("$(S)/tst/*.py")) - set(harness)):
-        name = os.path.basename(scenario)[:-len(".py")]
+    for scenario, name, bucket in runs:
         if flags.filter and not fnmatch.fnmatch(name, flags.filter):
             continue
         if int(hashlib.sha1(name.encode()).hexdigest(), 16) % shard_count != shard_index:
@@ -383,6 +392,8 @@ if not darwin:
             "--helpers", "$(B)/e2e",
             "--out", out,
         ]
+        if bucket:
+            cmd += ["--bucket", bucket]
         if flags.runtime:
             cmd += ["--runtime", flags.runtime]
         if flags.evidence:
