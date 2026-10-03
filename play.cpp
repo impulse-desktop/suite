@@ -1661,6 +1661,7 @@ void Screen::show(Frame* frame) {
     Frame* previous = shown;
 
     shown = frame;
+    phase = (phase + 1) % 4;
 
     if (previous) {
         if (previous->image->draws == 0) {
@@ -1932,11 +1933,11 @@ void Screen::draw() {
         targetWidth = (u32)(p1.x - p0.x);
         targetHeight = (u32)(p1.y - p0.y);
 
-        phase = image->facts.dither ? (phase + 1) % 4 : 0;
+        u32 turn = image->facts.dither ? phase : 0;
 
-        if (image->facts.target[0] != targetWidth || image->facts.target[1] != targetHeight || image->facts.phase != phase) {
+        if (image->facts.target[0] != targetWidth || image->facts.target[1] != targetHeight || image->facts.phase != turn) {
             aim(image->facts, targetWidth, targetHeight);
-            image->facts.phase = phase;
+            image->facts.phase = turn;
             image->render->shadeWith(shaderFor(image->facts));
         }
 
