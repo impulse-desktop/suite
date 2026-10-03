@@ -1767,6 +1767,7 @@ namespace {
         bool endFrame(ImDrawData* draw) override;
         u32 maxTextureSide() override;
         u32 maxTextures() override;
+        bool software() override;
     };
 }
 
@@ -1807,6 +1808,14 @@ u32 VulkanRenderer::maxTextureSide() {
 
 u32 VulkanRenderer::maxTextures() {
     return maxTextureCount;
+}
+
+bool VulkanRenderer::software() {
+    VkPhysicalDeviceProperties props;
+
+    vkGetPhysicalDeviceProperties(gpu->phys, &props);
+
+    return props.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU;
 }
 
 namespace {

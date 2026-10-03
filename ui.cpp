@@ -388,6 +388,7 @@ namespace {
         ImTextureRef loadTexture(u32 width, u32 height, const void* rgba) override;
         void releaseTexture(ImTextureRef texture) override;
         u32 maxTextureSide() override;
+        bool software() override;
         bool drawErrorPanel(StringView message) override;
         void trace(StringView what) override;
         void timing(StringView line) override;
@@ -709,6 +710,10 @@ void UiImpl::releaseTexture(ImTextureRef ref) {
 
 u32 UiImpl::maxTextureSide() {
     return renderer->maxTextureSide();
+}
+
+bool UiImpl::software() {
+    return renderer->software();
 }
 
 bool UiImpl::drawErrorPanel(StringView message) {

@@ -453,10 +453,10 @@ namespace {
         }
     }
 
-    static void aim(VideoShader& facts, u32 width, u32 height) {
+    static void aim(VideoShader& facts, u32 width, u32 height, bool software) {
         facts.target[0] = width;
         facts.target[1] = height;
-        facts.filter = width > facts.size[0] && height > facts.size[1] ? "lanczos" : "bilinear";
+        facts.filter = !software && width > facts.size[0] && height > facts.size[1] ? "lanczos" : "bilinear";
     }
 
     static VideoShader describeFrame(const AVFrame* frame, const char* output, float sdrWhiteNits) {
@@ -1718,7 +1718,7 @@ void Screen::makeRender(VideoImage* image) {
     image->facts = describeFrame(frame, output, RendererOptions{}.sdrWhiteNits);
 
     if (targetWidth) {
-        aim(image->facts, targetWidth, targetHeight);
+        aim(image->facts, targetWidth, targetHeight, player->ui->software());
     }
 
     RenderShader& shader = shaderFor(image->facts);
@@ -1927,7 +1927,7 @@ void Screen::draw() {
         u32 turn = image->facts.dither ? phase : 0;
 
         if (image->facts.target[0] != targetWidth || image->facts.target[1] != targetHeight || image->facts.phase != turn) {
-            aim(image->facts, targetWidth, targetHeight);
+            aim(image->facts, targetWidth, targetHeight, player->ui->software());
             image->facts.phase = turn;
             image->render->shadeWith(shaderFor(image->facts));
         }

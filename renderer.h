@@ -67,6 +67,7 @@ struct Renderer {
 
     virtual u32 maxTextureSide() = 0;
     virtual u32 maxTextures() = 0;
+    virtual bool software() = 0;
 
     virtual RenderImage* upload(stl::ObjPool& pool, u32 width, u32 height, const void* rgba, bool hdr) = 0;
     virtual RenderImage* import(stl::ObjPool& pool, SharedImage& source, bool hdr) = 0;
