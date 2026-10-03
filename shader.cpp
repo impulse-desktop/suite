@@ -2063,7 +2063,6 @@ namespace {
 
             out << StringView(u8";\n");
         }
-
     }
 
     static void finish(StringBuilder& out, Node* const* color, const char* tail) {
@@ -2268,112 +2267,112 @@ namespace {
                 u32 b = node->arity > 1 ? node->args[1]->id : 0;
                 Kind from = node->arity > 0 ? node->args[0]->kind : Kind::Float;
 
-        switch (node->op) {
-            case Op::Add:
-                Spirv::op(s.body, real ? 129 : 128, result, node->id, a, b);
-                break;
-            case Op::Sub:
-                Spirv::op(s.body, real ? 131 : 130, result, node->id, a, b);
-                break;
-            case Op::Neg:
-                Spirv::op(s.body, real ? 127 : 126, result, node->id, a);
-                break;
-            case Op::Mul:
-                Spirv::op(s.body, real ? 133 : 132, result, node->id, a, b);
-                break;
-            case Op::Div:
-                Spirv::op(s.body, 136, result, node->id, a, b);
-                break;
-            case Op::Abs:
-                Spirv::op(s.body, 12, result, node->id, glsl, real ? GlslFAbs : GlslSAbs, a);
-                break;
-            case Op::Min:
-                Spirv::op(s.body, 12, result, node->id, glsl, real ? GlslFMin : sign ? GlslSMin : GlslUMin, a, b);
-                break;
-            case Op::Max:
-                Spirv::op(s.body, 12, result, node->id, glsl, real ? GlslFMax : sign ? GlslSMax : GlslUMax, a, b);
-                break;
-            case Op::Shr:
-                Spirv::op(s.body, 194, result, node->id, a, b);
-                break;
-            case Op::Shl:
-                Spirv::op(s.body, 196, result, node->id, a, b);
-                break;
-            case Op::And:
-                Spirv::op(s.body, 199, result, node->id, a, b);
-                break;
-            case Op::Or:
-                Spirv::op(s.body, 197, result, node->id, a, b);
-                break;
-            case Op::Le:
-                Spirv::op(s.body, from == Kind::Float ? 188 : from == Kind::Int ? 179 : 178, typeBool, node->id, a, b);
-                break;
-            case Op::Lt:
-                Spirv::op(s.body, from == Kind::Float ? 184 : from == Kind::Int ? 177 : 176, typeBool, node->id, a, b);
-                break;
-            case Op::Eq:
-                Spirv::op(s.body, from == Kind::Float ? 180 : 170, typeBool, node->id, a, b);
-                break;
-            case Op::Select:
-                Spirv::op(s.body, 169, result, node->id, a, b, node->args[2]->id);
-                break;
-            case Op::Floor:
-                Spirv::op(s.body, 12, result, node->id, glsl, GlslFloor, a);
-                break;
-            case Op::Exp2:
-                Spirv::op(s.body, 12, result, node->id, glsl, GlslExp2, a);
-                break;
-            case Op::Exp:
-                Spirv::op(s.body, 12, result, node->id, glsl, GlslExp, a);
-                break;
-            case Op::Log2:
-                Spirv::op(s.body, 12, result, node->id, glsl, GlslLog2, a);
-                break;
-            case Op::Log:
-                Spirv::op(s.body, 12, result, node->id, glsl, GlslLog, a);
-                break;
-            case Op::Sqrt:
-                Spirv::op(s.body, 12, result, node->id, glsl, GlslSqrt, a);
-                break;
-            case Op::Convert:
-                if (from == Kind::Bool && node->kind == Kind::Float) {
-                    Spirv::op(s.body, 169, result, node->id, a, one, none);
-                } else if (from == Kind::Float) {
-                    Spirv::op(s.body, sign ? 110 : 109, result, node->id, a);
-                } else if (node->kind == Kind::Float) {
-                    Spirv::op(s.body, from == Kind::Int ? 111 : 112, result, node->id, a);
-                } else if (from != Kind::Bool) {
-                    Spirv::op(s.body, 124, result, node->id, a);
-                } else {
-                    fail(StringView(u8"a video shader converts a condition to an integer"));
-                }
-                break;
-            case Op::Load: {
-                u32 pointer = s.fresh();
+                switch (node->op) {
+                    case Op::Add:
+                        Spirv::op(s.body, real ? 129 : 128, result, node->id, a, b);
+                        break;
+                    case Op::Sub:
+                        Spirv::op(s.body, real ? 131 : 130, result, node->id, a, b);
+                        break;
+                    case Op::Neg:
+                        Spirv::op(s.body, real ? 127 : 126, result, node->id, a);
+                        break;
+                    case Op::Mul:
+                        Spirv::op(s.body, real ? 133 : 132, result, node->id, a, b);
+                        break;
+                    case Op::Div:
+                        Spirv::op(s.body, 136, result, node->id, a, b);
+                        break;
+                    case Op::Abs:
+                        Spirv::op(s.body, 12, result, node->id, glsl, real ? GlslFAbs : GlslSAbs, a);
+                        break;
+                    case Op::Min:
+                        Spirv::op(s.body, 12, result, node->id, glsl, real ? GlslFMin : sign ? GlslSMin : GlslUMin, a, b);
+                        break;
+                    case Op::Max:
+                        Spirv::op(s.body, 12, result, node->id, glsl, real ? GlslFMax : sign ? GlslSMax : GlslUMax, a, b);
+                        break;
+                    case Op::Shr:
+                        Spirv::op(s.body, 194, result, node->id, a, b);
+                        break;
+                    case Op::Shl:
+                        Spirv::op(s.body, 196, result, node->id, a, b);
+                        break;
+                    case Op::And:
+                        Spirv::op(s.body, 199, result, node->id, a, b);
+                        break;
+                    case Op::Or:
+                        Spirv::op(s.body, 197, result, node->id, a, b);
+                        break;
+                    case Op::Le:
+                        Spirv::op(s.body, from == Kind::Float ? 188 : from == Kind::Int ? 179 : 178, typeBool, node->id, a, b);
+                        break;
+                    case Op::Lt:
+                        Spirv::op(s.body, from == Kind::Float ? 184 : from == Kind::Int ? 177 : 176, typeBool, node->id, a, b);
+                        break;
+                    case Op::Eq:
+                        Spirv::op(s.body, from == Kind::Float ? 180 : 170, typeBool, node->id, a, b);
+                        break;
+                    case Op::Select:
+                        Spirv::op(s.body, 169, result, node->id, a, b, node->args[2]->id);
+                        break;
+                    case Op::Floor:
+                        Spirv::op(s.body, 12, result, node->id, glsl, GlslFloor, a);
+                        break;
+                    case Op::Exp2:
+                        Spirv::op(s.body, 12, result, node->id, glsl, GlslExp2, a);
+                        break;
+                    case Op::Exp:
+                        Spirv::op(s.body, 12, result, node->id, glsl, GlslExp, a);
+                        break;
+                    case Op::Log2:
+                        Spirv::op(s.body, 12, result, node->id, glsl, GlslLog2, a);
+                        break;
+                    case Op::Log:
+                        Spirv::op(s.body, 12, result, node->id, glsl, GlslLog, a);
+                        break;
+                    case Op::Sqrt:
+                        Spirv::op(s.body, 12, result, node->id, glsl, GlslSqrt, a);
+                        break;
+                    case Op::Convert:
+                        if (from == Kind::Bool && node->kind == Kind::Float) {
+                            Spirv::op(s.body, 169, result, node->id, a, one, none);
+                        } else if (from == Kind::Float) {
+                            Spirv::op(s.body, sign ? 110 : 109, result, node->id, a);
+                        } else if (node->kind == Kind::Float) {
+                            Spirv::op(s.body, from == Kind::Int ? 111 : 112, result, node->id, a);
+                        } else if (from != Kind::Bool) {
+                            Spirv::op(s.body, 124, result, node->id, a);
+                        } else {
+                            fail(StringView(u8"a video shader converts a condition to an integer"));
+                        }
+                        break;
+                    case Op::Load: {
+                        u32 pointer = s.fresh();
 
-                Spirv::op(s.body, 65, storageWord, pointer, bytes, zero, a);
-                Spirv::op(s.body, 61, typeUint, node->id, pointer);
-                break;
-            }
-            case Op::Half: {
-                u32 pair = s.fresh();
+                        Spirv::op(s.body, 65, storageWord, pointer, bytes, zero, a);
+                        Spirv::op(s.body, 61, typeUint, node->id, pointer);
+                        break;
+                    }
+                    case Op::Half: {
+                        u32 pair = s.fresh();
 
-                Spirv::op(s.body, 12, typeVec2, pair, glsl, GlslUnpackHalf2x16, a);
-                Spirv::op(s.body, 81, typeFloat, node->id, pair, 0);
-                break;
-            }
-            case Op::BitsFloat:
-                Spirv::op(s.body, 124, typeFloat, node->id, a);
-                break;
-                case Op::Shared: {
-                    u32 pointer = s.fresh();
+                        Spirv::op(s.body, 12, typeVec2, pair, glsl, GlslUnpackHalf2x16, a);
+                        Spirv::op(s.body, 81, typeFloat, node->id, pair, 0);
+                        break;
+                    }
+                    case Op::BitsFloat:
+                        Spirv::op(s.body, 124, typeFloat, node->id, a);
+                        break;
+                    case Op::Shared: {
+                        u32 pointer = s.fresh();
 
-                    Spirv::op(s.body, 65, sharedFloat, pointer, arrays[(int)node->value], a);
-                    Spirv::op(s.body, 61, typeFloat, node->id, pointer);
-                    break;
-                }
-                default:
-                    fail(StringView(u8"a video shader node has no SPIR-V form"));
+                        Spirv::op(s.body, 65, sharedFloat, pointer, arrays[(int)node->value], a);
+                        Spirv::op(s.body, 61, typeFloat, node->id, pointer);
+                        break;
+                    }
+                    default:
+                        fail(StringView(u8"a video shader node has no SPIR-V form"));
                 }
             }
         }
