@@ -1,30 +1,18 @@
 #!/usr/bin/env python3
 
-"""Renders the player's video shaders into their variants and the tables
-the player matches frames against.
+"""Renders the tables the player matches frames against and compiles its
+video shaders from: the storage layouts and the codes of H.273 in
+tables.py.
 
-video.py builds a variant's shader as simplified scalar expressions
-(ir.py) and prints it as GLSL; tables.py holds the storage layouts and
-the codes of H.273.
-
-  video_shaders.py parts
   video_shaders.py codes HEADER
-  video_shaders.py compile LAYOUT HEADER GLSLANG
-  video_shaders.py spirv PART SOURCE LAYOUT_HEADER...
-  video_shaders.py msl LAYOUT HEADER GLSLANG SPIRV_CROSS
-  video_shaders.py metal PART SOURCE LAYOUT_HEADER...
 """
 
-import subprocess
 import sys
-import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-import video
 
 
 def chromaticity(x, y):
@@ -80,11 +68,6 @@ def tables():
     return SimpleNamespace(**{name: getattr(source, name.upper()) for name in names})
 
 
-def render(variant, facts=None):
-    layout, system, transfer, conversion, output = variant
-    return video.shader(layouts(tables())[layout], system, transfer, conversion, output, facts)
-
-
 def layouts(module):
     every = {}
     for name, entry in module.layouts.items():
@@ -127,95 +110,7 @@ def check(name, layout):
             raise ValueError(f"component {c} of {name} straddles a word")
 
 
-def variants():
-    module = tables()
-    every = []
-    for name, layout in layouts(module).items():
-        check(name, layout)
-        for system in module.systems.get(layout["model"], [layout["model"]]):
-            for transfer in module.shapes.get(system, list(module.chains)):
-                for conversion, output in module.chains[transfer]:
-                    every.append((name, system, transfer, conversion, output))
-    return every
-
-
-PARTS = 16
-
-
-def parts():
-    names = list(layouts(tables()))
-    return [names[part::PARTS] for part in range(PARTS)]
-
-
-def part_variants(part):
-    names = parts()[part]
-    return [variant for variant in variants() if variant[0] in names]
-
-
-def symbol(variant):
-    return "video_" + "_".join(variant)
-
-
-def spirv(variant, glslang, directory, variable=None):
-    source = Path(directory) / f"{symbol(variant)}.frag"
-    source.write_text(render(variant), encoding="utf-8")
-    command = [glslang, "--quiet", "--target-env", "vulkan1.1", "-V", "-S", "frag"]
-    if variable:
-        command += ["--variable-name", variable, "-o", str(source.with_suffix(".h"))]
-    else:
-        command += ["-o", str(source.with_suffix(".spv"))]
-    subprocess.run([*command, str(source)], check=True)
-    return source.with_suffix(".h" if variable else ".spv")
-
-
 HEADER = ["#pragma once", "", "#include <stddef.h>", "#include <stdint.h>", ""]
-
-
-def unpragma(text):
-    return [line for line in text.splitlines() if line.strip() != "#pragma once"]
-
-
-def compile_layout(layout, header, glslang):
-    lines = []
-    with tempfile.TemporaryDirectory(prefix="video-shader-") as directory:
-        for variant in variants():
-            if variant[0] == layout:
-                part = spirv(variant, glslang, directory, f"{symbol(variant)}_spv")
-                lines += unpragma(part.read_text(encoding="utf-8")) + [""]
-    Path(header).write_text("\n".join(lines), encoding="utf-8")
-
-
-def msl_layout(layout, header, glslang, spirv_cross):
-    lines = []
-    with tempfile.TemporaryDirectory(prefix="video-shader-") as directory:
-        for variant in variants():
-            if variant[0] != layout:
-                continue
-            module = spirv(variant, glslang, directory)
-            source = module.with_suffix(".metal")
-            subprocess.run(
-                [spirv_cross, str(module), "--msl", "--msl-version", "20100", "--msl-decoration-binding", "--output", str(source)],
-                check=True,
-            )
-            text = source.read_text(encoding="utf-8")
-            if ")VIDEO_MSL" in text:
-                raise ValueError("a Metal shader contains its raw string delimiter")
-            lines += [f'static constexpr char {symbol(variant)}_msl[] = R"VIDEO_MSL(', text.rstrip(), ')VIDEO_MSL";', ""]
-    Path(header).write_text("\n".join(lines), encoding="utf-8")
-
-
-def part_source(part, source, headers, suffix, size):
-    found = {Path(header).name: Path(header) for header in headers}
-    lines = ["#include <video_codes.h>", ""]
-    for layout in parts()[part]:
-        lines += unpragma(found[f"video_{layout}.{suffix}.h"].read_text(encoding="utf-8")) + [""]
-    every = part_variants(int(part))
-    lines.append(f"const VideoShaderCode videoShaders{part}[{len(every)}] = {{")
-    for variant in every:
-        layout, system, transfer, conversion, output = variant
-        name = symbol(variant) + "_" + suffix
-        lines.append(f'    {{"{layout}", "{system}", "{transfer}", "{conversion}", "{output}", {name}, {size(name)}}},')
-    Path(source).write_text("\n".join(lines + ["};", ""]), encoding="utf-8")
 
 
 def matrix(rows):
@@ -242,17 +137,22 @@ def codes(header):
         "    int count;",
         "    int components[4][5];",
         "    int padding[4];",
+        "    int luma[5];",
         "};",
         "",
         "static constexpr VideoLayout videoLayouts[] = {",
     ]
-    members = [(name, layout, formats, components) for name, layout in layouts(module).items() for formats, components in layout["members"]]
+    every = layouts(module)
+    for name, layout in every.items():
+        check(name, layout)
+    members = [(name, layout, formats, components) for name, layout in every.items() for formats, components in layout["members"]]
     for name, layout, formats, components in members:
         flags = ", ".join("true" if flag in layout["flags"] else "false" for flag in ("be", "alpha", "float", "bits"))
         flags += ", true" if layout.get("inverted") else ", false"
         fields = ", ".join("{" + ", ".join(str(value) for value in component) + "}" for component in components)
         padding = ", ".join(str(component[3] - whole[3]) for component, whole in zip(components, layout["components"]))
-        lines.append(f'    {{"{formats[0]}", "{name}", "{layout["model"]}", {flags}, {len(components)}, {{{fields}}}, {{{padding}}}}},')
+        luma = ", ".join(str(value) for value in ([layout["luma"][0], *layout["luma"][1]] if "luma" in layout else [0] * 5))
+        lines.append(f'    {{"{formats[0]}", "{name}", "{layout["model"]}", {flags}, {len(components)}, {{{fields}}}, {{{padding}}}, {{{luma}}}}},')
     lines += ["};", ""]
     lines += ["struct VideoFormat {", "    const char* name;", "    int layout;", "};", "", "static constexpr VideoFormat videoFormats[] = {"]
     for index, (name, layout, formats, components) in enumerate(members):
@@ -307,45 +207,13 @@ def codes(header):
         lines.append(f"    {{{code}, {numbers(site)}}},")
     lines += ["};", ""]
     lines += [f"static constexpr uint8_t videoRanges[] = {{{', '.join(str(value) for value in module.ranges)}}};", ""]
-    lines += [
-        "struct VideoShaderCode {",
-        "    const char* layout;",
-        "    const char* system;",
-        "    const char* transfer;",
-        "    const char* conversion;",
-        "    const char* output;",
-        "    const void* code;",
-        "    size_t size;",
-        "};",
-        "",
-        "struct VideoShaderPart {",
-        "    const VideoShaderCode* codes;",
-        "    size_t count;",
-        "};",
-        "",
-    ]
-    counts = [len(part_variants(part)) for part in range(PARTS)]
-    lines += [f"extern const VideoShaderCode videoShaders{part}[{count}];" for part, count in enumerate(counts)]
-    lines += ["", "static constexpr VideoShaderPart videoShaderParts[] = {"]
-    lines += [f"    {{videoShaders{part}, {count}}}," for part, count in enumerate(counts)]
-    lines += ["};", ""]
     Path(header).write_text("\n".join(lines), encoding="utf-8")
 
 
 def main():
     args = sys.argv[1:]
-    if len(args) == 1 and args[0] == "parts":
-        print("\n".join(" ".join(layouts) for layouts in parts()))
-    elif len(args) == 2 and args[0] == "codes":
+    if len(args) == 2 and args[0] == "codes":
         codes(args[1])
-    elif len(args) == 4 and args[0] == "compile":
-        compile_layout(args[1], args[2], args[3])
-    elif len(args) >= 3 and args[0] == "spirv":
-        part_source(int(args[1]), args[2], args[3:], "spv", lambda name: f"sizeof({name})")
-    elif len(args) == 5 and args[0] == "msl":
-        msl_layout(args[1], args[2], args[3], args[4])
-    elif len(args) >= 3 and args[0] == "metal":
-        part_source(int(args[1]), args[2], args[3:], "msl", lambda name: f"sizeof({name}) - 1")
     else:
         raise SystemExit(__doc__)
 

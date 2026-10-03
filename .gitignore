@@ -15,6 +15,7 @@ out/
 /jxl_dump
 /device_uuid
 /video_test
+/video_shader
 /renderer_test
 /imgui_frames_test
 

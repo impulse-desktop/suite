@@ -2,9 +2,10 @@
 
 """Times the video shaders of gpu/ against hand-written ones on a corpus of pipelines.
 
-Every case renders one variant of the video templates and the hand-written shader
-dev/video_bench/hand/NAME.frag over the same random frame, checks that the
-two agree, and times both at 3840x2160 into R8 (arithmetic-bound) and
+Every case compiles its frame's facts into the player's video shader
+through shader.cpp (the video_shader program the build makes) and renders it
+and the hand-written shader dev/video_bench/hand/NAME.frag over the same
+random frame, checks that the two agree, and times both at 3840x2160 into R8 (arithmetic-bound) and
 RGBA16F (bandwidth-bound) targets. The cases are prepared by one process
 each, as many at once as there are cores; then one harness times them all
 on one device, a round over every case at a time, keeping each case's best.
@@ -12,7 +13,7 @@ The table gives template/hand ratios and
 their geometric means; the instruction and memory counts come from the
 driver through VK_KHR_pipeline_executable_properties.
 
-  ix run set/pg/libs lib/vulkan/drivers --vulkan=amd/radv -- python3 dev/video_bench/bench.py [--rounds N] [--work DIR] [CASE...]
+  ix run set/pg/libs lib/vulkan/drivers --vulkan=amd/radv -- python3 dev/video_bench/bench.py --compiler BUILD/dev/video_shader [--rounds N] [--work DIR] [CASE...]
 """
 
 import argparse
@@ -136,18 +137,18 @@ def ycc(kr, kb):
     return [[1, 0, 2 * (1 - kr)], [1, -2 * kb * (1 - kb) / kg, -2 * kr * (1 - kr) / kg], [1, 2 * (1 - kb), 0]]
 
 
-def piece(segments, top):
-    upper, lower, threshold = video_shaders.segments(segments)
-    knee = threshold >= 0 and upper[1] == 1
-    curved, straight = (lower, upper) if knee else (upper, lower)
-    return [*curved[:4], straight[0] * straight[2], straight[0] * straight[3] - straight[4], -1 if knee else 1, 0, curved[4], 0, threshold, top]
+def table(piece):
+    if not piece:
+        return [0.0] * 11
+    upper, lower, threshold = video_shaders.segments(piece)
+    return [*upper, *lower, threshold]
 
 
-def columns(matrix):
-    return [value for column in range(3) for value in (matrix[0][column], matrix[1][column], matrix[2][column], 0.0)]
+def bits(value):
+    return format(struct.unpack("<Q", struct.pack("<d", float(value)))[0], "x")
 
 
-def template(case, layout, components, offsets, lines):
+def facts(case, layout, components, offsets, lines):
     sx, sy = case["subsampling"]
     model = layout["model"]
     yuv = model == "yuv"
@@ -159,18 +160,15 @@ def template(case, layout, components, offsets, lines):
     same = all(abs(to_output[i][j] - (i == j)) < 1e-6 for i in range(3) for j in range(3))
     sdr = case["output"] == "sdr"
     shape, conversion, output = transfer["shape"], "same" if same else "convert", case["output"]
-    unbounded = 3.4e38
     eotf = video_shaders.segments(transfer.get("eotf", [[0] * 5]))
-    curve = piece(eotf, unbounded)
+    curve = table(transfer.get("eotf"))
     power = eotf[0] == eotf[1] and eotf[0][2] == 1 and eotf[0][3] == 0 and eotf[0][4] == 0 and eotf[2] < 0
     if shape == "curve" and same and case["transfer"] == (13 if sdr else 8):
         shape = "identity"
-    elif shape == "curve" and same and not sdr:
-        pass
-    elif shape == "curve" and same and power and eotf[0][1] in (1, 2.4):
+    elif shape == "curve" and same and sdr and power and eotf[0][1] in (1, 2.4):
         scale, gamma = eotf[0][0], eotf[0][1]
-        curve = piece([[1.055 * scale ** (1 / 2.4), gamma / 2.4, 1, 0, 0.055], [12.92 * scale, gamma, 1, 0, 0], (0.0031308 / scale) ** (1 / gamma)], 1.0)
-    elif shape == "curve" or sdr or shape == "log":
+        curve = [1.055 * scale ** (1 / 2.4), gamma / 2.4, 1, 0, 0.055, 12.92 * scale, gamma, 1, 0, 0, (0.0031308 / scale) ** (1 / gamma)]
+    elif sdr or shape == "log":
         conversion = "convert"
     levels, scales = [0.0] * 4, [1.0] * 4
     for c, component in enumerate(components if model != "palette" and "float" not in layout["flags"] else []):
@@ -185,9 +183,6 @@ def template(case, layout, components, offsets, lines):
             levels[slot], scales[slot] = (2 ** (depth - 1), top) if full else (128 * unit, 224 * unit)
         else:
             levels[slot], scales[slot] = (0, top) if full else (16 * unit, 219 * unit)
-        padding = 2 ** (component[3] - layout["components"][c][3])
-        levels[slot] *= padding
-        scales[slot] *= padding
     kr, kb = matrix.get("weights", [0, 0]) if isinstance(matrix.get("weights"), list) else (0, 0)
     to_signal = [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
     if yuv and "toSignal" in matrix:
@@ -199,67 +194,30 @@ def template(case, layout, components, offsets, lines):
     decode = [[to_signal[r][c] / scales[c] for c in range(3)] for r in range(3)]
     bias = [-sum(decode[r][c] * levels[c] for c in range(3)) for r in range(3)] + [1 / scales[3]]
     site = MODULE.locations[case["location"]]
-    red = 0
-    if model == "bayer":
-        red = case["format"][6:].index("r")
-    uniform = struct.pack("<4I", *offsets) + struct.pack("<4I", *lines) + struct.pack("<4I", W, H, -(-W >> sx), -(-H >> sy))
-    uniform += struct.pack("<4f", 2.0**-sx, 2.0**-sy, site[0] * ((1 << sx) - 1) * 2.0**-sx, site[1] * ((1 << sy) - 1) * 2.0**-sy)
-    uniform += struct.pack("<12f", *columns(decode)) + struct.pack("<4f", *bias)
-    uniform += struct.pack("<4f", red % 2, red // 2, 0, 0) + struct.pack("<4f", kr, kb, 0, 0)
-    uniform += struct.pack("<12f", *curve)
-    uniform += struct.pack("<12f", *piece(transfer.get("oetf", [[0] * 5]), unbounded))
-    uniform += struct.pack("<12f", *piece(transfer.get("inverse", [[0] * 5]), unbounded))
-    uniform += struct.pack("<12f", *columns(to_output))
-    uniform += struct.pack("<4f", transfer.get("decades", 0), 10000 / WHITE, 1000 / WHITE, 0)
-    uniform += struct.pack("<4f", *to_xyz[1], 0)
+    red = case["format"][6:].index("r") if model == "bayer" else 0
     system = matrix["system"] if yuv else model
-    return (system, shape, conversion, output), uniform
+    words = [*offsets, *lines, W, H, -(-W >> sx), -(-H >> sy)]
+    numbers = [2.0**-sx, 2.0**-sy, site[0] * ((1 << sx) - 1) * 2.0**-sx, site[1] * ((1 << sy) - 1) * 2.0**-sy]
+    numbers += [value for row in decode for value in row] + bias + [red % 2, red // 2, kr, kb]
+    numbers += curve + table(transfer.get("oetf")) + table(transfer.get("inverse"))
+    numbers += [value for row in to_output for value in row]
+    numbers += [transfer.get("decades", 0), 10000 / WHITE, 1000 / WHITE, *to_xyz[1]]
+    return [case["format"], system, shape, conversion, output, *(format(word, "x") for word in words), *map(bits, numbers)]
 
 
-FACTS = {
-    **{f"frame.planeOffset[{i}]": (4 * i, "I") for i in range(4)},
-    **{f"frame.lineSize[{i}]": (16 + 4 * i, "I") for i in range(4)},
-    **{f"frame.size[{i}]": (32 + 4 * i, "I") for i in range(4)},
-    **{f"frame.chroma[{i}]": 48 + 4 * i for i in range(4)},
-    **{f"frame.sites[{i}]": 128 + 4 * i for i in range(2)},
-    **{f"frame.decode[{c}][{r}]": 64 + 16 * c + 4 * r for c in range(3) for r in range(3)},
-    **{f"frame.bias[{i}]": 112 + 4 * i for i in range(4)},
-    **{f"frame.weights[{i}]": 144 + 4 * i for i in range(2)},
-    **{f"frame.{name}[{s}][{i}]": base + 16 * s + 4 * i for name, base in (("curve", 160), ("oetf", 208), ("inverse", 256)) for s in range(3) for i in range(4)},
-    **{f"frame.toOutput[{c}][{r}]": 304 + 16 * c + 4 * r for c in range(3) for r in range(3)},
-    **{f"frame.light[{i}]": 352 + 4 * i for i in range(3)},
-    **{f"frame.luminance[{i}]": 368 + 4 * i for i in range(3)},
-}
-
-
-def structure(values):
-    facts, seen = {}, {}
-    for path, value in values.items():
-        if value in (0.0, 1.0, -1.0):
-            facts[path] = value
-        elif value in seen:
-            facts[path] = seen[value]
-        else:
-            seen[value] = path
-    return facts
-
-
-def prepare(case, directory, hot=False, structural=False):
+def prepare(case, directory, compiler):
     name, layout, components = layout_of(case["format"])
     data, offsets, lines = frame(case, layout, components)
-    (system, shape, conversion, output), uniform = template(case, layout, components, offsets, lines)
-    values = {path: struct.unpack_from("<" + (place[1] if isinstance(place, tuple) else "f"), uniform, place[0] if isinstance(place, tuple) else place)[0] for path, place in FACTS.items()}
-    facts = values if hot else structure(values) if structural else None
+    arguments = facts(case, layout, components, offsets, lines)
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "data.bin").write_bytes(data)
-    (directory / "template.ubo").write_bytes(uniform)
-    (directory / "template.frag").write_text(video_shaders.render((name, system, shape, conversion, output), facts))
+    (directory / "template.ubo").write_bytes(bytes(16))
+    (directory / "template.spv").write_bytes(subprocess.run([compiler, *arguments], check=True, capture_output=True).stdout)
     sx, sy = case["subsampling"]
     (directory / "optimum.ubo").write_bytes(struct.pack("<4I", *offsets) + struct.pack("<4I", *lines) + struct.pack("<4I", W, H, -(-W >> sx), -(-H >> sy)) + struct.pack("<4f", WHITE, 0, 0, 0))
     (directory / "optimum.frag").write_text((HERE / "hand" / f"{case['name']}.frag").read_text())
-    for shader in ("template", "optimum"):
-        subprocess.run(["glslangValidator", "--quiet", "--target-env", "vulkan1.1", "-V", "-S", "frag", str(directory / f"{shader}.frag"), "-o", str(directory / f"{shader}.spv")], check=True)
-    return "_".join((name, system, shape, conversion, output))
+    subprocess.run(["glslangValidator", "--quiet", "--target-env", "vulkan1.1", "-V", "-S", "frag", str(directory / "optimum.frag"), "-o", str(directory / "optimum.spv")], check=True)
+    return "_".join((name, *arguments[1:5]))
 
 
 def measure(harness, vertex, directories, rounds):
@@ -282,16 +240,15 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--rounds", type=int, default=5)
     parser.add_argument("--work", default=str(SUITE / ".build" / "video_bench"))
+    parser.add_argument("--compiler", required=True)
     parser.add_argument("--prepare", action="store_true")
-    parser.add_argument("--hot", action="store_true")
-    parser.add_argument("--structure", action="store_true")
     parser.add_argument("cases", nargs="*")
     args = parser.parse_args()
     work = Path(args.work)
     cases = [dict(zip(FIELDS, entry)) for entry in CORPUS if not args.cases or entry[1] in args.cases]
     if args.prepare:
         for case in cases:
-            (work / case["name"] / "variant").write_text(prepare(case, work / case["name"], args.hot, args.structure))
+            (work / case["name"] / "variant").write_text(prepare(case, work / case["name"], args.compiler))
         return
     work.mkdir(parents=True, exist_ok=True)
     harness = work / "harness"
@@ -304,7 +261,7 @@ def main():
     while pending or running:
         while pending and len(running) < (os.cpu_count() or 1):
             case = pending.pop(0)
-            running.append(subprocess.Popen([sys.executable, __file__, "--prepare", "--work", str(work), *(["--hot"] if args.hot else []), *(["--structure"] if args.structure else []), case["name"]]))
+            running.append(subprocess.Popen([sys.executable, __file__, "--prepare", "--compiler", args.compiler, "--work", str(work), case["name"]]))
         running[0].wait()
         if running[0].returncode:
             raise SystemExit(f"preparing a case failed: {running[0].args}")

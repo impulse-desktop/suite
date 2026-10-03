@@ -3,6 +3,7 @@
 #include "ui.h"
 #include "error.h"
 #include "pooled.h"
+#include "shader.h"
 
 #include <std/ios/sys.h>
 #include <std/sys/crt.h>
@@ -97,34 +98,8 @@ namespace {
         void forget();
     };
 
-    struct FrameUniform {
-        u32 planeOffset[4];
-        u32 lineSize[4];
-        u32 size[4];
-        float chroma[4];
-        float decode[3][4];
-        float bias[4];
-        float sites[4];
-        float weights[4];
-        float curve[3][4];
-        float oetf[3][4];
-        float inverse[3][4];
-        float toOutput[3][4];
-        float light[4];
-        float luminance[4];
-    };
-
-    struct FrameShader {
-        const char* layout = nullptr;
-        const char* system = nullptr;
-        const char* transfer = nullptr;
-        const char* conversion = nullptr;
-        const char* output = nullptr;
-        FrameUniform uniform = {};
-    };
-
     struct CompiledShader {
-        const VideoShaderCode* code;
+        VideoShader facts;
         RenderShader* shader;
     };
 
@@ -310,7 +285,7 @@ namespace {
         void retired(VideoImage* image);
         void applyClock(const Clock& clock);
         void makeRender(VideoImage* image);
-        RenderShader& compile(const VideoShaderCode& code);
+        RenderShader& shaderFor(const VideoShader& facts);
         void seek(double to, bool play);
         void toggle();
         void sendControl(Channel* to);
@@ -453,33 +428,6 @@ namespace {
         return nullptr;
     }
 
-    static void putMatrix(float (&out)[3][4], const double (&rows)[3][3]) {
-        for (int column = 0; column < 3; column++) {
-            for (int row = 0; row < 3; row++) {
-                out[column][row] = (float)rows[row][column];
-            }
-        }
-    }
-
-    static void putPiece(float (&out)[3][4], const double (&piece)[11]) {
-        bool knee = piece[10] >= 0. && piece[1] == 1.;
-        const double* curved = knee ? piece + 5 : piece;
-        const double* straight = knee ? piece : piece + 5;
-
-        for (int i = 0; i < 4; i++) {
-            out[0][i] = (float)curved[i];
-        }
-
-        out[1][0] = (float)(straight[0] * straight[2]);
-        out[1][1] = (float)(straight[0] * straight[3] - straight[4]);
-        out[1][2] = knee ? -1.f : 1.f;
-        out[1][3] = 0.f;
-        out[2][0] = (float)curved[4];
-        out[2][1] = 0.f;
-        out[2][2] = (float)piece[10];
-        out[2][3] = 0.f;
-    }
-
     static void yccMatrix(double kr, double kb, double (&rows)[3][3]) {
         double kg = 1. - kr - kb;
         const double ncl[3][3] = {
@@ -495,7 +443,7 @@ namespace {
         }
     }
 
-    static FrameShader describeFrame(const AVFrame* frame, const char* output, float sdrWhiteNits) {
+    static VideoShader describeFrame(const AVFrame* frame, const char* output, float sdrWhiteNits) {
         AVPixelFormat format = (AVPixelFormat)frame->format;
         const AVPixFmtDescriptor* descriptor = av_pix_fmt_desc_get(format);
         const AVBufferRef* buffer = frame->buf[0];
@@ -505,8 +453,10 @@ namespace {
             raiseError(StringView(StringBuilder() << StringView(u8"video frames of format ") << StringView(av_get_pix_fmt_name(format)) << StringView(u8" cannot be shown")));
         }
 
-        FrameShader out;
-        FrameUniform& u = out.uniform;
+        VideoShader out;
+
+        memset(&out, 0, sizeof(out));
+        out.layout = layout;
         StringView model(layout->model);
         bool yuv = model == StringView(u8"yuv");
         bool xyz = model == StringView(u8"xyz");
@@ -541,8 +491,8 @@ namespace {
                 raiseError(StringView(u8"video frame planes are not aligned to words"));
             }
 
-            u.planeOffset[p] = (u32)offset;
-            u.lineSize[p] = (u32)lines[p];
+            out.planeOffset[p] = (u32)offset;
+            out.lineSize[p] = (u32)lines[p];
         }
 
         int range = frame->color_range == AVCOL_RANGE_UNSPECIFIED && StringView(descriptor->name).startsWith(StringView(u8"yuvj")) ? AVCOL_RANGE_JPEG : frame->color_range;
@@ -603,14 +553,13 @@ namespace {
         const double* eotf = transfer->eotf;
         bool power = eotf[0] == eotf[5] && eotf[1] == eotf[6] && eotf[2] == 1. && eotf[3] == 0. && eotf[4] == 0. && eotf[10] < 0.;
 
-        out.layout = layout->shape;
         out.system = yuv ? matrix->system : layout->model;
         out.transfer = transfer->shape;
         out.conversion = same ? "same" : "convert";
         out.output = target->name;
-        putPiece(u.curve, transfer->eotf);
-        putPiece(u.oetf, transfer->oetf);
-        putPiece(u.inverse, transfer->inverse);
+        memcpy(out.curve, transfer->eotf, sizeof(out.curve));
+        memcpy(out.oetf, transfer->oetf, sizeof(out.oetf));
+        memcpy(out.inverse, transfer->inverse, sizeof(out.inverse));
 
         if (shape == StringView(u8"curve") && same && (sdr ? transferCode == AVCOL_TRC_IEC61966_2_1 : transferCode == AVCOL_TRC_LINEAR)) {
             out.transfer = "identity";
@@ -619,7 +568,7 @@ namespace {
             double gamma = eotf[1];
             const double fused[11] = {1.055 * pow(scale, 1. / 2.4), gamma / 2.4, 1., 0., 0.055, 12.92 * scale, gamma, 1., 0., 0., pow(0.0031308 / scale, 1. / gamma)};
 
-            putPiece(u.curve, fused);
+            memcpy(out.curve, fused, sizeof(out.curve));
         } else if (sdr || shape == StringView(u8"log")) {
             out.conversion = "convert";
         }
@@ -645,9 +594,6 @@ namespace {
                 offsets[slot] = chroma ? exp2(depth - 1.) : 0.;
                 scales[slot] = exp2(depth - lumaBits) - 1.;
             }
-
-            offsets[slot] *= exp2(layout->padding[c]);
-            scales[slot] *= exp2(layout->padding[c]);
         }
 
         if (layout->inverted) {
@@ -669,7 +615,6 @@ namespace {
         }
 
         double toSignal[3][3] = {{1., 0., 0.}, {0., 1., 0.}, {0., 0., 1.}};
-        double decode[3][3];
 
         if (yuv && !strcmp(matrix->system, "linear") && !strcmp(matrix->weights, "fixed")) {
             for (int row = 0; row < 3; row++) {
@@ -687,17 +632,14 @@ namespace {
         }
 
         for (int row = 0; row < 3; row++) {
-            u.bias[row] = 0.f;
-
             for (int column = 0; column < 3; column++) {
-                decode[row][column] = toSignal[row][column] / scales[column];
-                u.bias[row] -= (float)(decode[row][column] * offsets[column]);
+                out.decode[row][column] = toSignal[row][column] / scales[column];
+                out.bias[row] -= out.decode[row][column] * offsets[column];
+                out.toOutput[row][column] = toOutput[row][column];
             }
         }
 
-        putMatrix(u.decode, decode);
-        putMatrix(u.toOutput, toOutput);
-        u.bias[3] = (float)(1. / scales[3]);
+        out.bias[3] = 1. / scales[3];
 
         const char* pattern = bayer ? descriptor->name + 6 : "r";
         u32 red = 0;
@@ -709,41 +651,27 @@ namespace {
         int shiftX = descriptor->log2_chroma_w;
         int shiftY = descriptor->log2_chroma_h;
 
-        u.size[0] = (u32)frame->width;
-        u.size[1] = (u32)frame->height;
-        u.size[2] = (u32)AV_CEIL_RSHIFT(frame->width, shiftX);
-        u.size[3] = (u32)AV_CEIL_RSHIFT(frame->height, shiftY);
-        u.chroma[0] = (float)exp2(-shiftX);
-        u.chroma[1] = (float)exp2(-shiftY);
-        u.chroma[2] = (float)(location->site[0] * (exp2(shiftX) - 1.) * exp2(-shiftX));
-        u.chroma[3] = (float)(location->site[1] * (exp2(shiftY) - 1.) * exp2(-shiftY));
-        u.sites[0] = (float)(red % 2);
-        u.sites[1] = (float)(red / 2);
-        u.weights[0] = (float)kr;
-        u.weights[1] = (float)kb;
-        u.light[0] = (float)transfer->decades;
-        u.light[1] = 10000.f / sdrWhiteNits;
-        u.light[2] = 1000.f / sdrWhiteNits;
+        out.size[0] = (u32)frame->width;
+        out.size[1] = (u32)frame->height;
+        out.size[2] = (u32)AV_CEIL_RSHIFT(frame->width, shiftX);
+        out.size[3] = (u32)AV_CEIL_RSHIFT(frame->height, shiftY);
+        out.chroma[0] = exp2(-shiftX);
+        out.chroma[1] = exp2(-shiftY);
+        out.chroma[2] = location->site[0] * (exp2(shiftX) - 1.) * exp2(-shiftX);
+        out.chroma[3] = location->site[1] * (exp2(shiftY) - 1.) * exp2(-shiftY);
+        out.sites[0] = red % 2;
+        out.sites[1] = red / 2;
+        out.weights[0] = kr;
+        out.weights[1] = kb;
+        out.light[0] = transfer->decades;
+        out.light[1] = 10000. / sdrWhiteNits;
+        out.light[2] = 1000. / sdrWhiteNits;
 
         for (int i = 0; i < 3; i++) {
-            u.luminance[i] = (float)primaries->toXyz[1][i];
+            out.luminance[i] = primaries->toXyz[1][i];
         }
 
         return out;
-    }
-
-    static const VideoShaderCode& shaderCode(const FrameShader& frame) {
-        for (const VideoShaderPart& part : videoShaderParts) {
-            for (size_t i = 0; i < part.count; i++) {
-                const VideoShaderCode& code = part.codes[i];
-
-                if (!strcmp(code.layout, frame.layout) && !strcmp(code.system, frame.system) && !strcmp(code.transfer, frame.transfer) && !strcmp(code.conversion, frame.conversion) && !strcmp(code.output, frame.output)) {
-                    return code;
-                }
-            }
-        }
-
-        raiseError(StringView(StringBuilder() << StringView(u8"video frames of the ") << StringView(frame.system) << StringView(u8" color system with a ") << StringView(frame.transfer) << StringView(u8" transfer cannot be shown")));
     }
 }
 
@@ -1772,27 +1700,29 @@ void Screen::makeRender(VideoImage* image) {
         player->ui->trace(StringView(StringBuilder() << StringView(u8"video ") << (i64)frame->width << StringView(u8"x") << (i64)frame->height << StringView(u8" ") << StringView(av_get_pix_fmt_name((AVPixelFormat)frame->format))));
     }
 
-    FrameShader shading = describeFrame(frame, output, RendererOptions{}.sdrWhiteNits);
-    RenderShader& shader = compile(shaderCode(shading));
+    VideoShader shading = describeFrame(frame, output, RendererOptions{}.sdrWhiteNits);
+    RenderShader& shader = shaderFor(shading);
     ScopedPtr<ObjPool> owner{ObjPool::fromMemoryRaw()};
 
-    image->render = player->ui->shadeImage(*owner.ptr, shader, (u32)frame->width, (u32)frame->height, frame->buf[0]->data, frame->buf[0]->size, &shading.uniform, sizeof(shading.uniform), *image);
+    image->render = player->ui->shadeImage(*owner.ptr, shader, (u32)frame->width, (u32)frame->height, frame->buf[0]->data, frame->buf[0]->size, &shading, sizeof(shading), *image);
     image->render->prepare();
     image->pool = owner.ptr;
     owner.drop();
 }
 
-RenderShader& Screen::compile(const VideoShaderCode& code) {
+RenderShader& Screen::shaderFor(const VideoShader& facts) {
     for (const CompiledShader& known : compiled) {
-        if (known.code == &code) {
+        if (!memcmp(&known.facts, &facts, sizeof(facts))) {
             return *known.shader;
         }
     }
 
-    RenderShader* shader = player->ui->compileShader(*player->pool, code.code, code.size);
+    ScopedPtr<ObjPool> scratch{ObjPool::fromMemoryRaw()};
+    StringView code = compile(*scratch.ptr, facts);
+    RenderShader* shader = player->ui->compileShader(*player->pool, code.data(), code.length());
 
-    compiled.pushBack(CompiledShader{&code, shader});
-    player->ui->trace(StringView(StringBuilder() << StringView(u8"compiled video shader ") << StringView(code.layout) << StringView(u8" ") << StringView(code.system) << StringView(u8" ") << StringView(code.transfer) << StringView(u8" ") << StringView(code.conversion) << StringView(u8" ") << StringView(code.output)));
+    compiled.pushBack(CompiledShader{facts, shader});
+    player->ui->trace(StringView(StringBuilder() << StringView(u8"compiled video shader ") << StringView(facts.layout->name) << StringView(u8" ") << StringView(facts.system) << StringView(u8" ") << StringView(facts.transfer) << StringView(u8" ") << StringView(facts.conversion) << StringView(u8" ") << StringView(facts.output)));
 
     return *shader;
 }

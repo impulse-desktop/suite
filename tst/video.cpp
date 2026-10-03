@@ -1,5 +1,6 @@
 #include "ui.h"
 #include "error.h"
+#include "shader.h"
 #include "renderer.h"
 
 #include <std/ios/sys.h>
@@ -82,34 +83,8 @@ namespace {
         double scale;
     };
 
-    struct Uniform {
-        u32 planeOffset[4];
-        u32 lineSize[4];
-        u32 size[4];
-        float chroma[4];
-        float decode[3][4];
-        float bias[4];
-        float sites[4];
-        float weights[4];
-        float curve[3][4];
-        float oetf[3][4];
-        float inverse[3][4];
-        float toOutput[3][4];
-        float light[4];
-        float luminance[4];
-    };
-
-    struct Variant {
-        const char* layout = nullptr;
-        const char* system = nullptr;
-        const char* transfer = nullptr;
-        const char* conversion = nullptr;
-        const char* output = nullptr;
-        Uniform uniform = {};
-    };
-
     struct CompiledShader {
-        const VideoShaderCode* code;
+        VideoShader facts;
         RenderShader* shader;
     };
 
@@ -123,8 +98,8 @@ namespace {
         int failed = 0;
 
         FormatCheck(ObjPool* pool, Ui* ui);
-        Variant describe(const AVFrame* frame, const char* output);
-        RenderShader& compile(const VideoShaderCode& code);
+        VideoShader describe(const AVFrame* frame, const char* output);
+        RenderShader& shaderFor(const VideoShader& facts);
         AVFrame* frame(const Case& kase);
         void write(AVFrame* frame, const Case& kase);
         void writePalette(AVFrame* frame);
@@ -446,49 +421,6 @@ namespace {
         fail(StringView(StringBuilder() << StringView(u8"no table entry for code ") << (i64)code));
     }
 
-    static const VideoShaderCode& codeOf(const Variant& variant) {
-        for (const VideoShaderPart& part : videoShaderParts) {
-            for (size_t i = 0; i < part.count; i++) {
-                const VideoShaderCode& code = part.codes[i];
-
-                if (!strcmp(code.layout, variant.layout) && !strcmp(code.system, variant.system) && !strcmp(code.transfer, variant.transfer) && !strcmp(code.conversion, variant.conversion) && !strcmp(code.output, variant.output)) {
-                    return code;
-                }
-            }
-        }
-
-        fail(StringView(StringBuilder() << StringView(u8"no shader for ") << StringView(variant.layout) << StringView(u8" ") << StringView(variant.system) << StringView(u8" ") << StringView(variant.transfer) << StringView(u8" ") << StringView(variant.conversion) << StringView(u8" ") << StringView(variant.output)));
-    }
-
-    static void putMatrix(float (&out)[3][4], const Matrix& matrix) {
-        for (int column = 0; column < 3; column++) {
-            for (int row = 0; row < 3; row++) {
-                out[column][row] = (float)matrix.m[row][column];
-            }
-
-            out[column][3] = 0.f;
-        }
-    }
-
-    static void putPiece(float (&out)[3][4], const double (&piece)[11]) {
-        bool knee = piece[10] >= 0. && piece[1] == 1.;
-        const double* curved = knee ? piece + 5 : piece;
-        const double* straight = knee ? piece : piece + 5;
-
-        for (int i = 0; i < 4; i++) {
-            out[0][i] = (float)curved[i];
-        }
-
-        out[1][0] = (float)(straight[0] * straight[2]);
-        out[1][1] = (float)(straight[0] * straight[3] - straight[4]);
-        out[1][2] = knee ? -1.f : 1.f;
-        out[1][3] = 0.f;
-        out[2][0] = (float)curved[4];
-        out[2][1] = 0.f;
-        out[2][2] = (float)piece[10];
-        out[2][3] = 0.f;
-    }
-
     static Model modelOf(const VideoLayout& layout) {
         StringView model(layout.model);
 
@@ -723,7 +655,7 @@ FormatCheck::FormatCheck(ObjPool* pool_, Ui* ui_)
 {
 }
 
-Variant FormatCheck::describe(const AVFrame* frame, const char* output) {
+VideoShader FormatCheck::describe(const AVFrame* frame, const char* output) {
     const AVPixFmtDescriptor* descriptor = av_pix_fmt_desc_get((AVPixelFormat)frame->format);
     const VideoLayout& layout = *layoutOf(descriptor->name);
     Model model = modelOf(layout);
@@ -751,27 +683,29 @@ Variant FormatCheck::describe(const AVFrame* frame, const char* output) {
         }
     }
 
-    Variant out;
-    Uniform& u = out.uniform;
+    VideoShader out;
+
+    memset(&out, 0, sizeof(out));
+
     StringView shape(transfer.shape);
     const double* eotf = transfer.eotf;
     bool power = eotf[0] == eotf[5] && eotf[1] == eotf[6] && eotf[2] == 1. && eotf[3] == 0. && eotf[4] == 0. && eotf[10] < 0.;
 
-    out.layout = layout.shape;
+    out.layout = &layout;
     out.system = model == Model::Yuv ? entryOf(videoMatrices, kase.matrix).system : layout.model;
     out.transfer = transfer.shape;
     out.conversion = same ? "same" : "convert";
     out.output = output;
-    putPiece(u.curve, transfer.eotf);
-    putPiece(u.oetf, transfer.oetf);
-    putPiece(u.inverse, transfer.inverse);
+    memcpy(out.curve, transfer.eotf, sizeof(out.curve));
+    memcpy(out.oetf, transfer.oetf, sizeof(out.oetf));
+    memcpy(out.inverse, transfer.inverse, sizeof(out.inverse));
 
     if (shape == StringView(u8"curve") && same && transferCode == (sdr ? AVCOL_TRC_IEC61966_2_1 : AVCOL_TRC_LINEAR)) {
         out.transfer = "identity";
     } else if (shape == StringView(u8"curve") && same && sdr && power && (eotf[1] == 1. || eotf[1] == 2.4)) {
         const double fused[11] = {1.055 * pow(eotf[0], 1. / 2.4), eotf[1] / 2.4, 1., 0., 0.055, 12.92 * eotf[0], eotf[1], 1., 0., 0., pow(0.0031308 / eotf[0], 1. / eotf[1])};
 
-        putPiece(u.curve, fused);
+        memcpy(out.curve, fused, sizeof(out.curve));
     } else if (sdr || shape == StringView(u8"log")) {
         out.conversion = "convert";
     }
@@ -783,8 +717,8 @@ Variant FormatCheck::describe(const AVFrame* frame, const char* output) {
         int slot = layout.alpha && c == layout.count - 1 ? 3 : c;
         Levels level = model == Model::Bayer ? Levels{0., exp2(8. * layout.components[0][1]) - 1.} : levels(kase, layout, c);
 
-        offsets[slot] = level.offset * exp2(layout.padding[c]);
-        scales[slot] = level.scale * exp2(layout.padding[c]);
+        offsets[slot] = level.offset;
+        scales[slot] = level.scale;
     }
 
     if (layout.inverted) {
@@ -813,26 +747,21 @@ Variant FormatCheck::describe(const AVFrame* frame, const char* output) {
         toSignal = Matrix{{{1., 0., 0.}, {1., 0., 0.}, {1., 0., 0.}}};
     }
 
-    Matrix decode;
-
     for (int row = 0; row < 3; row++) {
-        u.bias[row] = 0.f;
-
         for (int column = 0; column < 3; column++) {
-            decode.m[row][column] = toSignal.m[row][column] / scales[column];
-            u.bias[row] -= (float)(decode.m[row][column] * offsets[column]);
+            out.decode[row][column] = toSignal.m[row][column] / scales[column];
+            out.bias[row] -= out.decode[row][column] * offsets[column];
+            out.toOutput[row][column] = toOutput.m[row][column];
         }
     }
 
-    putMatrix(u.decode, decode);
-    putMatrix(u.toOutput, toOutput);
-    u.bias[3] = (float)(1. / scales[3]);
+    out.bias[3] = 1. / scales[3];
 
     const uint8_t* base = frame->buf[0]->data;
 
     for (int p = 0; p < 4 && frame->data[p]; p++) {
-        u.planeOffset[p] = (u32)(frame->data[p] - base);
-        u.lineSize[p] = (u32)frame->linesize[p];
+        out.planeOffset[p] = (u32)(frame->data[p] - base);
+        out.lineSize[p] = (u32)frame->linesize[p];
     }
 
     int shiftX = descriptor->log2_chroma_w;
@@ -840,39 +769,41 @@ Variant FormatCheck::describe(const AVFrame* frame, const char* output) {
     int red = model == Model::Bayer ? bayerRed(descriptor) : 0;
     double white = RendererOptions{}.sdrWhiteNits;
 
-    u.size[0] = (u32)frame->width;
-    u.size[1] = (u32)frame->height;
-    u.size[2] = (u32)AV_CEIL_RSHIFT(frame->width, shiftX);
-    u.size[3] = (u32)AV_CEIL_RSHIFT(frame->height, shiftY);
-    u.chroma[0] = (float)exp2(-shiftX);
-    u.chroma[1] = (float)exp2(-shiftY);
-    u.chroma[2] = (float)(within(kase.location, 0) * (exp2(shiftX) - 1.) * exp2(-shiftX));
-    u.chroma[3] = (float)(within(kase.location, 1) * (exp2(shiftY) - 1.) * exp2(-shiftY));
-    u.sites[0] = (float)(red % 2);
-    u.sites[1] = (float)(red / 2);
-    u.weights[0] = (float)lumaWeight(kase, 0);
-    u.weights[1] = (float)lumaWeight(kase, 2);
-    u.light[0] = (float)transfer.decades;
-    u.light[1] = (float)(10000. / white);
-    u.light[2] = (float)(1000. / white);
+    out.size[0] = (u32)frame->width;
+    out.size[1] = (u32)frame->height;
+    out.size[2] = (u32)AV_CEIL_RSHIFT(frame->width, shiftX);
+    out.size[3] = (u32)AV_CEIL_RSHIFT(frame->height, shiftY);
+    out.chroma[0] = exp2(-shiftX);
+    out.chroma[1] = exp2(-shiftY);
+    out.chroma[2] = within(kase.location, 0) * (exp2(shiftX) - 1.) * exp2(-shiftX);
+    out.chroma[3] = within(kase.location, 1) * (exp2(shiftY) - 1.) * exp2(-shiftY);
+    out.sites[0] = red % 2;
+    out.sites[1] = red / 2;
+    out.weights[0] = lumaWeight(kase, 0);
+    out.weights[1] = lumaWeight(kase, 2);
+    out.light[0] = transfer.decades;
+    out.light[1] = 10000. / white;
+    out.light[2] = 1000. / white;
 
     for (int i = 0; i < 3; i++) {
-        u.luminance[i] = (float)toXyz.m[1][i];
+        out.luminance[i] = toXyz.m[1][i];
     }
 
     return out;
 }
 
-RenderShader& FormatCheck::compile(const VideoShaderCode& code) {
+RenderShader& FormatCheck::shaderFor(const VideoShader& facts) {
     for (const CompiledShader& known : compiled) {
-        if (known.code == &code) {
+        if (!memcmp(&known.facts, &facts, sizeof(facts))) {
             return *known.shader;
         }
     }
 
-    RenderShader* shader = ui->compileShader(*pool, code.code, code.size);
+    ScopedPtr<ObjPool> scratch{ObjPool::fromMemoryRaw()};
+    StringView code = compile(*scratch.ptr, facts);
+    RenderShader* shader = ui->compileShader(*pool, code.data(), code.length());
 
-    compiled.pushBack(CompiledShader{&code, shader});
+    compiled.pushBack(CompiledShader{facts, shader});
 
     return *shader;
 }
@@ -1123,9 +1054,9 @@ void FormatCheck::linearize(const Case& kase) {
 }
 
 void FormatCheck::shade(AVFrame* frame, const char* output, Vector<double>& out) {
-    Variant variant = describe(frame, output);
+    VideoShader facts = describe(frame, output);
     ScopedPtr<ObjPool> owner{ObjPool::fromMemoryRaw()};
-    RenderImage* image = ui->shadeImage(*owner.ptr, compile(codeOf(variant)), (u32)frame->width, (u32)frame->height, frame->buf[0]->data, frame->buf[0]->size, &variant.uniform, sizeof(variant.uniform), retired);
+    RenderImage* image = ui->shadeImage(*owner.ptr, shaderFor(facts), (u32)frame->width, (u32)frame->height, frame->buf[0]->data, frame->buf[0]->size, &facts, sizeof(facts), retired);
     ImagePixels pixels;
 
     image->prepare();

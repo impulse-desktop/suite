@@ -109,48 +109,15 @@ for shader, stage in [] if darwin else [
     ))
 
 
-# the player's color conversion: gpu/video.py builds each variant (storage
-# layout x color system x transfer x output) as simplified scalar
-# expressions (gpu/ir.py) and prints it as GLSL; video_shaders.py compiles a
-# layout's variants in one node, glues the layouts into 16 sources whose
-# arrays of variants video_codes.h gathers into one array of arrays, and
-# lists the layouts and codes of gpu/tables.py for the player to match
-video_inputs = [f"$(S)/gpu/{name}" for name in ("video_shaders.py", "video.py", "ir.py", "tables.py")]
-video_parts = [line.split() for line in subprocess.check_output(["python3", "gpu/video_shaders.py", "parts"], text=True).splitlines()]
+# the player's color conversion is compiled at run time (shader.cpp) from
+# each frame's facts; video_shaders.py lists the storage layouts and the
+# codes of gpu/tables.py for the player to match
 video_codes = command(
     name="video_codes",
-    inputs=video_inputs,
+    inputs=["$(S)/gpu/video_shaders.py", "$(S)/gpu/tables.py"],
     outputs=["$(B)/shaders/video_codes.h"],
     descr="SH",
     cmd=["python3", "$(S)/gpu/video_shaders.py", "codes", "$(B)/shaders/video_codes.h"],
-)
-video_language = "msl" if darwin else "spv"
-video_layout_rules = {layout: command(
-    name="video_" + layout + "_" + video_language,
-    inputs=video_inputs,
-    outputs=["$(B)/shaders/video_" + layout + "." + video_language + ".h"],
-    descr="SH",
-    cmd=[
-        "python3", "$(S)/gpu/video_shaders.py", "msl" if darwin else "compile", layout,
-        "$(B)/shaders/video_" + layout + "." + video_language + ".h", "glslangValidator",
-        *(["spirv-cross"] if darwin else []),
-    ],
-) for layouts in video_parts for layout in layouts}
-video_part_rules = [command(
-    name=f"video_{video_language}_{part}",
-    inputs=[*video_inputs, *(video_layout_rules[layout].outputs[0] for layout in layouts)],
-    outputs=[f"$(B)/shaders/video_{video_language}_{part}.cpp"],
-    deps=[video_layout_rules[layout] for layout in layouts],
-    descr="SH",
-    cmd=[
-        "python3", "$(S)/gpu/video_shaders.py", "metal" if darwin else "spirv", str(part),
-        f"$(B)/shaders/video_{video_language}_{part}.cpp", *(video_layout_rules[layout].outputs[0] for layout in layouts),
-    ],
-) for part, layouts in enumerate(video_parts)]
-video = library(
-    name="video",
-    srcs=[{"src": rule.outputs[0], "inputs": video_codes.outputs} for rule in video_part_rules],
-    deps=[video_codes, *video_part_rules],
 )
 
 
@@ -258,7 +225,7 @@ if darwin:
 # the vendored libraries' own dependencies come along by name: an imported
 # graph hands over its archive, not what the archive wants linked
 im_deps = [
-    *shader_rules, video_codes, video, imgui, decode, plt, libstd,
+    *shader_rules, video_codes, imgui, decode, plt, libstd,
     *platform_deps, *encoders, *media, system,
 ]
 
@@ -296,9 +263,18 @@ renderer_test = program(
 video_test = program(
     name="video_test",
     output="$(B)/e2e/video_test",
-    srcs=["$(S)/tst/video.cpp", "$(S)/renderer.cpp", "$(S)/ui.cpp", "$(S)/error.cpp", "$(S)/number.cpp", "$(S)/timing.cpp", *(["$(S)/renderer_metal.mm"] if darwin else ["$(S)/renderer_vulkan.cpp"])],
+    srcs=["$(S)/tst/video.cpp", "$(S)/shader.cpp", "$(S)/renderer.cpp", "$(S)/ui.cpp", "$(S)/error.cpp", "$(S)/number.cpp", "$(S)/timing.cpp", *(["$(S)/renderer_metal.mm"] if darwin else ["$(S)/renderer_vulkan.cpp"])],
     cflags=warning_flags,
     deps=im_deps,
+)
+
+# dev/video_bench compiles the player's video shaders through this
+video_shader = program(
+    name="video_shader",
+    output="$(B)/dev/video_shader",
+    srcs=["$(S)/dev/video_bench/emit.cpp", "$(S)/shader.cpp", "$(S)/error.cpp"],
+    cflags=warning_flags,
+    deps=[video_codes, libstd],
 )
 
 imgui_frames_test = program(
