@@ -141,7 +141,7 @@ namespace {
         RenderShader* compileShader(ObjPool& pool, const void* code, size_t size) override;
         RenderShader* compileKernel(ObjPool& pool, const void* code, size_t size, u32 tile) override;
         id<MTLFunction> mainFunction(const void* code, size_t size);
-        void runKernels(id<MTLCommandBuffer> command, ImDrawData& draw);
+        void runKernels(id<MTLCommandBuffer> command);
         RenderImage* shade(ObjPool& pool, RenderShader& shader, u32 width, u32 height, const void* data, size_t size, Runable& retired) override;
         id<MTLRenderPipelineState> shadePipeline(MetalShader& shader, MTLPixelFormat format);
         void setupHdr();
@@ -615,7 +615,7 @@ bool MetalRenderer::endFrame(ImDrawData* draw) {
         }
         Flight* flight = smallObjects->make<Flight>(drawn);
         drawn.clear();
-        runKernels(command, *draw);
+        runKernels(command);
         encoder = [command renderCommandEncoderWithDescriptor:pass];
         if (!encoder) {
             fail(StringView(u8"cannot begin Metal frame"));
@@ -645,7 +645,7 @@ bool MetalRenderer::endFrame(ImDrawData* draw) {
     return true;
 }
 
-void MetalRenderer::runKernels(id<MTLCommandBuffer> command, ImDrawData& draw) {
+void MetalRenderer::runKernels(id<MTLCommandBuffer> command) {
     if (kernelDraws.empty()) {
         return;
     }
@@ -660,15 +660,8 @@ void MetalRenderer::runKernels(id<MTLCommandBuffer> command, ImDrawData& draw) {
     }
     for (const ImageDraw& kernel : kernelDraws) {
         MetalShader& shader = *kernel.image->shader;
-        float x0 = kernel.lo.x - draw.DisplayPos.x;
-        float y0 = kernel.lo.y - draw.DisplayPos.y;
-        float x1 = kernel.hi.x - draw.DisplayPos.x;
-        float y1 = kernel.hi.y - draw.DisplayPos.y;
-        if (x0 < 0.f || y0 < 0.f || x1 > (float)drawable.texture.width || y1 > (float)drawable.texture.height || x1 <= x0 || y1 <= y0) {
-            continue;
-        }
-        NSUInteger width = (NSUInteger)(x1 - x0);
-        NSUInteger height = (NSUInteger)(y1 - y0);
+        NSUInteger width = (NSUInteger)(kernel.hi.x - kernel.lo.x);
+        NSUInteger height = (NSUInteger)(kernel.hi.y - kernel.lo.y);
         [compute setComputePipelineState:shader.kernel];
         [compute setBuffer:kernel.image->buffer offset:0 atIndex:0];
         [compute setTexture:drawable.texture atIndex:0];

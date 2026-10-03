@@ -127,7 +127,8 @@ namespace {
         VkPipeline pipeline;
         VkBuffer words;
         u32 tile;
-        float x0, y0, x1, y1;
+        u32 width;
+        u32 height;
     };
 
     struct Gpu {
@@ -204,7 +205,7 @@ namespace {
         void landed(Flight* flight);
         void recordImages(VkCommandBuffer command);
         void recordUnderlays(VkCommandBuffer command, const ImDrawData& draw);
-        bool recordKernels(VkCommandBuffer command, const ImDrawData& draw, VkImage target, VkImageView view, VkExtent2D extent, const VkClearValue& clear);
+        bool recordKernels(VkCommandBuffer command, VkImage target, VkImageView view, const VkClearValue& clear);
         void pushKernel(VkCommandBuffer command, VkPipeline pipeline, VkBuffer words, VkImageView view);
         VkShaderModule shaderModule(const u32* code, size_t bytes);
         VkPipeline vertexlessPipeline(const u32* vertCode, size_t vertBytes, const u32* fragCode, size_t fragBytes, VkPipelineLayout layout, VkRenderPass pass);
@@ -1040,7 +1041,7 @@ void Gpu::pushKernel(VkCommandBuffer command, VkPipeline pipeline, VkBuffer word
     pushDescriptorSet(command, VK_PIPELINE_BIND_POINT_COMPUTE, kernelPipelineLayout, 0, 2, writes);
 }
 
-bool Gpu::recordKernels(VkCommandBuffer command, const ImDrawData& draw, VkImage target, VkImageView view, VkExtent2D extent, const VkClearValue& clear) {
+bool Gpu::recordKernels(VkCommandBuffer command, VkImage target, VkImageView view, const VkClearValue& clear) {
     if (kernelDraws.empty()) {
         return false;
     }
@@ -1062,20 +1063,8 @@ bool Gpu::recordKernels(VkCommandBuffer command, const ImDrawData& draw, VkImage
     vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
 
     for (const KernelDraw& kernel : kernelDraws) {
-        float x0 = kernel.x0 - draw.DisplayPos.x;
-        float y0 = kernel.y0 - draw.DisplayPos.y;
-        float x1 = kernel.x1 - draw.DisplayPos.x;
-        float y1 = kernel.y1 - draw.DisplayPos.y;
-
-        if (x0 < 0.f || y0 < 0.f || x1 > (float)extent.width || y1 > (float)extent.height || x1 <= x0 || y1 <= y0) {
-            continue;
-        }
-
-        u32 width = (u32)(x1 - x0);
-        u32 height = (u32)(y1 - y0);
-
         pushKernel(command, kernel.pipeline, kernel.words, view);
-        vkCmdDispatch(command, (width + kernel.tile - 1) / kernel.tile, (height + kernel.tile - 1) / kernel.tile, 1);
+        vkCmdDispatch(command, (kernel.width + kernel.tile - 1) / kernel.tile, (kernel.height + kernel.tile - 1) / kernel.tile, 1);
     }
 
     kernelDraws.clear();
@@ -1106,12 +1095,10 @@ void Gpu::frameRender(ImDrawData* draw) {
     rp.clearValueCount = 1;
     rp.pClearValues = &present.clear;
 
-    VkExtent2D extent = rp.renderArea.extent;
-
     if (linearHdr) {
         VkClearValue sceneClear{};
 
-        rp.renderPass = recordKernels(fd.commandBuffer, *draw, sceneImage, sceneView, extent, sceneClear) ? sceneLoadPass : scenePass;
+        rp.renderPass = recordKernels(fd.commandBuffer, sceneImage, sceneView, sceneClear) ? sceneLoadPass : scenePass;
         rp.framebuffer = sceneFramebuffer;
         rp.pClearValues = &sceneClear;
         vkCmdBeginRenderPass(fd.commandBuffer, &rp, VK_SUBPASS_CONTENTS_INLINE);
@@ -1137,7 +1124,7 @@ void Gpu::frameRender(ImDrawData* draw) {
         vkCmdDraw(fd.commandBuffer, 3, 1, 0, 0);
         vkCmdEndRenderPass(fd.commandBuffer);
     } else {
-        rp.renderPass = recordKernels(fd.commandBuffer, *draw, fd.image, fd.view, extent, present.clear) ? present.loadPass : present.renderPass;
+        rp.renderPass = recordKernels(fd.commandBuffer, fd.image, fd.view, present.clear) ? present.loadPass : present.renderPass;
         rp.framebuffer = fd.framebuffer;
         vkCmdBeginRenderPass(fd.commandBuffer, &rp, VK_SUBPASS_CONTENTS_INLINE);
         recordUnderlays(fd.commandBuffer, *draw);
@@ -2396,14 +2383,15 @@ void VulkanImage::underlay(ImVec2 lo, ImVec2 hi) {
     if (!shader) {
         fail(StringView(u8"only a shaded image goes under the interface"));
     }
-    if (shader->tile && !gpu->kernels) {
-        fail(StringView(u8"this display takes no kernels"));
-    }
-    gpu->drawn.pushBack(this);
     if (shader->tile) {
-        gpu->kernelDraws.pushBack(KernelDraw{shader->pipeline, buffer, shader->tile, lo.x, lo.y, hi.x, hi.y});
+        if (!gpu->kernels) {
+            fail(StringView(u8"this display takes no kernels"));
+        }
+        gpu->drawn.pushBack(this);
+        gpu->kernelDraws.pushBack(KernelDraw{shader->pipeline, buffer, shader->tile, (u32)(hi.x - lo.x), (u32)(hi.y - lo.y)});
         return;
     }
+    gpu->drawn.pushBack(this);
     gpu->underlays.pushBack(ImageDraw{gpu, shader->pipeline, gpu->shadePipelineLayout, shadeSet, lo.x, lo.y, hi.x, hi.y, gpu->sdrWhiteNits});
 }
 
