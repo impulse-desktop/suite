@@ -96,6 +96,7 @@ namespace {
         Vector<double> expected;
         int checked = 0;
         int failed = 0;
+        const char* filter = "bilinear";
 
         FormatCheck(ObjPool* pool, Ui* ui);
         VideoShader describe(const AVFrame* frame, const char* output);
@@ -124,6 +125,12 @@ namespace {
         const double values[4] = {0.15 + 0.7 * u, 0.2 + 0.6 * v, 0.25 + 0.25 * (u + v), 0.3 + 0.7 * u};
 
         return values[c];
+    }
+
+    static double lanczos3(double x) {
+        double a = 3.14159265358979323846 * x;
+
+        return fabs(x) < 1e-9 ? 1. : 3. * sin(a) * sin(a / 3.) / (a * a);
     }
 
     static double srgbDecode(double v) {
@@ -696,6 +703,7 @@ VideoShader FormatCheck::describe(const AVFrame* frame, const char* output) {
     out.transfer = transfer.shape;
     out.conversion = same ? "same" : "convert";
     out.output = output;
+    out.filter = filter;
     memcpy(out.curve, transfer.eotf, sizeof(out.curve));
     memcpy(out.oetf, transfer.oetf, sizeof(out.oetf));
     memcpy(out.inverse, transfer.inverse, sizeof(out.inverse));
@@ -871,6 +879,33 @@ void FormatCheck::write(AVFrame* frame, const Case& kase) {
 
         return rgba[c];
     };
+    auto filtered = [&](int c, double cx, double cy) {
+        double bx = floor(cx);
+        double by = floor(cy);
+        double wx[6];
+        double wy[6];
+        double sx = 0.;
+        double sy = 0.;
+        double total = 0.;
+
+        for (int k = 0; k < 6; k++) {
+            wx[k] = lanczos3(k - 2 - (cx - bx));
+            wy[k] = lanczos3(k - 2 - (cy - by));
+            sx += wx[k];
+            sy += wy[k];
+        }
+
+        for (int j = 0; j < 6; j++) {
+            for (int k = 0; k < 6; k++) {
+                double at = fmin(fmax(bx - 2 + k, 0.), chromaWidth - 1.) * stepX + siteX;
+                double row = fmin(fmax(by - 2 + j, 0.), chromaHeight - 1.) * stepY + siteY;
+
+                total += wx[k] * wy[j] * source(c, at, row);
+            }
+        }
+
+        return total / (sx * sy);
+    };
     auto stored = [&](int c, double x, double y) {
         Levels scale = levels(kase, layout, c);
 
@@ -1004,6 +1039,11 @@ void FormatCheck::write(AVFrame* frame, const Case& kase) {
                 double chromaX = fmin(fmax((x - siteX) / stepX, 0.), chromaWidth - 1.) * stepX + siteX;
                 double chromaY = fmin(fmax((y - siteY) / stepY, 0.), chromaHeight - 1.) * stepY + siteY;
                 double ycc[3] = {source(0, x, y), source(1, chromaX, chromaY), source(2, chromaX, chromaY)};
+
+                if (!strcmp(filter, "lanczos")) {
+                    ycc[1] = filtered(1, (x - siteX) / stepX, (y - siteY) / stepY);
+                    ycc[2] = filtered(2, (x - siteX) / stepX, (y - siteY) / stepY);
+                }
 
                 apply(toSignal, ycc, rgba);
             }
@@ -1239,7 +1279,7 @@ void FormatCheck::formats() {
             kase.primaries = AVCOL_PRI_SMPTE428;
         }
 
-        check(kase, StringView(descriptor->name));
+        check(kase, StringView(StringBuilder() << StringView(descriptor->name) << StringView(u8" ") << StringView(filter)));
     }
 }
 
@@ -1415,6 +1455,9 @@ int main() {
     auto body = makeRunable([&] {
         try {
             check.formats();
+            check.filter = "lanczos";
+            check.formats();
+            check.filter = "bilinear";
             check.matrices();
             check.locations();
             check.systems();

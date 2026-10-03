@@ -566,6 +566,7 @@ namespace {
         out.transfer = transfer->shape;
         out.conversion = same ? "same" : "convert";
         out.output = target->name;
+        out.filter = "bilinear";
         memcpy(out.curve, transfer->eotf, sizeof(out.curve));
         memcpy(out.oetf, transfer->oetf, sizeof(out.oetf));
         memcpy(out.inverse, transfer->inverse, sizeof(out.inverse));

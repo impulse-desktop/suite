@@ -15,6 +15,7 @@ struct VideoShader {
     const char* transfer;
     const char* conversion;
     const char* output;
+    const char* filter;
     u32 planeOffset[4];
     u32 lineSize[4];
     u32 size[4];

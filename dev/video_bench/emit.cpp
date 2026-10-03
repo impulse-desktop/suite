@@ -57,15 +57,15 @@ namespace {
 }
 
 int main(int argc, char** argv) {
-    if (argc < 6) {
-        sysE << StringView(u8"usage: video_shader FORMAT SYSTEM TRANSFER CONVERSION OUTPUT HEX...") << endL;
+    if (argc < 7) {
+        sysE << StringView(u8"usage: video_shader FORMAT SYSTEM TRANSFER CONVERSION OUTPUT FILTER HEX...") << endL;
 
         return 2;
     }
 
     ObjPool::Ref owner = ObjPool::fromMemory();
     VideoShader shader;
-    Arguments numbers{argv + 6, argv + argc};
+    Arguments numbers{argv + 7, argv + argc};
 
     memset(&shader, 0, sizeof(shader));
     shader.layout = layoutOf(argv[1]);
@@ -73,6 +73,7 @@ int main(int argc, char** argv) {
     shader.transfer = argv[3];
     shader.conversion = argv[4];
     shader.output = argv[5];
+    shader.filter = argv[6];
     numbers.words(shader.planeOffset, 4);
     numbers.words(shader.lineSize, 4);
     numbers.words(shader.size, 4);

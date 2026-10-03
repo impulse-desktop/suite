@@ -69,12 +69,14 @@ CORPUS = [
     ("popular", "rgba64be_srgb_sdr", "rgba64be", (0, 0), 0, 2, 13, 1, 0, "sdr"),
     ("popular", "gray16be_srgb_sdr", "gray16be", (0, 0), 0, 2, 13, 1, 0, "sdr"),
     ("scale", "yuv420p_bilinear_1.42", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (1920, 1080), (2731, 1536), "yuv420p_709_sdr"),
-    ("scale", "yuv420p_lanczos3_1.42", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (1920, 1080), (2731, 1536), "yuv420p_709_sdr_lanczos3"),
+    ("scale", "yuv420p_lanczos3_1.42", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (1920, 1080), (2731, 1536), "yuv420p_709_sdr_lanczos3", "lanczos"),
+    ("scale", "yuv420p_lanczos3fast_1.42", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (1920, 1080), (2731, 1536), "yuv420p_709_sdr_lanczos3_fast", "lanczos"),
     ("scale", "yuv420p_bilinear_1.46", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (1280, 720), (1867, 1050), "yuv420p_709_sdr"),
-    ("scale", "yuv420p_lanczos3_1.46", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (1280, 720), (1867, 1050), "yuv420p_709_sdr_lanczos3"),
+    ("scale", "yuv420p_lanczos3_1.46", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (1280, 720), (1867, 1050), "yuv420p_709_sdr_lanczos3", "lanczos"),
+    ("scale", "yuv420p_lanczos3fast_1.46", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (1280, 720), (1867, 1050), "yuv420p_709_sdr_lanczos3_fast", "lanczos"),
 ]
-FIELDS = ("group", "name", "format", "subsampling", "matrix", "range", "transfer", "primaries", "location", "output", "source", "target", "hand")
-SIZES = {"source": (1920, 1080), "target": (3840, 2160)}
+FIELDS = ("group", "name", "format", "subsampling", "matrix", "range", "transfer", "primaries", "location", "output", "source", "target", "hand", "filter")
+SIZES = {"source": (1920, 1080), "target": (3840, 2160), "filter": "bilinear"}
 
 MODULE = video_shaders.tables()
 LAYOUTS = video_shaders.layouts(MODULE)
@@ -209,7 +211,7 @@ def facts(case, layout, components, offsets, lines):
     numbers += curve + table(transfer.get("oetf")) + table(transfer.get("inverse"))
     numbers += [value for row in to_output for value in row]
     numbers += [transfer.get("decades", 0), 10000 / WHITE, 1000 / WHITE, *to_xyz[1]]
-    return [case["format"], system, shape, conversion, output, *(format(word, "x") for word in words), *map(bits, numbers)]
+    return [case["format"], system, shape, conversion, output, case["filter"], *(format(word, "x") for word in words), *map(bits, numbers)]
 
 
 def prepare(case, directory, compiler):
@@ -228,7 +230,7 @@ def prepare(case, directory, compiler):
     (directory / "optimum.ubo").write_bytes(struct.pack("<4I", *offsets) + struct.pack("<4I", *lines) + struct.pack("<4I", W, H, -(-W >> sx), -(-H >> sy)) + struct.pack("<4f", WHITE, 0, 0, 0))
     (directory / "optimum.frag").write_text((HERE / "hand" / f"{case.get('hand', case['name'])}.frag").read_text())
     subprocess.run(["glslangValidator", "--quiet", "--target-env", "vulkan1.1", "-V", "-S", "frag", str(directory / "optimum.frag"), "-o", str(directory / "optimum.spv")], check=True)
-    return "_".join((name, *arguments[1:5]))
+    return "_".join((name, *arguments[1:6]))
 
 
 def measure(harness, vertex, directories, rounds):

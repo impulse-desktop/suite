@@ -794,6 +794,81 @@ namespace {
     constexpr double pqToIctcp[3][3] = {{2048, 2048, 0}, {6610, -13613, 7003}, {17933, -17390, -543}};
     constexpr double hlgToIctcp[3][3] = {{2048, 2048, 0}, {3625, -7465, 3840}, {9500, -9212, -288}};
 
+    constexpr double pi = 3.14159265358979323846;
+    constexpr int lanczosRadius = 3;
+    constexpr int lanczosTaps = 2 * lanczosRadius;
+    constexpr int lanczosDegree = 5;
+
+    static void lanczosWeights(double f, double (&out)[lanczosTaps]) {
+        double total = 0.;
+
+        for (int k = 0; k < lanczosTaps; k++) {
+            double x = pi * (k - (lanczosRadius - 1) - f);
+
+            out[k] = ::fabs(x) < 1e-9 ? 1. : lanczosRadius * ::sin(x) * ::sin(x / lanczosRadius) / (x * x);
+            total += out[k];
+        }
+
+        for (double& w : out) {
+            w /= total;
+        }
+    }
+
+    static void lanczosFit(double (&out)[lanczosTaps][lanczosDegree + 1]) {
+        constexpr int n = lanczosDegree + 1;
+        double m[n][n + lanczosTaps];
+
+        for (int j = 0; j < n; j++) {
+            double t = ::cos(pi * (j + 0.5) / n);
+            double w[lanczosTaps];
+            double power = 1.;
+
+            lanczosWeights((t + 1.) / 2., w);
+
+            for (int e = 0; e < n; e++) {
+                m[j][e] = power;
+                power *= t;
+            }
+
+            for (int k = 0; k < lanczosTaps; k++) {
+                m[j][n + k] = w[k];
+            }
+        }
+
+        for (int c = 0; c < n; c++) {
+            int pivot = c;
+
+            for (int r = c + 1; r < n; r++) {
+                pivot = ::fabs(m[r][c]) > ::fabs(m[pivot][c]) ? r : pivot;
+            }
+
+            for (int j = 0; j < n + lanczosTaps; j++) {
+                double swap = m[c][j];
+
+                m[c][j] = m[pivot][j];
+                m[pivot][j] = swap;
+            }
+
+            for (int r = 0; r < n; r++) {
+                if (r == c) {
+                    continue;
+                }
+
+                double k = m[r][c] / m[c][c];
+
+                for (int j = c; j < n + lanczosTaps; j++) {
+                    m[r][j] -= k * m[c][j];
+                }
+            }
+        }
+
+        for (int k = 0; k < lanczosTaps; k++) {
+            for (int e = 0; e < n; e++) {
+                out[k][e] = m[e][n + k] / m[e][e];
+            }
+        }
+    }
+
     struct Video {
         Graph& g;
         const VideoShader& s;
@@ -936,6 +1011,171 @@ namespace {
                 Node* right = g.mix(taps[0][1], taps[1][1], f[1]);
 
                 slots[l.alpha && c == l.count - 1 ? 3 : c] = g.mix(left, right, f[0]);
+            }
+        }
+
+        void lanczosAxis(Node* at, Node*& base, Node* (&w)[lanczosTaps]) {
+            double fit[lanczosTaps][lanczosDegree + 1];
+            Node* floor = g.floor(at);
+            Node* t = g.sub(g.mul(g.sub(at, floor), 2.), 1.);
+            Node* square = g.mul(t, t);
+
+            lanczosFit(fit);
+            base = g.convert(floor, Kind::Int);
+
+            for (int k = 0; k < lanczosRadius; k++) {
+                Node* even = g.f(0.);
+                Node* odd = g.f(0.);
+
+                for (int e = lanczosDegree - lanczosDegree % 2; e >= 0; e -= 2) {
+                    even = g.add(g.mul(even, square), fit[k][e]);
+                }
+
+                for (int e = lanczosDegree - 1 + lanczosDegree % 2; e >= 1; e -= 2) {
+                    odd = g.add(g.mul(odd, square), fit[k][e]);
+                }
+
+                odd = g.mul(odd, t);
+                w[k] = g.add(even, odd);
+                w[lanczosTaps - 1 - k] = g.sub(even, odd);
+            }
+        }
+
+        Node* funnel(Node* lo, Node* hi, Node* s) {
+            return g.select(g.eq(s, 0), lo, g.bor(g.shl(hi, g.sub(32, s)), g.shr(lo, s)));
+        }
+
+        int span(int c) const {
+            const int* k = l.components[c];
+
+            return (lanczosTaps - 1) * k[1] + (k[3] + k[4] <= 8 ? 1 : k[3] + k[4] <= 16 ? 2 : 4);
+        }
+
+        bool windowed(int c) const {
+            return !l.bits && !(c == 0 && l.luma[0]) && l.components[c][1] <= 8;
+        }
+
+        void run(int c, Node* row, Node* left, Node* (&out)[lanczosTaps]) {
+            int step = l.components[c][1];
+            int first = start(c);
+            Node* byte = g.add(g.mul(left, step), first);
+            Node* index = g.add(row, g.shr(byte, 2));
+            bool known = step % 4 == 0;
+            int count = ((known ? first % 4 : 3) + span(c) + 3) / 4;
+            Node* words[16];
+
+            for (int i = 0; i < count; i++) {
+                words[i] = g.load(g.add(index, i));
+            }
+
+            if (!known) {
+                Node* s = g.shl(g.band(byte, 3), 3);
+
+                for (int i = 0; i + 1 < count; i++) {
+                    words[i] = funnel(words[i], words[i + 1], s);
+                }
+
+                words[count - 1] = g.shr(words[count - 1], s);
+                first = 0;
+            }
+
+            for (int m = 0; m < lanczosTaps; m++) {
+                int at = (known ? first % 4 : 0) + m * step;
+
+                out[m] = value(c, g.shr(words[at / 4], 8 * (at % 4)));
+            }
+        }
+
+        void fold(Node* origin, Node* left, Node* const (&w)[lanczosTaps], Node* (&v)[lanczosTaps]) {
+            Node* d = g.sub(origin, g.convert(left, Kind::Int));
+            Node* prefix[lanczosTaps];
+            Node* suffix[lanczosTaps];
+
+            prefix[0] = w[0];
+            suffix[lanczosTaps - 1] = w[lanczosTaps - 1];
+
+            for (int k = 1; k < lanczosTaps; k++) {
+                prefix[k] = g.add(prefix[k - 1], w[k]);
+                suffix[lanczosTaps - 1 - k] = g.add(suffix[lanczosTaps - k], w[lanczosTaps - 1 - k]);
+            }
+
+            for (int m = 0; m < lanczosTaps; m++) {
+                Node* folded = w[m];
+
+                for (int e = -lanczosRadius; e <= lanczosRadius; e++) {
+                    int k = m + e;
+                    Node* moved = k >= 0 && k < lanczosTaps ? w[k] : g.f(0.);
+
+                    if (e == 0) {
+                        continue;
+                    }
+
+                    if (e > 0 && m == 0) {
+                        moved = prefix[e];
+                    }
+
+                    if (e < 0 && m == lanczosTaps - 1) {
+                        moved = suffix[lanczosTaps - 1 + e];
+                    }
+
+                    folded = g.select(g.eq(d, -e), moved, folded);
+                }
+
+                v[m] = folded;
+            }
+        }
+
+        void lanczos(Node* const (&at)[2], Node* const (&extent)[2], const int* members, int count, Node* (&slots)[4]) {
+            Node* base[2];
+            Node* w[2][lanczosTaps];
+            bool whole = extent[0]->value >= lanczosTaps;
+
+            for (int i = 0; i < 2; i++) {
+                lanczosAxis(at[i], base[i], w[i]);
+            }
+
+            for (int m = 0; m < count; m++) {
+                whole = whole && windowed(members[m]);
+            }
+
+            Node* origin = g.add(base[0], -(lanczosRadius - 1));
+            Node* left = g.convert(g.clamp(origin, 0, extent[0]->value - lanczosTaps), Kind::Uint);
+            Node* v[lanczosTaps];
+
+            if (whole) {
+                fold(origin, left, w[0], v);
+            }
+
+            for (int m = 0; m < count; m++) {
+                int c = members[m];
+                int plane = l.components[c][0];
+                Node* offset = g.u(s.planeOffset[plane]);
+                Node* line = g.u(s.lineSize[plane]);
+                Node* columns[lanczosTaps];
+                Node* total = g.f(0.);
+
+                for (int k = 0; k < lanczosTaps && !whole; k++) {
+                    columns[k] = g.convert(g.clamp(g.add(base[0], k - (lanczosRadius - 1)), 0, g.sub(g.convert(extent[0], Kind::Int), 1)), Kind::Uint);
+                }
+
+                for (int j = 0; j < lanczosTaps; j++) {
+                    Node* y = g.convert(g.clamp(g.add(base[1], j - (lanczosRadius - 1)), 0, g.sub(g.convert(extent[1], Kind::Int), 1)), Kind::Uint);
+                    Node* row = g.shr(g.add(offset, g.mul(y, line)), 2);
+                    Node* samples[lanczosTaps];
+                    Node* sum = g.f(0.);
+
+                    if (whole) {
+                        run(c, row, left, samples);
+                    }
+
+                    for (int k = 0; k < lanczosTaps; k++) {
+                        sum = g.add(sum, g.mul(whole ? v[k] : w[0][k], whole ? samples[k] : value(c, window(c, row, columns[k]))));
+                    }
+
+                    total = g.add(total, g.mul(w[1][j], sum));
+                }
+
+                slots[l.alpha && c == l.count - 1 ? 3 : c] = total;
             }
         }
 
@@ -1100,10 +1340,21 @@ namespace {
 
             Node* extent[2] = {g.u(s.size[0]), g.u(s.size[1])};
 
+            bool sharp = !strcmp(s.filter, "lanczos");
+
+            if (!sharp && strcmp(s.filter, "bilinear")) {
+                fail(StringView(u8"a video shader has an unknown filter"));
+            }
+
             if (!model("yuv")) {
                 const int members[4] = {0, 1, 2, 3};
 
-                grid(at, extent, members, l.count, out);
+                if (sharp) {
+                    lanczos(at, extent, members, l.count, out);
+                } else {
+                    grid(at, extent, members, l.count, out);
+                }
+
                 return;
             }
 
@@ -1113,8 +1364,13 @@ namespace {
             Node* chromaExtent[2] = {g.u(s.size[2]), g.u(s.size[3])};
             Node* sampled[4] = {g.f(0.), g.f(0.), g.f(0.), g.f(0.)};
 
-            grid(at, extent, luma, l.alpha ? 2 : 1, out);
-            grid(chromaAt, chromaExtent, chroma, 2, sampled);
+            if (sharp) {
+                lanczos(at, extent, luma, l.alpha ? 2 : 1, out);
+                lanczos(chromaAt, chromaExtent, chroma, 2, sampled);
+            } else {
+                grid(at, extent, luma, l.alpha ? 2 : 1, out);
+                grid(chromaAt, chromaExtent, chroma, 2, sampled);
+            }
 
             for (int i = 0; i < 4; i++) {
                 out[i] = g.add(out[i], sampled[i]);
