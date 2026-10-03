@@ -74,6 +74,8 @@ CORPUS = [
     ("sota", "yuv420p_lanczos3_1.42_sota", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (1920, 1080), (2731, 1536), "yuv420p_709_sdr_lanczos3_fast", "lanczos", "chart"),
     ("sota", "yuv420p_down_0.5_sota", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (3840, 2160), (1920, 1080), "yuv420p_709_sdr_hermite", "bilinear", "chart"),
     ("kernel", "gbrp_roundtrip_sigmoid", "gbrp", (0, 0), 0, 2, 13, 1, 0, "sdr", (1280, 720), (2560, 1440), "gbrp_srgb_sigmoid", "lanczos", "box2"),
+    ("kernel", "gbrp_roundtrip_kernel", "gbrp", (0, 0), 0, 2, 13, 1, 0, "sdr", (1280, 720), (2560, 1440), "gbrp_srgb_sigmoid", "lanczos", "box2", 0, 0, "kernel"),
+    ("kernel", "yuv420p_kernel_1.42", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (1920, 1080), (2731, 1536), "yuv420p_709_sdr_sigmoid", "lanczos", "chart", 0, 0, "kernel"),
     ("kernel", "yuv420p_sigmoid_1.42", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (1920, 1080), (2731, 1536), "yuv420p_709_sdr_sigmoid", "lanczos", "chart"),
     ("dither", "yuv420p_dither8", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (1920, 1080), (3840, 2160), "yuv420p_709_sdr", "bilinear", "chart", 8, 1),
     ("dither", "yuv420p_lanczos3_dither8", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (1920, 1080), (2731, 1536), "yuv420p_709_sdr_lanczos3_fast", "lanczos", "chart", 8, 2),
@@ -96,8 +98,8 @@ CORPUS = [
     ("scale", "yuv420p_lanczos3_1.46", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (1280, 720), (1867, 1050), "yuv420p_709_sdr_lanczos3", "lanczos"),
     ("scale", "yuv420p_lanczos3fast_1.46", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (1280, 720), (1867, 1050), "yuv420p_709_sdr_lanczos3_fast", "lanczos"),
 ]
-FIELDS = ("group", "name", "format", "subsampling", "matrix", "range", "transfer", "primaries", "location", "output", "source", "target", "hand", "filter", "content", "dither", "phase")
-SIZES = {"source": (1920, 1080), "target": (3840, 2160), "filter": "bilinear", "content": "noise", "dither": 0, "phase": 0}
+FIELDS = ("group", "name", "format", "subsampling", "matrix", "range", "transfer", "primaries", "location", "output", "source", "target", "hand", "filter", "content", "dither", "phase", "stage")
+SIZES = {"source": (1920, 1080), "target": (3840, 2160), "filter": "bilinear", "content": "noise", "dither": 0, "phase": 0, "stage": "fragment"}
 
 MODULE = video_shaders.tables()
 LAYOUTS = video_shaders.layouts(MODULE)
@@ -244,13 +246,13 @@ def facts(case, layout, components, offsets, lines):
     red = case["format"][6:].index("r") if model == "bayer" else 0
     system = matrix["system"] if yuv else model
     W, H = case["source"]
-    words = [*offsets, *lines, W, H, -(-W >> sx), -(-H >> sy), *case["target"], case["dither"], case["phase"]]
+    words = [*offsets, *lines, W, H, -(-W >> sx), -(-H >> sy), *case["target"], case["dither"], case["phase"], 0, 0]
     numbers = [2.0**-sx, 2.0**-sy, site[0] * ((1 << sx) - 1) * 2.0**-sx, site[1] * ((1 << sy) - 1) * 2.0**-sy]
     numbers += [value for row in decode for value in row] + bias + [red % 2, red // 2, kr, kb]
     numbers += curve + table(transfer.get("oetf")) + table(transfer.get("inverse"))
     numbers += [value for row in to_output for value in row]
     numbers += [transfer.get("decades", 0), 10000 / WHITE, 1000 / WHITE, *to_xyz[1]]
-    return [case["format"], system, shape, conversion, output, case["filter"], *(format(word, "x") for word in words), *map(bits, numbers)]
+    return [case["format"], system, shape, conversion, output, case["filter"], case["stage"], *(format(word, "x") for word in words), *map(bits, numbers)]
 
 
 def prepare(case, directory, compiler):
@@ -262,6 +264,8 @@ def prepare(case, directory, compiler):
     (directory / "template.ubo").write_bytes(bytes(16))
     compiled = subprocess.run([compiler, *arguments], check=True, capture_output=True)
     (directory / "template.spv").write_bytes(compiled.stdout)
+    if case["stage"] == "kernel":
+        (directory / "template.kind").write_text("kernel")
     (directory / "compile").write_text(re.search(r"compile (\d+) ns", compiled.stderr.decode()).group(1))
     (directory / "size").write_text("%d %d" % case["target"])
     sx, sy = case["subsampling"]
@@ -286,7 +290,7 @@ def prepare(case, directory, compiler):
     if stage == "comp":
         (directory / "optimum.kind").write_text("kernel")
     subprocess.run(["glslangValidator", "--quiet", "--target-env", "vulkan1.1", "-V", "-S", stage, str(directory / f"optimum.{stage}"), "-o", str(directory / "optimum.spv")], check=True)
-    return "_".join((name, *arguments[1:6]))
+    return "_".join((name, *arguments[1:7]))
 
 
 def measure(harness, vertex, directories, rounds):

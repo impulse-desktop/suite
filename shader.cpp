@@ -43,6 +43,7 @@ namespace {
         Load,
         Half,
         BitsFloat,
+        Shared,
     };
 
     enum class Kind : u8 {
@@ -62,6 +63,7 @@ namespace {
         double hi;
         u32 index;
         u32 id;
+        u8 mark;
     };
 
     constexpr double word = 4294967295.;
@@ -180,7 +182,7 @@ namespace {
                 hi = 2147483647.;
             }
 
-            Node* node = pool.make<Node>(Node{op, kind, (u8)arity, {args[0], args[1], args[2]}, value, lo, hi, count++, 0});
+            Node* node = pool.make<Node>(Node{op, kind, (u8)arity, {args[0], args[1], args[2]}, value, lo, hi, count++, 0, 0});
 
             slots[at] = node;
 
@@ -227,6 +229,14 @@ namespace {
 
         Node* input(int component) {
             return make(Op::Input, Kind::Float, 0, nullptr, nullptr, nullptr, component, 0., 1.);
+        }
+
+        Node* invocation(int which, double hi) {
+            return make(Op::Input, Kind::Uint, 0, nullptr, nullptr, nullptr, which, 0., hi);
+        }
+
+        Node* shared(Node* index, int array) {
+            return make(Op::Shared, Kind::Float, 1, index, nullptr, nullptr, array, -INFINITY, INFINITY);
         }
 
         Node* lift(Node* x, Kind) {
@@ -671,6 +681,10 @@ namespace {
                 return f(::floor(a->value));
             }
 
+            if (a->op == Op::Convert && a->args[0]->kind != Kind::Float) {
+                return a;
+            }
+
             return unary(Op::Floor, a, isfinite(a->lo) ? ::floor(a->lo) : a->lo, isfinite(a->hi) ? ::floor(a->hi) : a->hi);
         }
 
@@ -885,6 +899,24 @@ namespace {
     LanczosFit::LanczosFit() {
         lanczosFit(c);
     }
+
+    struct Store {
+        Node* index;
+        Node* value;
+    };
+
+    struct Kernel {
+        Vector<Store> stores[2];
+        u32 sizes[2];
+        Node* at[2];
+        Node* color[4];
+    };
+
+    constexpr int tile = 16;
+    constexpr double sigmoidCenter = 0.75;
+    constexpr double sigmoidSlope = 6.5;
+    constexpr double sigmoidLow = 0.007577241268;
+    constexpr double sigmoidSpan = 0.8279062958;
 
     struct Video {
         Graph& g;
@@ -1548,54 +1580,33 @@ namespace {
             }
         }
 
-        void color(Node* const (&codes)[4], Node* (&out)[4]) {
-            Node* signal[3];
-            bool sdr = !strcmp(s.output, "sdr");
-
+        void signalOf(Node* const (&codes)[4], Node* (&signal)[3], Node*& alpha) {
             if (model("palette")) {
                 for (int i = 0; i < 3; i++) {
                     signal[i] = codes[i];
                 }
 
-                out[3] = codes[3];
-            } else {
-                for (int r = 0; r < 3; r++) {
-                    signal[r] = g.f(s.bias[r]);
-
-                    for (int c = 0; c < 3; c++) {
-                        signal[r] = g.add(signal[r], g.mul(codes[c], s.decode[r][c]));
-                    }
-                }
-
-                if (!strcmp(s.system, "cl")) {
-                    constantLuminance(signal);
-                }
-
-                out[3] = l.alpha ? g.mul(codes[3], s.bias[3]) : g.f(1.);
-            }
-
-            if (!strcmp(s.transfer, "identity")) {
-                for (int i = 0; i < 3; i++) {
-                    out[i] = sdr ? g.clamp(signal[i], 0., 1.) : g.max(signal[i], 0.);
-                }
+                alpha = codes[3];
 
                 return;
             }
 
-            const double* e = s.curve;
-            bool power = e[0] == e[5] && e[1] == e[6] && e[2] == 1. && e[3] == 0. && e[4] == 0. && e[10] < 0.;
+            for (int r = 0; r < 3; r++) {
+                signal[r] = g.f(s.bias[r]);
 
-            if (!strcmp(s.transfer, "curve") && !strcmp(s.conversion, "same") && (!sdr || (power && (e[1] == 1. || e[1] == 2.4)))) {
-                const double fused[11] = {1.055 * ::pow(e[0], 1. / 2.4), e[1] / 2.4, 1., 0., 0.055, 12.92 * e[0], e[1], 1., 0., 0., ::pow(0.0031308 / e[0], 1. / e[1])};
-
-                for (int i = 0; i < 3; i++) {
-                    out[i] = piece(sdr ? g.clamp(signal[i], 0., 1.) : g.max(signal[i], 0.), sdr ? fused : s.curve);
+                for (int c = 0; c < 3; c++) {
+                    signal[r] = g.add(signal[r], g.mul(codes[c], s.decode[r][c]));
                 }
-
-                return;
             }
 
-            Node* light[3];
+            if (!strcmp(s.system, "cl")) {
+                constantLuminance(signal);
+            }
+
+            alpha = l.alpha ? g.mul(codes[3], s.bias[3]) : g.f(1.);
+        }
+
+        void lightOf(Node* const (&signal)[3], Node* (&light)[3]) {
             double toLight[3][3];
             double toSignal[3][3];
 
@@ -1621,7 +1632,7 @@ namespace {
                 if (!pq) {
                     hlgDisplay(light);
                 }
-            } else if (!strcmp(s.transfer, "curve")) {
+            } else if (!strcmp(s.transfer, "curve") || !strcmp(s.transfer, "identity")) {
                 for (int i = 0; i < 3; i++) {
                     light[i] = piece(g.max(signal[i], 0.), s.curve);
                 }
@@ -1640,6 +1651,10 @@ namespace {
 
                 hlgDisplay(light);
             }
+        }
+
+        void outputOf(Node* (&light)[3], Node* (&out)[4]) {
+            bool sdr = !strcmp(s.output, "sdr");
 
             if (!strcmp(s.conversion, "convert")) {
                 Node* converted[3];
@@ -1662,48 +1677,218 @@ namespace {
                 out[i] = g.select(g.le(display, 0.0031308), g.mul(display, 12.92), g.sub(g.mul(g.pow(display, 1. / 2.4), 1.055), 0.055));
             }
         }
+
+        void color(Node* const (&codes)[4], Node* (&out)[4]) {
+            Node* signal[3];
+            Node* light[3];
+            bool sdr = !strcmp(s.output, "sdr");
+
+            signalOf(codes, signal, out[3]);
+
+            if (!strcmp(s.transfer, "identity")) {
+                for (int i = 0; i < 3; i++) {
+                    out[i] = sdr ? g.clamp(signal[i], 0., 1.) : g.max(signal[i], 0.);
+                }
+
+                return;
+            }
+
+            const double* e = s.curve;
+            bool power = e[0] == e[5] && e[1] == e[6] && e[2] == 1. && e[3] == 0. && e[4] == 0. && e[10] < 0.;
+
+            if (!strcmp(s.transfer, "curve") && !strcmp(s.conversion, "same") && (!sdr || (power && (e[1] == 1. || e[1] == 2.4)))) {
+                const double fused[11] = {1.055 * ::pow(e[0], 1. / 2.4), e[1] / 2.4, 1., 0., 0.055, 12.92 * e[0], e[1], 1., 0., 0., ::pow(0.0031308 / e[0], 1. / e[1])};
+
+                for (int i = 0; i < 3; i++) {
+                    out[i] = piece(sdr ? g.clamp(signal[i], 0., 1.) : g.max(signal[i], 0.), sdr ? fused : s.curve);
+                }
+
+                return;
+            }
+
+            lightOf(signal, light);
+            outputOf(light, out);
+        }
+
+        Node* sigmoidize(Node* x) {
+            Node* z = g.add(g.mul(g.clamp(x, 0., 1.), sigmoidSpan), sigmoidLow);
+
+            return g.sub(sigmoidCenter, g.mul(g.log(g.sub(g.div(1., z), 1.)), 1. / sigmoidSlope));
+        }
+
+        Node* unsigmoidize(Node* v) {
+            return g.mul(g.sub(g.div(1., g.add(g.exp(g.mul(g.sub(sigmoidCenter, v), sigmoidSlope)), 1.)), sigmoidLow), 1. / sigmoidSpan);
+        }
+
+        void decodeAt(Node* const (&at)[2], Node* (&codes)[4]) {
+            Node* column = g.convert(at[0], Kind::Uint);
+            Node* line = g.convert(at[1], Kind::Uint);
+            bool yuv = model("yuv");
+
+            for (int i = 0; i < 4; i++) {
+                codes[i] = g.f(0.);
+            }
+
+            for (int c = 0; c < l.count; c++) {
+                if (yuv && (c == 1 || c == 2)) {
+                    continue;
+                }
+
+                int plane = l.components[c][0];
+                Node* row = g.shr(g.add(g.u(s.planeOffset[plane]), g.mul(line, g.u(s.lineSize[plane]))), 2);
+
+                codes[l.alpha && c == l.count - 1 ? 3 : c] = value(c, window(c, row, column));
+            }
+
+            if (yuv) {
+                const int chroma[2] = {1, 2};
+                Node* chromaAt[2] = {g.sub(g.mul(g.convert(at[0], Kind::Float), s.chroma[0]), s.chroma[2]), g.sub(g.mul(g.convert(at[1], Kind::Float), s.chroma[1]), s.chroma[3])};
+                Node* chromaExtent[2] = {g.u(s.size[2]), g.u(s.size[3])};
+                Node* sampled[4] = {g.f(0.), g.f(0.), g.f(0.), g.f(0.)};
+
+                grid(chromaAt, chromaExtent, chroma, 2, sampled);
+                codes[1] = sampled[1];
+                codes[2] = sampled[2];
+            }
+        }
+
+        void kernel(Kernel& k) {
+            bool sdr = !strcmp(s.output, "sdr");
+            double ratio[2];
+            int reach[2];
+            Node* local[2] = {g.invocation(2, tile - 1), g.invocation(3, tile - 1)};
+            Node* group[2];
+            Node* corner[2];
+            Node* last[2];
+
+            for (int i = 0; i < 2; i++) {
+                ratio[i] = (double)s.size[i] / s.target[i];
+                reach[i] = (int)::ceil((tile - 1) * ratio[i]) + 7;
+                group[i] = g.invocation(4 + i, (s.target[i] + tile - 1) / tile - 1);
+                corner[i] = g.add(g.convert(g.floor(g.sub(g.mul(g.add(g.convert(g.mul(group[i], tile), Kind::Float), 0.5), ratio[i]), 0.5)), Kind::Int), -(lanczosRadius - 1));
+                last[i] = g.i(s.size[i] - 1.);
+            }
+
+            Node* lane = g.add(g.mul(local[1], tile), local[0]);
+            int positions = reach[0] * reach[1];
+
+            for (int pass = 0; pass * tile * tile < positions; pass++) {
+                Node* index = g.add(lane, pass * tile * tile);
+                Node* y = g.convert(g.floor(g.mul(g.add(g.convert(index, Kind::Float), 0.5), 1. / reach[0])), Kind::Uint);
+                Node* x = g.sub(index, g.mul(y, reach[0]));
+                Node* at[2] = {g.clamp(g.add(corner[0], g.convert(x, Kind::Int)), 0, last[0]), g.clamp(g.add(corner[1], g.convert(y, Kind::Int)), 0, last[1])};
+                Node* codes[4];
+                Node* signal[3];
+                Node* light[3];
+                Node* alpha;
+                Node* slot = g.select(g.lt(index, positions), g.mul(index, 3), positions * 3);
+
+                decodeAt(at, codes);
+                signalOf(codes, signal, alpha);
+                lightOf(signal, light);
+
+                for (int c = 0; c < 3; c++) {
+                    k.stores[0].pushBack(Store{g.add(slot, c), sdr ? sigmoidize(light[c]) : light[c]});
+                }
+            }
+
+            k.sizes[0] = positions * 3 + 3;
+
+            Node* across = g.convert(g.add(g.mul(group[0], tile), local[0]), Kind::Float);
+            Axis horizontal = axis(g.sub(g.mul(g.add(across, 0.5), ratio[0]), 0.5), 1. / ratio[0], true);
+            Node* start = g.convert(g.sub(horizontal.origin, corner[0]), Kind::Uint);
+
+            for (int pass = 0; pass * tile < reach[1]; pass++) {
+                Node* row = g.add(local[1], pass * tile);
+                Node* base = g.add(g.mul(row, reach[0]), start);
+                Node* slot = g.select(g.lt(row, reach[1]), g.mul(g.add(g.mul(row, tile), local[0]), 3), reach[1] * tile * 3);
+
+                for (int c = 0; c < 3; c++) {
+                    Node* sum = g.f(0.);
+
+                    for (int t = 0; t < horizontal.taps; t++) {
+                        sum = g.add(sum, g.mul(horizontal.w[t], g.shared(g.add(g.mul(g.add(base, t), 3), c), 0)));
+                    }
+
+                    k.stores[1].pushBack(Store{g.add(slot, c), sum});
+                }
+            }
+
+            k.sizes[1] = reach[1] * tile * 3 + 3;
+
+            Node* pixel[2];
+            Node* light[3];
+            Node* centre[2];
+
+            for (int i = 0; i < 2; i++) {
+                pixel[i] = g.min(g.add(g.mul(group[i], tile), local[i]), s.target[i] - 1.);
+                centre[i] = g.add(g.convert(pixel[i], Kind::Float), 0.5);
+            }
+
+            Node* column = g.sub(pixel[0], g.mul(group[0], tile));
+            Axis vertical = axis(g.sub(g.mul(centre[1], ratio[1]), 0.5), 1. / ratio[1], true);
+            Node* top = g.convert(g.sub(vertical.origin, corner[1]), Kind::Uint);
+
+            for (int c = 0; c < 3; c++) {
+                Node* total = g.f(0.);
+
+                for (int t = 0; t < vertical.taps; t++) {
+                    total = g.add(total, g.mul(vertical.w[t], g.shared(g.add(g.mul(g.add(g.mul(g.add(top, t), tile), column), 3), c), 1)));
+                }
+
+                light[c] = sdr ? unsigmoidize(total) : total;
+            }
+
+            outputOf(light, k.color);
+            k.color[3] = g.f(1.);
+            dither(centre, k.color);
+
+            for (int i = 0; i < 2; i++) {
+                k.at[i] = g.convert(g.add(pixel[i], s.origin[i]), Kind::Int);
+            }
+        }
+
+        void dither(Node* const (&pixel)[2], Node* (&out)[4]) {
+            if (!s.dither) {
+                return;
+            }
+
+            Node* at[2];
+
+            for (int i = 0; i < 2; i++) {
+                at[i] = g.add(pixel[i], 5.588238 * s.phase);
+            }
+
+            Node* inner = g.add(g.mul(at[0], 0.06711056), g.mul(at[1], 0.00583715));
+            Node* outer = g.mul(g.sub(inner, g.floor(inner)), 52.9829189);
+            Node* step = g.mul(g.sub(g.sub(outer, g.floor(outer)), 0.5), 1. / (::exp2(s.dither) - 1.));
+
+            for (int i = 0; i < 3; i++) {
+                out[i] = g.add(out[i], step);
+            }
+        }
     };
 
-    static void dither(Graph& g, const VideoShader& s, Node* (&out)[4]) {
-        if (!s.dither) {
-            return;
-        }
-
-        Node* at[2];
-
-        for (int i = 0; i < 2; i++) {
-            at[i] = g.add(g.mul(g.input(i), (double)s.target[i]), 5.588238 * s.phase);
-        }
-
-        Node* inner = g.add(g.mul(at[0], 0.06711056), g.mul(at[1], 0.00583715));
-        Node* outer = g.mul(g.sub(inner, g.floor(inner)), 52.9829189);
-        Node* step = g.mul(g.sub(g.sub(outer, g.floor(outer)), 0.5), 1. / (::exp2(s.dither) - 1.));
-
-        for (int i = 0; i < 3; i++) {
-            out[i] = g.add(out[i], step);
-        }
-    }
-
-    static void order(Node* const (&roots)[4], Vector<Node*>& out) {
+    static void order(Node* const* roots, size_t count, Vector<Node*>& out) {
         Vector<Node*> stack;
 
-        for (Node* root : roots) {
-            stack.pushBack(root);
+        for (size_t r = 0; r < count; r++) {
+            stack.pushBack(roots[r]);
 
             while (!stack.empty()) {
                 Node* top = stack.back();
 
-                if (top->id == 2) {
+                if (top->mark == 2) {
                     stack.popBack();
                     continue;
                 }
 
                 bool ready = true;
 
-                top->id = 1;
+                top->mark = 1;
 
                 for (int i = top->arity - 1; i >= 0; i--) {
-                    if (!top->args[i]->id) {
+                    if (!top->args[i]->mark) {
                         stack.pushBack(top->args[i]);
                         ready = false;
                     }
@@ -1711,7 +1896,7 @@ namespace {
 
                 if (ready) {
                     stack.popBack();
-                    top->id = 2;
+                    top->mark = 2;
                     out.pushBack(top);
                 }
             }
@@ -1726,8 +1911,10 @@ namespace {
     }
 
     static void operand(StringBuilder& out, const Node* node) {
+        const char* inputs[6] = {"in.uv.x", "in.uv.y", "local.x", "local.y", "group.x", "group.y"};
+
         if (node->op == Op::Input) {
-            out << StringView(node->value == 0. ? "in.uv.x" : "in.uv.y");
+            out << StringView(inputs[(int)node->value]);
         } else if (node->op != Op::Const) {
             out << StringView(u8"t") << (u64)node->id;
         } else if (node->kind == Kind::Bool) {
@@ -1745,14 +1932,7 @@ namespace {
         }
     }
 
-    static StringView msl(ObjPool& pool, Node* const (&color)[4]) {
-        Vector<Node*> nodes;
-        StringBuilder out;
-        u32 next = 3;
-
-        order(color, nodes);
-        out << StringView(u8"#include <metal_stdlib>\nusing namespace metal;\nstruct In {\n    float2 uv [[user(locn0)]];\n};\nfragment float4 main0(In in [[stage_in]], const device uint* words [[buffer(0)]]) {\n");
-
+    static void statements(StringBuilder& out, const Vector<Node*>& nodes, u32& next) {
         for (Node* node : nodes) {
             if (node->op == Op::Const || node->op == Op::Input) {
                 continue;
@@ -1869,6 +2049,10 @@ namespace {
                 out << StringView(u8"float(as_type<half2>(");
                 operand(out, node->args[0]);
                 out << StringView(u8").x)");
+            } else if (node->op == Op::Shared) {
+                out << StringView(node->value == 0. ? "sharedA[" : "sharedB[");
+                operand(out, node->args[0]);
+                out << StringView(u8"]");
             } else if (node->op == Op::BitsFloat) {
                 out << StringView(u8"as_type<float>(");
                 operand(out, node->args[0]);
@@ -1880,18 +2064,84 @@ namespace {
             out << StringView(u8";\n");
         }
 
-        out << StringView(u8"    return float4(");
+    }
+
+    static void finish(StringBuilder& out, Node* const* color, const char* tail) {
+        out << StringView(u8"float4(");
 
         for (int i = 0; i < 4; i++) {
             operand(out, color[i]);
-            out << StringView(i < 3 ? ", " : ");\n}\n");
+            out << StringView(i < 3 ? ", " : ")");
         }
 
+        out << StringView(tail);
+    }
+
+    static StringView copied(ObjPool& pool, StringBuilder& out) {
         u8* bytes = (u8*)pool.allocate(out.used());
 
         memcpy(bytes, out.data(), out.used());
 
         return StringView(bytes, out.used());
+    }
+
+    static StringView msl(ObjPool& pool, Node* const (&color)[4]) {
+        Vector<Node*> nodes;
+        StringBuilder out;
+        u32 next = 3;
+
+        order(color, 4, nodes);
+        out << StringView(u8"#include <metal_stdlib>\nusing namespace metal;\nstruct In {\n    float2 uv [[user(locn0)]];\n};\nfragment float4 main0(In in [[stage_in]], const device uint* words [[buffer(0)]]) {\n");
+        statements(out, nodes, next);
+        out << StringView(u8"    return ");
+        finish(out, color, ";\n}\n");
+
+        return copied(pool, out);
+    }
+
+    static StringView mslKernel(ObjPool& pool, const Kernel& k) {
+        StringBuilder out;
+        u32 next = 3;
+
+        out << StringView(u8"#include <metal_stdlib>\nusing namespace metal;\nkernel void main0(const device uint* words [[buffer(0)]], texture2d<float, access::write> target [[texture(0)]], uint3 local [[thread_position_in_threadgroup]], uint3 group [[threadgroup_position_in_grid]]) {\n");
+        out << StringView(u8"    threadgroup float sharedA[") << (u64)k.sizes[0] << StringView(u8"];\n    threadgroup float sharedB[") << (u64)k.sizes[1] << StringView(u8"];\n");
+
+        for (int phase = 0; phase < 2; phase++) {
+            Vector<Node*> roots;
+            Vector<Node*> nodes;
+
+            for (const Store& store : k.stores[phase]) {
+                roots.pushBack(store.index);
+                roots.pushBack(store.value);
+            }
+
+            order(roots.data(), roots.length(), nodes);
+            statements(out, nodes, next);
+
+            for (const Store& store : k.stores[phase]) {
+                out << StringView(phase ? "    sharedB[" : "    sharedA[");
+                operand(out, store.index);
+                out << StringView(u8"] = ");
+                operand(out, store.value);
+                out << StringView(u8";\n");
+            }
+
+            out << StringView(u8"    threadgroup_barrier(mem_flags::mem_threadgroup);\n");
+        }
+
+        Node* roots[6] = {k.at[0], k.at[1], k.color[0], k.color[1], k.color[2], k.color[3]};
+        Vector<Node*> nodes;
+
+        order(roots, 6, nodes);
+        statements(out, nodes, next);
+        out << StringView(u8"    target.write(");
+        finish(out, k.color, ", uint2(");
+        operand(out, k.at[0]);
+        out << StringView(u8", ");
+        operand(out, k.at[1]);
+        out << StringView(u8"));\n}\n");
+
+        return copied(pool, out);
     }
 }
 #else
@@ -1946,24 +2196,8 @@ namespace {
         }
     };
 
-    static StringView spirv(ObjPool& pool, Graph& g, Node* const (&color)[4]) {
-        Node* zero = g.i(0.);
-        Node* one = g.f(1.);
-        Node* none = g.f(0.);
-        Vector<Node*> nodes;
+    struct Emitter {
         Spirv s;
-
-        order(color, nodes);
-
-        Node* extras[3] = {zero, one, none};
-
-        for (Node* extra : extras) {
-            if (!extra->id) {
-                extra->id = 2;
-                nodes.pushBack(extra);
-            }
-        }
-
         u32 glsl = s.fresh();
         u32 typeVoid = s.fresh();
         u32 typeFunction = s.fresh();
@@ -1973,169 +2207,254 @@ namespace {
         u32 typeInt = s.fresh();
         u32 typeVec2 = s.fresh();
         u32 typeVec4 = s.fresh();
-        u32 inputVec2 = s.fresh();
-        u32 outputVec4 = s.fresh();
         u32 typeWords = s.fresh();
         u32 typeBytes = s.fresh();
         u32 storageBytes = s.fresh();
         u32 storageWord = s.fresh();
-        u32 uv = s.fresh();
-        u32 fColor = s.fresh();
         u32 bytes = s.fresh();
         u32 main = s.fresh();
         u32 label = s.fresh();
-        u32 coordinates = s.fresh();
-        u32 coordinate[2] = {s.fresh(), s.fresh()};
+        u32 sharedFloat = s.fresh();
+        u32 arrays[2] = {s.fresh(), s.fresh()};
+        u32 inputs[6] = {s.fresh(), s.fresh(), s.fresh(), s.fresh(), s.fresh(), s.fresh()};
+        u32 zero = 0;
+        u32 one = 0;
+        u32 none = 0;
 
-        auto type = [&](Kind kind) {
+        explicit Emitter(Graph& g) {
+            Node* extras[3] = {g.i(0.), g.f(1.), g.f(0.)};
+            Vector<Node*> nodes;
+
+            order(extras, 3, nodes);
+            emit(nodes);
+            zero = extras[0]->id;
+            one = extras[1]->id;
+            none = extras[2]->id;
+        }
+
+        u32 type(Kind kind) const {
             return kind == Kind::Float ? typeFloat : kind == Kind::Uint ? typeUint : kind == Kind::Int ? typeInt : typeBool;
-        };
-
-        for (Node* node : nodes) {
-            node->id = node->op == Op::Input ? coordinate[(int)node->value] : s.fresh();
         }
 
-        for (Node* node : nodes) {
-            if (node->op != Op::Const) {
-                continue;
-            }
+        void emit(const Vector<Node*>& nodes) {
+            for (Node* node : nodes) {
+                if (node->op == Op::Input) {
+                    node->id = inputs[(int)node->value];
+                    continue;
+                }
 
-            if (node->kind == Kind::Bool) {
-                Spirv::op(s.globals, node->value != 0. ? 41 : 42, typeBool, node->id);
-            } else if (node->kind == Kind::Float) {
-                float value = (float)node->value;
-                u32 bits;
+                node->id = s.fresh();
 
-                memcpy(&bits, &value, sizeof(bits));
-                Spirv::op(s.globals, 43, typeFloat, node->id, bits);
-            } else {
-                Spirv::op(s.globals, 43, type(node->kind), node->id, node->kind == Kind::Uint ? (u32)node->value : (u32)(i32)node->value);
-            }
-        }
-
-        Spirv::op(s.body, 54, typeVoid, main, 0, typeFunction);
-        Spirv::op(s.body, 248, label);
-        Spirv::op(s.body, 61, typeVec2, coordinates, uv);
-        Spirv::op(s.body, 81, typeFloat, coordinate[0], coordinates, 0);
-        Spirv::op(s.body, 81, typeFloat, coordinate[1], coordinates, 1);
-
-        for (Node* node : nodes) {
-            if (node->op == Op::Const || node->op == Op::Input) {
-                continue;
-            }
-
-            bool real = node->kind == Kind::Float;
-            bool sign = node->kind == Kind::Int;
-            u32 result = type(node->kind);
-            u32 a = node->arity > 0 ? node->args[0]->id : 0;
-            u32 b = node->arity > 1 ? node->args[1]->id : 0;
-            Kind from = node->arity > 0 ? node->args[0]->kind : Kind::Float;
-
-            switch (node->op) {
-                case Op::Add:
-                    Spirv::op(s.body, real ? 129 : 128, result, node->id, a, b);
-                    break;
-                case Op::Sub:
-                    Spirv::op(s.body, real ? 131 : 130, result, node->id, a, b);
-                    break;
-                case Op::Neg:
-                    Spirv::op(s.body, real ? 127 : 126, result, node->id, a);
-                    break;
-                case Op::Mul:
-                    Spirv::op(s.body, real ? 133 : 132, result, node->id, a, b);
-                    break;
-                case Op::Div:
-                    Spirv::op(s.body, 136, result, node->id, a, b);
-                    break;
-                case Op::Abs:
-                    Spirv::op(s.body, 12, result, node->id, glsl, real ? GlslFAbs : GlslSAbs, a);
-                    break;
-                case Op::Min:
-                    Spirv::op(s.body, 12, result, node->id, glsl, real ? GlslFMin : sign ? GlslSMin : GlslUMin, a, b);
-                    break;
-                case Op::Max:
-                    Spirv::op(s.body, 12, result, node->id, glsl, real ? GlslFMax : sign ? GlslSMax : GlslUMax, a, b);
-                    break;
-                case Op::Shr:
-                    Spirv::op(s.body, 194, result, node->id, a, b);
-                    break;
-                case Op::Shl:
-                    Spirv::op(s.body, 196, result, node->id, a, b);
-                    break;
-                case Op::And:
-                    Spirv::op(s.body, 199, result, node->id, a, b);
-                    break;
-                case Op::Or:
-                    Spirv::op(s.body, 197, result, node->id, a, b);
-                    break;
-                case Op::Le:
-                    Spirv::op(s.body, from == Kind::Float ? 188 : from == Kind::Int ? 179 : 178, typeBool, node->id, a, b);
-                    break;
-                case Op::Lt:
-                    Spirv::op(s.body, from == Kind::Float ? 184 : from == Kind::Int ? 177 : 176, typeBool, node->id, a, b);
-                    break;
-                case Op::Eq:
-                    Spirv::op(s.body, from == Kind::Float ? 180 : 170, typeBool, node->id, a, b);
-                    break;
-                case Op::Select:
-                    Spirv::op(s.body, 169, result, node->id, a, b, node->args[2]->id);
-                    break;
-                case Op::Floor:
-                    Spirv::op(s.body, 12, result, node->id, glsl, GlslFloor, a);
-                    break;
-                case Op::Exp2:
-                    Spirv::op(s.body, 12, result, node->id, glsl, GlslExp2, a);
-                    break;
-                case Op::Exp:
-                    Spirv::op(s.body, 12, result, node->id, glsl, GlslExp, a);
-                    break;
-                case Op::Log2:
-                    Spirv::op(s.body, 12, result, node->id, glsl, GlslLog2, a);
-                    break;
-                case Op::Log:
-                    Spirv::op(s.body, 12, result, node->id, glsl, GlslLog, a);
-                    break;
-                case Op::Sqrt:
-                    Spirv::op(s.body, 12, result, node->id, glsl, GlslSqrt, a);
-                    break;
-                case Op::Convert:
-                    if (from == Kind::Bool && node->kind == Kind::Float) {
-                        Spirv::op(s.body, 169, result, node->id, a, one->id, none->id);
-                    } else if (from == Kind::Float) {
-                        Spirv::op(s.body, sign ? 110 : 109, result, node->id, a);
+                if (node->op == Op::Const) {
+                    if (node->kind == Kind::Bool) {
+                        Spirv::op(s.globals, node->value != 0. ? 41 : 42, typeBool, node->id);
                     } else if (node->kind == Kind::Float) {
-                        Spirv::op(s.body, from == Kind::Int ? 111 : 112, result, node->id, a);
-                    } else if (from != Kind::Bool) {
-                        Spirv::op(s.body, 124, result, node->id, a);
+                        float value = (float)node->value;
+                        u32 bits;
+
+                        memcpy(&bits, &value, sizeof(bits));
+                        Spirv::op(s.globals, 43, typeFloat, node->id, bits);
                     } else {
-                        fail(StringView(u8"a video shader converts a condition to an integer"));
+                        Spirv::op(s.globals, 43, type(node->kind), node->id, node->kind == Kind::Uint ? (u32)node->value : (u32)(i32)node->value);
                     }
-                    break;
-                case Op::Load: {
+
+                    continue;
+                }
+
+                bool real = node->kind == Kind::Float;
+                bool sign = node->kind == Kind::Int;
+                u32 result = type(node->kind);
+                u32 a = node->arity > 0 ? node->args[0]->id : 0;
+                u32 b = node->arity > 1 ? node->args[1]->id : 0;
+                Kind from = node->arity > 0 ? node->args[0]->kind : Kind::Float;
+
+        switch (node->op) {
+            case Op::Add:
+                Spirv::op(s.body, real ? 129 : 128, result, node->id, a, b);
+                break;
+            case Op::Sub:
+                Spirv::op(s.body, real ? 131 : 130, result, node->id, a, b);
+                break;
+            case Op::Neg:
+                Spirv::op(s.body, real ? 127 : 126, result, node->id, a);
+                break;
+            case Op::Mul:
+                Spirv::op(s.body, real ? 133 : 132, result, node->id, a, b);
+                break;
+            case Op::Div:
+                Spirv::op(s.body, 136, result, node->id, a, b);
+                break;
+            case Op::Abs:
+                Spirv::op(s.body, 12, result, node->id, glsl, real ? GlslFAbs : GlslSAbs, a);
+                break;
+            case Op::Min:
+                Spirv::op(s.body, 12, result, node->id, glsl, real ? GlslFMin : sign ? GlslSMin : GlslUMin, a, b);
+                break;
+            case Op::Max:
+                Spirv::op(s.body, 12, result, node->id, glsl, real ? GlslFMax : sign ? GlslSMax : GlslUMax, a, b);
+                break;
+            case Op::Shr:
+                Spirv::op(s.body, 194, result, node->id, a, b);
+                break;
+            case Op::Shl:
+                Spirv::op(s.body, 196, result, node->id, a, b);
+                break;
+            case Op::And:
+                Spirv::op(s.body, 199, result, node->id, a, b);
+                break;
+            case Op::Or:
+                Spirv::op(s.body, 197, result, node->id, a, b);
+                break;
+            case Op::Le:
+                Spirv::op(s.body, from == Kind::Float ? 188 : from == Kind::Int ? 179 : 178, typeBool, node->id, a, b);
+                break;
+            case Op::Lt:
+                Spirv::op(s.body, from == Kind::Float ? 184 : from == Kind::Int ? 177 : 176, typeBool, node->id, a, b);
+                break;
+            case Op::Eq:
+                Spirv::op(s.body, from == Kind::Float ? 180 : 170, typeBool, node->id, a, b);
+                break;
+            case Op::Select:
+                Spirv::op(s.body, 169, result, node->id, a, b, node->args[2]->id);
+                break;
+            case Op::Floor:
+                Spirv::op(s.body, 12, result, node->id, glsl, GlslFloor, a);
+                break;
+            case Op::Exp2:
+                Spirv::op(s.body, 12, result, node->id, glsl, GlslExp2, a);
+                break;
+            case Op::Exp:
+                Spirv::op(s.body, 12, result, node->id, glsl, GlslExp, a);
+                break;
+            case Op::Log2:
+                Spirv::op(s.body, 12, result, node->id, glsl, GlslLog2, a);
+                break;
+            case Op::Log:
+                Spirv::op(s.body, 12, result, node->id, glsl, GlslLog, a);
+                break;
+            case Op::Sqrt:
+                Spirv::op(s.body, 12, result, node->id, glsl, GlslSqrt, a);
+                break;
+            case Op::Convert:
+                if (from == Kind::Bool && node->kind == Kind::Float) {
+                    Spirv::op(s.body, 169, result, node->id, a, one, none);
+                } else if (from == Kind::Float) {
+                    Spirv::op(s.body, sign ? 110 : 109, result, node->id, a);
+                } else if (node->kind == Kind::Float) {
+                    Spirv::op(s.body, from == Kind::Int ? 111 : 112, result, node->id, a);
+                } else if (from != Kind::Bool) {
+                    Spirv::op(s.body, 124, result, node->id, a);
+                } else {
+                    fail(StringView(u8"a video shader converts a condition to an integer"));
+                }
+                break;
+            case Op::Load: {
+                u32 pointer = s.fresh();
+
+                Spirv::op(s.body, 65, storageWord, pointer, bytes, zero, a);
+                Spirv::op(s.body, 61, typeUint, node->id, pointer);
+                break;
+            }
+            case Op::Half: {
+                u32 pair = s.fresh();
+
+                Spirv::op(s.body, 12, typeVec2, pair, glsl, GlslUnpackHalf2x16, a);
+                Spirv::op(s.body, 81, typeFloat, node->id, pair, 0);
+                break;
+            }
+            case Op::BitsFloat:
+                Spirv::op(s.body, 124, typeFloat, node->id, a);
+                break;
+                case Op::Shared: {
                     u32 pointer = s.fresh();
 
-                    Spirv::op(s.body, 65, storageWord, pointer, bytes, zero->id, a);
-                    Spirv::op(s.body, 61, typeUint, node->id, pointer);
+                    Spirv::op(s.body, 65, sharedFloat, pointer, arrays[(int)node->value], a);
+                    Spirv::op(s.body, 61, typeFloat, node->id, pointer);
                     break;
                 }
-                case Op::Half: {
-                    u32 pair = s.fresh();
-
-                    Spirv::op(s.body, 12, typeVec2, pair, glsl, GlslUnpackHalf2x16, a);
-                    Spirv::op(s.body, 81, typeFloat, node->id, pair, 0);
-                    break;
-                }
-                case Op::BitsFloat:
-                    Spirv::op(s.body, 124, typeFloat, node->id, a);
-                    break;
                 default:
                     fail(StringView(u8"a video shader node has no SPIR-V form"));
+                }
             }
         }
 
+        void common(Vector<u32>& module) {
+            Spirv::op(module, 71, typeWords, 6, 4);
+            Spirv::op(module, 72, typeBytes, 0, 24);
+            Spirv::op(module, 72, typeBytes, 0, 35, 0);
+            Spirv::op(module, 71, typeBytes, 2);
+            Spirv::op(module, 71, bytes, 34, 0);
+            Spirv::op(module, 71, bytes, 33, 0);
+        }
+
+        void types(Vector<u32>& module) {
+            Spirv::op(module, 19, typeVoid);
+            Spirv::op(module, 33, typeFunction, typeVoid);
+            Spirv::op(module, 20, typeBool);
+            Spirv::op(module, 22, typeFloat, 32);
+            Spirv::op(module, 21, typeUint, 32, 0);
+            Spirv::op(module, 21, typeInt, 32, 1);
+            Spirv::op(module, 23, typeVec2, typeFloat, 2);
+            Spirv::op(module, 23, typeVec4, typeFloat, 4);
+            Spirv::op(module, 29, typeWords, typeUint);
+            Spirv::op(module, 30, typeBytes, typeWords);
+            Spirv::op(module, 32, storageBytes, 12, typeBytes);
+            Spirv::op(module, 32, storageWord, 12, typeUint);
+        }
+
+        StringView finish(ObjPool& pool, Vector<u32>& module) {
+            module.append(s.globals.data(), s.globals.length());
+            module.append(s.body.data(), s.body.length());
+            module.mut(3) = s.next;
+
+            size_t size = module.length() * sizeof(u32);
+            u8* out = (u8*)pool.allocate(size);
+
+            memcpy(out, module.data(), size);
+
+            return StringView(out, size);
+        }
+
+        void head(Vector<u32>& module, bool kernel) {
+            Vector<u32> entry;
+
+            module.pushBack(0x07230203u);
+            module.pushBack(0x00010300u);
+            module.pushBack(0);
+            module.pushBack(0);
+            module.pushBack(0);
+            Spirv::op(module, 17, 1);
+
+            if (kernel) {
+                Spirv::op(module, 17, 56);
+            }
+
+            entry.pushBack(glsl);
+            Spirv::string(entry, "GLSL.std.450");
+            Spirv::put(module, 11, entry.data(), (u32)entry.length());
+            Spirv::op(module, 14, 0, 1);
+        }
+    };
+
+    static StringView spirv(ObjPool& pool, Graph& g, Node* const (&color)[4]) {
+        Emitter e(g);
+        Spirv& s = e.s;
+        Vector<Node*> nodes;
+        u32 inputVec2 = s.fresh();
+        u32 outputVec4 = s.fresh();
+        u32 uv = s.fresh();
+        u32 fColor = s.fresh();
+        u32 coordinates = s.fresh();
         u32 pixel = s.fresh();
 
-        Spirv::op(s.body, 80, typeVec4, pixel, color[0]->id, color[1]->id, color[2]->id, color[3]->id);
+        Spirv::op(s.body, 54, e.typeVoid, e.main, 0, e.typeFunction);
+        Spirv::op(s.body, 248, e.label);
+        Spirv::op(s.body, 61, e.typeVec2, coordinates, uv);
+        Spirv::op(s.body, 81, e.typeFloat, e.inputs[0], coordinates, 0);
+        Spirv::op(s.body, 81, e.typeFloat, e.inputs[1], coordinates, 1);
+        order(color, 4, nodes);
+        e.emit(nodes);
+        Spirv::op(s.body, 80, e.typeVec4, pixel, color[0]->id, color[1]->id, color[2]->id, color[3]->id);
         Spirv::op(s.body, 62, fColor, pixel);
         Spirv::op(s.body, 253);
         Spirv::op(s.body, 56);
@@ -2143,72 +2462,175 @@ namespace {
         Vector<u32> module;
         Vector<u32> entry;
 
-        module.pushBack(0x07230203u);
-        module.pushBack(0x00010300u);
-        module.pushBack(0);
-        module.pushBack(s.next);
-        module.pushBack(0);
-        Spirv::op(module, 17, 1);
-        entry.pushBack(glsl);
-        Spirv::string(entry, "GLSL.std.450");
-        Spirv::put(module, 11, entry.data(), (u32)entry.length());
-        Spirv::op(module, 14, 0, 1);
-        entry.clear();
+        e.head(module, false);
         entry.pushBack(4);
-        entry.pushBack(main);
+        entry.pushBack(e.main);
         Spirv::string(entry, "main");
         entry.pushBack(uv);
         entry.pushBack(fColor);
         Spirv::put(module, 15, entry.data(), (u32)entry.length());
-        Spirv::op(module, 16, main, 7);
+        Spirv::op(module, 16, e.main, 7);
         Spirv::op(module, 71, uv, 30, 0);
         Spirv::op(module, 71, fColor, 30, 0);
-        Spirv::op(module, 71, typeWords, 6, 4);
-        Spirv::op(module, 72, typeBytes, 0, 24);
-        Spirv::op(module, 72, typeBytes, 0, 35, 0);
-        Spirv::op(module, 71, typeBytes, 2);
-        Spirv::op(module, 71, bytes, 34, 0);
-        Spirv::op(module, 71, bytes, 33, 0);
-        Spirv::op(module, 19, typeVoid);
-        Spirv::op(module, 33, typeFunction, typeVoid);
-        Spirv::op(module, 20, typeBool);
-        Spirv::op(module, 22, typeFloat, 32);
-        Spirv::op(module, 21, typeUint, 32, 0);
-        Spirv::op(module, 21, typeInt, 32, 1);
-        Spirv::op(module, 23, typeVec2, typeFloat, 2);
-        Spirv::op(module, 23, typeVec4, typeFloat, 4);
-        Spirv::op(module, 32, inputVec2, 1, typeVec2);
-        Spirv::op(module, 32, outputVec4, 3, typeVec4);
-        Spirv::op(module, 29, typeWords, typeUint);
-        Spirv::op(module, 30, typeBytes, typeWords);
-        Spirv::op(module, 32, storageBytes, 12, typeBytes);
-        Spirv::op(module, 32, storageWord, 12, typeUint);
+        e.common(module);
+        e.types(module);
+        Spirv::op(module, 32, inputVec2, 1, e.typeVec2);
+        Spirv::op(module, 32, outputVec4, 3, e.typeVec4);
         Spirv::op(module, 59, inputVec2, uv, 1);
         Spirv::op(module, 59, outputVec4, fColor, 3);
-        Spirv::op(module, 59, storageBytes, bytes, 12);
-        module.append(s.globals.data(), s.globals.length());
-        module.append(s.body.data(), s.body.length());
-        module.mut(3) = s.next;
+        Spirv::op(module, 59, e.storageBytes, e.bytes, 12);
 
-        size_t size = module.length() * sizeof(u32);
-        u8* out = (u8*)pool.allocate(size);
+        return e.finish(pool, module);
+    }
 
-        memcpy(out, module.data(), size);
+    static StringView spirvKernel(ObjPool& pool, Graph& g, const Kernel& k) {
+        Emitter e(g);
+        Spirv& s = e.s;
+        u32 typeUvec3 = s.fresh();
+        u32 typeIvec2 = s.fresh();
+        u32 inputUvec3 = s.fresh();
+        u32 typeImage = s.fresh();
+        u32 imagePointer = s.fresh();
+        u32 image = s.fresh();
+        u32 local = s.fresh();
+        u32 group = s.fresh();
+        u32 lengths[2] = {s.fresh(), s.fresh()};
+        u32 arrayTypes[2] = {s.fresh(), s.fresh()};
+        u32 arrayPointers[2] = {s.fresh(), s.fresh()};
+        u32 scope = s.fresh();
+        u32 semantics = s.fresh();
+        u32 ids[2] = {s.fresh(), s.fresh()};
 
-        return StringView(out, size);
+        Spirv::op(s.body, 54, e.typeVoid, e.main, 0, e.typeFunction);
+        Spirv::op(s.body, 248, e.label);
+        Spirv::op(s.body, 61, typeUvec3, ids[0], local);
+        Spirv::op(s.body, 81, e.typeUint, e.inputs[2], ids[0], 0);
+        Spirv::op(s.body, 81, e.typeUint, e.inputs[3], ids[0], 1);
+        Spirv::op(s.body, 61, typeUvec3, ids[1], group);
+        Spirv::op(s.body, 81, e.typeUint, e.inputs[4], ids[1], 0);
+        Spirv::op(s.body, 81, e.typeUint, e.inputs[5], ids[1], 1);
+
+        for (int phase = 0; phase < 2; phase++) {
+            Vector<Node*> roots;
+            Vector<Node*> nodes;
+
+            for (const Store& store : k.stores[phase]) {
+                roots.pushBack(store.index);
+                roots.pushBack(store.value);
+            }
+
+            order(roots.data(), roots.length(), nodes);
+            e.emit(nodes);
+
+            for (const Store& store : k.stores[phase]) {
+                u32 pointer = s.fresh();
+
+                Spirv::op(s.body, 65, e.sharedFloat, pointer, e.arrays[phase], store.index->id);
+                Spirv::op(s.body, 62, pointer, store.value->id);
+            }
+
+            Spirv::op(s.body, 224, scope, scope, semantics);
+        }
+
+        Node* roots[6] = {k.at[0], k.at[1], k.color[0], k.color[1], k.color[2], k.color[3]};
+        Vector<Node*> nodes;
+        u32 coordinate = s.fresh();
+        u32 loaded = s.fresh();
+        u32 texel = s.fresh();
+
+        order(roots, 6, nodes);
+        e.emit(nodes);
+        Spirv::op(s.body, 80, typeIvec2, coordinate, k.at[0]->id, k.at[1]->id);
+        Spirv::op(s.body, 61, typeImage, loaded, image);
+        Spirv::op(s.body, 80, e.typeVec4, texel, k.color[0]->id, k.color[1]->id, k.color[2]->id, k.color[3]->id);
+        Spirv::op(s.body, 99, loaded, coordinate, texel);
+        Spirv::op(s.body, 253);
+        Spirv::op(s.body, 56);
+
+        Vector<u32> module;
+        Vector<u32> entry;
+
+        e.head(module, true);
+        entry.pushBack(5);
+        entry.pushBack(e.main);
+        Spirv::string(entry, "main");
+        entry.pushBack(local);
+        entry.pushBack(group);
+        Spirv::put(module, 15, entry.data(), (u32)entry.length());
+        Spirv::op(module, 16, e.main, 17, tile, tile, 1);
+        Spirv::op(module, 71, local, 11, 27);
+        Spirv::op(module, 71, group, 11, 26);
+        e.common(module);
+        Spirv::op(module, 71, image, 34, 0);
+        Spirv::op(module, 71, image, 33, 1);
+        Spirv::op(module, 71, image, 25);
+        e.types(module);
+        Spirv::op(module, 23, typeUvec3, e.typeUint, 3);
+        Spirv::op(module, 23, typeIvec2, e.typeInt, 2);
+        Spirv::op(module, 32, inputUvec3, 1, typeUvec3);
+        Spirv::op(module, 25, typeImage, e.typeFloat, 1, 0, 0, 0, 2, 0);
+        Spirv::op(module, 32, imagePointer, 0, typeImage);
+
+        for (int i = 0; i < 2; i++) {
+            Spirv::op(module, 43, e.typeUint, lengths[i], k.sizes[i]);
+            Spirv::op(module, 28, arrayTypes[i], e.typeFloat, lengths[i]);
+            Spirv::op(module, 32, arrayPointers[i], 4, arrayTypes[i]);
+        }
+
+        Spirv::op(module, 32, e.sharedFloat, 4, e.typeFloat);
+        Spirv::op(module, 43, e.typeUint, scope, 2);
+        Spirv::op(module, 43, e.typeUint, semantics, 264);
+        Spirv::op(module, 59, inputUvec3, local, 1);
+        Spirv::op(module, 59, inputUvec3, group, 1);
+        Spirv::op(module, 59, e.storageBytes, e.bytes, 12);
+        Spirv::op(module, 59, imagePointer, image, 0);
+
+        for (int i = 0; i < 2; i++) {
+            Spirv::op(module, 59, arrayPointers[i], e.arrays[i], 4);
+        }
+
+        return e.finish(pool, module);
     }
 }
 #endif
 
+bool kernelable(const VideoShader& shader) {
+    const VideoLayout& layout = *shader.layout;
+
+    return strcmp(layout.model, "palette") && strcmp(layout.model, "bayer") && !layout.alpha && shader.target[0] >= shader.size[0] && shader.target[1] >= shader.size[1];
+}
+
 StringView compile(ObjPool& pool, const VideoShader& shader) {
     Graph g(pool);
     Video video{g, shader, *shader.layout};
+
+    if (!strcmp(shader.stage, "kernel")) {
+        Kernel kernel;
+
+        if (!kernelable(shader)) {
+            fail(StringView(u8"a video kernel cannot draw this frame"));
+        }
+
+        video.kernel(kernel);
+
+#if defined(__APPLE__)
+        return mslKernel(pool, kernel);
+#else
+        return spirvKernel(pool, g, kernel);
+#endif
+    }
+
+    if (strcmp(shader.stage, "fragment")) {
+        fail(StringView(u8"a video shader has an unknown stage"));
+    }
+
     Node* codes[4];
     Node* color[4];
+    Node* pixel[2] = {g.mul(g.input(0), (double)shader.target[0]), g.mul(g.input(1), (double)shader.target[1])};
 
     video.codes(codes);
     video.color(codes, color);
-    dither(g, shader, color);
+    video.dither(pixel, color);
 
 #if defined(__APPLE__)
     return msl(pool, color);

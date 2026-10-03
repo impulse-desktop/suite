@@ -704,6 +704,7 @@ VideoShader FormatCheck::describe(const AVFrame* frame, const char* output) {
     out.conversion = same ? "same" : "convert";
     out.output = output;
     out.filter = filter;
+    out.stage = "fragment";
     memcpy(out.curve, transfer.eotf, sizeof(out.curve));
     memcpy(out.oetf, transfer.oetf, sizeof(out.oetf));
     memcpy(out.inverse, transfer.inverse, sizeof(out.inverse));

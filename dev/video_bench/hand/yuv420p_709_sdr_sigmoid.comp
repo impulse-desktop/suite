@@ -6,14 +6,14 @@ layout(std430, set = 0, binding = 0) readonly buffer Bytes {
     uint words[];
 };
 
-layout(std140, set = 0, binding = 1) uniform Frame {
+layout(std140, set = 0, binding = 2) uniform Frame {
     uvec4 planeOffset;
     uvec4 lineSize;
     uvec4 size;
     vec4 white;
 } frame;
 
-layout(set = 0, binding = 2) uniform writeonly image2D target;
+layout(set = 0, binding = 1) uniform writeonly image2D target;
 
 const float center = 0.75;
 const float slope = 6.5;

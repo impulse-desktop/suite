@@ -572,6 +572,7 @@ namespace {
         out.conversion = same ? "same" : "convert";
         out.output = target->name;
         out.filter = "bilinear";
+        out.stage = "fragment";
         out.dither = !strcmp(out.output, "sdr") ? 8 : 0;
         memcpy(out.curve, transfer->eotf, sizeof(out.curve));
         memcpy(out.oetf, transfer->oetf, sizeof(out.oetf));
