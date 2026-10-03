@@ -462,16 +462,20 @@ namespace {
     }
 
     static void putPiece(float (&out)[3][4], const double (&piece)[11], double top) {
-        const double* upper = piece;
-        const double* lower = piece + 5;
+        bool knee = piece[10] >= 0. && piece[1] == 1.;
+        const double* curved = knee ? piece + 5 : piece;
+        const double* straight = knee ? piece : piece + 5;
 
         for (int i = 0; i < 4; i++) {
-            out[0][i] = (float)upper[i];
-            out[1][i] = (float)lower[i];
+            out[0][i] = (float)curved[i];
         }
 
-        out[2][0] = (float)upper[4];
-        out[2][1] = (float)lower[4];
+        out[1][0] = (float)(straight[0] * straight[2]);
+        out[1][1] = (float)(straight[0] * straight[3] - straight[4]);
+        out[1][2] = knee ? -1.f : 1.f;
+        out[1][3] = 0.f;
+        out[2][0] = (float)curved[4];
+        out[2][1] = 0.f;
         out[2][2] = (float)piece[10];
         out[2][3] = (float)top;
     }
@@ -615,7 +619,7 @@ namespace {
             u.curve[2][3] = (float)(sdr ? 1. : unbounded);
         } else if (shape == StringView(u8"curve") && same && !sdr) {
             out.output = "any";
-        } else if (shape == StringView(u8"curve") && same && power) {
+        } else if (shape == StringView(u8"curve") && same && power && (eotf[1] == 1. || eotf[1] == 2.4)) {
             double scale = eotf[0];
             double gamma = eotf[1];
             const double fused[11] = {1.055 * pow(scale, 1. / 2.4), gamma / 2.4, 1., 0., 0.055, 12.92 * scale, gamma, 1., 0., 0., pow(0.0031308 / scale, 1. / gamma)};

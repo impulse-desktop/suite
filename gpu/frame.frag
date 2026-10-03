@@ -48,14 +48,9 @@ uvec2 swap32(uvec2 value) {
 
 vec3 piece(vec3 x, vec4 segments[3]) {
     vec3 v = max(x, 0.0);
-    bvec3 low = lessThanEqual(v, vec3(segments[2].z));
-    vec3 scale = mix(vec3(segments[0].x), vec3(segments[1].x), low);
-    vec3 power = mix(vec3(segments[0].y), vec3(segments[1].y), low);
-    vec3 inputScale = mix(vec3(segments[0].z), vec3(segments[1].z), low);
-    vec3 inputOffset = mix(vec3(segments[0].w), vec3(segments[1].w), low);
-    vec3 offset = mix(vec3(segments[2].x), vec3(segments[2].y), low);
+    vec3 curved = segments[0].x * exp2(segments[0].y * log2(v * segments[0].z + segments[0].w)) - segments[2].x;
 
-    return min(scale * exp2(power * log2(v * inputScale + inputOffset)) - offset, vec3(segments[2].w));
+    return min(mix(curved, v * segments[1].x + segments[1].y, lessThanEqual((v - segments[2].z) * segments[1].z, vec3(0.0))), vec3(segments[2].w));
 }
 {%- endif %}
 {%- if transfer == "pq" %}
