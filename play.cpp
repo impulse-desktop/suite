@@ -257,6 +257,8 @@ namespace {
         Vector<CompiledShader> compiled;
         size_t compiledBytes = 0;
         u64 compiledClock = 0;
+        u32 targetX = 0;
+        u32 targetY = 0;
         u32 targetWidth = 0;
         u32 targetHeight = 0;
         u32 phase = 0;
@@ -453,10 +455,19 @@ namespace {
         }
     }
 
-    static void aim(VideoShader& facts, u32 width, u32 height, bool software) {
+    static void aim(VideoShader& facts, u32 x, u32 y, u32 width, u32 height, Ui& ui) {
         facts.target[0] = width;
         facts.target[1] = height;
-        facts.filter = !software && width > facts.size[0] && height > facts.size[1] ? "lanczos" : "bilinear";
+        facts.filter = !ui.software() && width > facts.size[0] && height > facts.size[1] ? "lanczos" : "bilinear";
+        facts.stage = "fragment";
+        facts.origin[0] = 0;
+        facts.origin[1] = 0;
+
+        if (ui.kernels() && !strcmp(facts.filter, "lanczos") && kernelable(facts)) {
+            facts.stage = "kernel";
+            facts.origin[0] = x;
+            facts.origin[1] = y;
+        }
     }
 
     static VideoShader describeFrame(const AVFrame* frame, const char* output, float sdrWhiteNits) {
@@ -1719,7 +1730,7 @@ void Screen::makeRender(VideoImage* image) {
     image->facts = describeFrame(frame, output, RendererOptions{}.sdrWhiteNits);
 
     if (targetWidth) {
-        aim(image->facts, targetWidth, targetHeight, player->ui->software());
+        aim(image->facts, targetX, targetY, targetWidth, targetHeight, *player->ui);
     }
 
     RenderShader& shader = shaderFor(image->facts);
@@ -1747,7 +1758,7 @@ RenderShader& Screen::shaderFor(const VideoShader& facts) {
     StringView code = compile(*scratch.ptr, facts);
     u64 built = monotonicNowUs();
     ScopedPtr<ObjPool> owner{ObjPool::fromMemoryRaw()};
-    RenderShader* shader = player->ui->compileShader(*owner.ptr, code.data(), code.length());
+    RenderShader* shader = !strcmp(facts.stage, "kernel") ? player->ui->compileKernel(*owner.ptr, code.data(), code.length(), kernelTile) : player->ui->compileShader(*owner.ptr, code.data(), code.length());
     u64 done = monotonicNowUs();
 
     while (!compiled.empty() && compiledBytes + code.length() > shaderBudget) {
@@ -1766,7 +1777,7 @@ RenderShader& Screen::shaderFor(const VideoShader& facts) {
     compiled.pushBack(CompiledShader{facts, owner.ptr, shader, code.length(), compiledClock});
     compiledBytes += code.length();
     owner.drop();
-    player->ui->trace(StringView(StringBuilder() << StringView(u8"compiled video shader ") << StringView(facts.layout->name) << StringView(u8" ") << StringView(facts.system) << StringView(u8" ") << StringView(facts.transfer) << StringView(u8" ") << StringView(facts.conversion) << StringView(u8" ") << StringView(facts.output) << StringView(u8" ") << StringView(facts.filter) << StringView(u8" ") << (u64)facts.target[0] << StringView(u8"x") << (u64)facts.target[1] << StringView(u8" compile_us=") << (built - start) << StringView(u8" driver_us=") << (done - built)));
+    player->ui->trace(StringView(StringBuilder() << StringView(u8"compiled video shader ") << StringView(facts.layout->name) << StringView(u8" ") << StringView(facts.system) << StringView(u8" ") << StringView(facts.transfer) << StringView(u8" ") << StringView(facts.conversion) << StringView(u8" ") << StringView(facts.output) << StringView(u8" ") << StringView(facts.filter) << StringView(u8" ") << StringView(facts.stage) << StringView(u8" ") << (u64)facts.target[0] << StringView(u8"x") << (u64)facts.target[1] << StringView(u8" compile_us=") << (built - start) << StringView(u8" driver_us=") << (done - built)));
 
     return *shader;
 }
@@ -1922,14 +1933,18 @@ void Screen::draw() {
         ImVec2 p1(p0.x + fmaxf(floorf(w), 1.f), p0.y + fmaxf(floorf(h), 1.f));
         VideoImage* image = shown->image;
 
+        targetX = (u32)(p0.x - vp->Pos.x);
+        targetY = (u32)(p0.y - vp->Pos.y);
         targetWidth = (u32)(p1.x - p0.x);
         targetHeight = (u32)(p1.y - p0.y);
 
-        u32 turn = image->facts.dither ? phase : 0;
+        VideoShader aimed = image->facts;
 
-        if (image->facts.target[0] != targetWidth || image->facts.target[1] != targetHeight || image->facts.phase != turn) {
-            aim(image->facts, targetWidth, targetHeight, player->ui->software());
-            image->facts.phase = turn;
+        aim(aimed, targetX, targetY, targetWidth, targetHeight, ui);
+        aimed.phase = aimed.dither ? phase : 0;
+
+        if (memcmp(&aimed, &image->facts, sizeof(aimed))) {
+            image->facts = aimed;
             image->render->shadeWith(shaderFor(image->facts));
         }
 

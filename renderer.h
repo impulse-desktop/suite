@@ -68,6 +68,7 @@ struct Renderer {
     virtual u32 maxTextureSide() = 0;
     virtual u32 maxTextures() = 0;
     virtual bool software() = 0;
+    virtual bool kernels() = 0;
 
     virtual RenderImage* upload(stl::ObjPool& pool, u32 width, u32 height, const void* rgba, bool hdr) = 0;
     virtual RenderImage* import(stl::ObjPool& pool, SharedImage& source, bool hdr) = 0;
@@ -75,6 +76,7 @@ struct Renderer {
     virtual RenderImage* shade(stl::ObjPool& pool, RenderShader& shader, u32 width, u32 height, const void* data, size_t size, stl::Runable& retired) = 0;
 
     virtual RenderShader* compileShader(stl::ObjPool& pool, const void* code, size_t size) = 0;
+    virtual RenderShader* compileKernel(stl::ObjPool& pool, const void* code, size_t size, u32 tile) = 0;
 
     static Renderer* create(stl::ObjPool& pool, plt::Platform& platform, plt::Window& window, const RendererOptions& options = {});
 };

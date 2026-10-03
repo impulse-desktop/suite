@@ -56,6 +56,8 @@ namespace {
         id<MTLFunction> fragment = nil;
         id<MTLRenderPipelineState> pipeline = nil;
         id<MTLRenderPipelineState> readPipeline = nil;
+        id<MTLComputePipelineState> kernel = nil;
+        u32 tile = 0;
     };
 
     struct MetalImage final: RenderImage {
@@ -83,6 +85,7 @@ namespace {
         void read(int x0, int y0, int x1, int y1, ImagePixels& out) override;
         void shadeWith(RenderShader& with) override;
         void readShaded(int x0, int y0, int x1, int y1, ImagePixels& out);
+        void readKernel(int x0, int y0, int x1, int y1, ImagePixels& out);
     };
 
     struct ImageDraw {
@@ -104,6 +107,7 @@ namespace {
         ImMetalDisplayTarget* target = nil;
         Vector<MetalImage*> drawn;
         Vector<ImageDraw> underlays;
+        Vector<ImageDraw> kernelDraws;
         SmallObjAllocator* smallObjects = nullptr;
         Channel* landed = nullptr;
         bool waiting = false;
@@ -129,11 +133,15 @@ namespace {
         u32 maxTextureSide() override;
         u32 maxTextures() override;
         bool software() override;
+        bool kernels() override;
         RenderImage* upload(ObjPool& pool, u32 width, u32 height, const void* rgba, bool hdr) override;
         RenderImage* import(ObjPool& pool, SharedImage& source, bool hdr) override;
 
         RenderImage* bind(ObjPool& pool, u32 width, u32 height, const void* data, size_t size, size_t stride, Runable& retired) override;
         RenderShader* compileShader(ObjPool& pool, const void* code, size_t size) override;
+        RenderShader* compileKernel(ObjPool& pool, const void* code, size_t size, u32 tile) override;
+        id<MTLFunction> mainFunction(const void* code, size_t size);
+        void runKernels(id<MTLCommandBuffer> command, ImDrawData& draw);
         RenderImage* shade(ObjPool& pool, RenderShader& shader, u32 width, u32 height, const void* data, size_t size, Runable& retired) override;
         id<MTLRenderPipelineState> shadePipeline(MetalShader& shader, MTLPixelFormat format);
         void setupHdr();
@@ -289,10 +297,13 @@ void MetalImage::underlay(ImVec2 lo, ImVec2 hi) {
         fail(StringView(u8"only a shaded image goes under the interface"));
     }
     renderer->drawn.pushBack(this);
-    renderer->underlays.pushBack(ImageDraw{this, lo, hi});
+    (shader->tile ? renderer->kernelDraws : renderer->underlays).pushBack(ImageDraw{this, lo, hi});
 }
 
 void MetalImage::draw(ImDrawList& list, ImVec2 lo, ImVec2 hi) {
+    if (shader && shader->tile) {
+        fail(StringView(u8"a kernel image only goes under the interface"));
+    }
     renderer->drawn.pushBack(this);
     if (hdr || shader) {
         ImageDraw draw{this, lo, hi};
@@ -604,6 +615,7 @@ bool MetalRenderer::endFrame(ImDrawData* draw) {
         }
         Flight* flight = smallObjects->make<Flight>(drawn);
         drawn.clear();
+        runKernels(command, *draw);
         encoder = [command renderCommandEncoderWithDescriptor:pass];
         if (!encoder) {
             fail(StringView(u8"cannot begin Metal frame"));
@@ -631,6 +643,40 @@ bool MetalRenderer::endFrame(ImDrawData* draw) {
         pass = nil;
     }
     return true;
+}
+
+void MetalRenderer::runKernels(id<MTLCommandBuffer> command, ImDrawData& draw) {
+    if (kernelDraws.empty()) {
+        return;
+    }
+    id<MTLRenderCommandEncoder> clear = [command renderCommandEncoderWithDescriptor:pass];
+    if (!clear) {
+        fail(StringView(u8"cannot clear the Metal frame"));
+    }
+    [clear endEncoding];
+    id<MTLComputeCommandEncoder> compute = [command computeCommandEncoder];
+    if (!compute) {
+        fail(StringView(u8"cannot begin Metal kernels"));
+    }
+    for (const ImageDraw& kernel : kernelDraws) {
+        MetalShader& shader = *kernel.image->shader;
+        float x0 = kernel.lo.x - draw.DisplayPos.x;
+        float y0 = kernel.lo.y - draw.DisplayPos.y;
+        float x1 = kernel.hi.x - draw.DisplayPos.x;
+        float y1 = kernel.hi.y - draw.DisplayPos.y;
+        if (x0 < 0.f || y0 < 0.f || x1 > (float)drawable.texture.width || y1 > (float)drawable.texture.height || x1 <= x0 || y1 <= y0) {
+            continue;
+        }
+        NSUInteger width = (NSUInteger)(x1 - x0);
+        NSUInteger height = (NSUInteger)(y1 - y0);
+        [compute setComputePipelineState:shader.kernel];
+        [compute setBuffer:kernel.image->buffer offset:0 atIndex:0];
+        [compute setTexture:drawable.texture atIndex:0];
+        [compute dispatchThreadgroups:MTLSizeMake((width + shader.tile - 1) / shader.tile, (height + shader.tile - 1) / shader.tile, 1) threadsPerThreadgroup:MTLSizeMake(shader.tile, shader.tile, 1)];
+    }
+    [compute endEncoding];
+    kernelDraws.clear();
+    pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
 }
 
 RenderImage* MetalRenderer::bind(ObjPool& pool, u32 width, u32 height, const void* data, size_t size, size_t stride, Runable& retired) {
@@ -683,23 +729,47 @@ id<MTLRenderPipelineState> MetalRenderer::shadePipeline(MetalShader& shader, MTL
     return pipeline;
 }
 
-RenderShader* MetalRenderer::compileShader(ObjPool& pool, const void* code, size_t size) {
+id<MTLFunction> MetalRenderer::mainFunction(const void* code, size_t size) {
     if (!code || !size) {
         fail(StringView(u8"invalid shader code"));
     }
+    NSString* source = [[NSString alloc] initWithBytes:code length:size encoding:NSUTF8StringEncoding];
+    NSError* error = nil;
+    id<MTLLibrary> library = source ? [device newLibraryWithSource:source options:nil error:&error] : nil;
+    if (!library) {
+        fail(StringView(StringBuilder() << StringView(u8"Metal shader: ") << StringView(error ? error.localizedDescription.UTF8String : "not UTF-8")));
+    }
+    id<MTLFunction> function = [library newFunctionWithName:@"main0"];
+    if (!function) {
+        fail(StringView(u8"Metal shader has no main0"));
+    }
+    return function;
+}
+
+RenderShader* MetalRenderer::compileShader(ObjPool& pool, const void* code, size_t size) {
     @autoreleasepool {
-        NSString* source = [[NSString alloc] initWithBytes:code length:size encoding:NSUTF8StringEncoding];
-        NSError* error = nil;
-        id<MTLLibrary> library = source ? [device newLibraryWithSource:source options:nil error:&error] : nil;
-        if (!library) {
-            fail(StringView(StringBuilder() << StringView(u8"Metal shader: ") << StringView(error ? error.localizedDescription.UTF8String : "not UTF-8")));
-        }
         MetalShader* shader = pool.make<MetalShader>();
-        shader->fragment = [library newFunctionWithName:@"main0"];
-        if (!shader->fragment) {
-            fail(StringView(u8"Metal shader has no main0"));
-        }
+        shader->fragment = mainFunction(code, size);
         shader->pipeline = shadePipeline(*shader, hdr ? MTLPixelFormatRGBA16Float : layer.pixelFormat);
+        return shader;
+    }
+}
+
+RenderShader* MetalRenderer::compileKernel(ObjPool& pool, const void* code, size_t size, u32 tile) {
+    if (!tile) {
+        fail(StringView(u8"invalid kernel code"));
+    }
+    @autoreleasepool {
+        NSError* error = nil;
+        MetalShader* shader = pool.make<MetalShader>();
+        shader->tile = tile;
+        shader->kernel = [device newComputePipelineStateWithFunction:mainFunction(code, size) error:&error];
+        if (!shader->kernel) {
+            fail(StringView(StringBuilder() << StringView(u8"Metal kernel pipeline: ") << StringView(error.localizedDescription.UTF8String)));
+        }
+        if (shader->kernel.maxTotalThreadsPerThreadgroup < (NSUInteger)tile * tile) {
+            fail(StringView(u8"Metal kernel does not fit a threadgroup"));
+        }
         return shader;
     }
 }
@@ -735,6 +805,10 @@ RenderImage* MetalRenderer::shade(ObjPool& pool, RenderShader& shader, u32 width
 }
 
 void MetalImage::readShaded(int x0, int y0, int x1, int y1, ImagePixels& out) {
+    if (shader->tile) {
+        readKernel(x0, y0, x1, y1, out);
+        return;
+    }
     @autoreleasepool {
         u32 w = (u32)(x1 - x0);
         u32 h = (u32)(y1 - y0);
@@ -775,6 +849,37 @@ void MetalImage::readShaded(int x0, int y0, int x1, int y1, ImagePixels& out) {
     }
 }
 
+void MetalImage::readKernel(int x0, int y0, int x1, int y1, ImagePixels& out) {
+    @autoreleasepool {
+        u32 w = (u32)(x1 - x0);
+        u32 h = (u32)(y1 - y0);
+        u32 tile = shader->tile;
+        MTLTextureDescriptor* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float width:width height:height mipmapped:NO];
+        descriptor.storageMode = MTLStorageModePrivate;
+        descriptor.usage = MTLTextureUsageShaderWrite;
+        id<MTLTexture> target = [renderer->device newTextureWithDescriptor:descriptor];
+        size_t stride = ((size_t)w * 8 + 255) & ~(size_t)255;
+        id<MTLBuffer> readback = [renderer->device newBufferWithLength:stride * h options:MTLResourceStorageModeShared];
+        id<MTLCommandBuffer> command = [renderer->queue commandBuffer];
+        if (!target || !readback || !command) {
+            fail(StringView(u8"cannot allocate Metal readback"));
+        }
+        id<MTLComputeCommandEncoder> compute = [command computeCommandEncoder];
+        [compute setComputePipelineState:shader->kernel];
+        [compute setBuffer:buffer offset:0 atIndex:0];
+        [compute setTexture:target atIndex:0];
+        [compute dispatchThreadgroups:MTLSizeMake((width + tile - 1) / tile, (height + tile - 1) / tile, 1) threadsPerThreadgroup:MTLSizeMake(tile, tile, 1)];
+        [compute endEncoding];
+        id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
+        [blit copyFromTexture:target sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(x0, y0, 0) sourceSize:MTLSizeMake(w, h, 1) toBuffer:readback destinationOffset:0 destinationBytesPerRow:stride destinationBytesPerImage:stride * h];
+        [blit endEncoding];
+        [command commit];
+        [command waitUntilCompleted];
+        checkCommand(command);
+        unpackPixels(readback.contents, w, h, stride, PixelLayout::Rgba16f, out);
+    }
+}
+
 u32 MetalRenderer::maxTextureSide() {
     return maxTextureSize;
 }
@@ -785,6 +890,10 @@ u32 MetalRenderer::maxTextures() {
 
 bool MetalRenderer::software() {
     return false;
+}
+
+bool MetalRenderer::kernels() {
+    return true;
 }
 
 Renderer* createMetalRenderer(ObjPool& pool, plt::Platform& platform, plt::Window& window, const RendererOptions& options) {
@@ -806,7 +915,7 @@ Renderer* createMetalRenderer(ObjPool& pool, plt::Platform& platform, plt::Windo
     CAMetalLayer* layer = renderer->layer;
     layer.device = renderer->device;
     layer.pixelFormat = options.hdr ? MTLPixelFormatRGBA16Float : MTLPixelFormatBGRA8Unorm;
-    layer.framebufferOnly = YES;
+    layer.framebufferOnly = NO;
     layer.maximumDrawableCount = drawables;
     layer.presentsWithTransaction = NO;
     layer.wantsExtendedDynamicRangeContent = options.hdr;

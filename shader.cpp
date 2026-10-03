@@ -914,7 +914,7 @@ namespace {
         Node* color[4];
     };
 
-    constexpr int tile = 16;
+    constexpr int tile = (int)kernelTile;
     constexpr double sigmoidCenter = 0.75;
     constexpr double sigmoidSlope = 6.5;
     constexpr double sigmoidLow = 0.007577241268;

@@ -97,6 +97,7 @@ namespace {
         int checked = 0;
         int failed = 0;
         const char* filter = "bilinear";
+        const char* stage = "fragment";
         u32 bucket = 0;
         u32 buckets = 1;
 
@@ -111,8 +112,10 @@ namespace {
         void compare(StringView what, StringView output, const Vector<double>& got, double tolerance, bool relative);
         void verify(AVFrame* frame, StringView what, double tolerance);
         void verifyLinear(AVFrame* frame, StringView what, double tolerance);
+        bool mine(StringView what);
         void check(const Case& kase, StringView what);
         void examine(const Case& kase, StringView what);
+        void underlay();
         void formats();
         void matrices();
         void locations();
@@ -704,7 +707,7 @@ VideoShader FormatCheck::describe(const AVFrame* frame, const char* output) {
     out.conversion = same ? "same" : "convert";
     out.output = output;
     out.filter = filter;
-    out.stage = "fragment";
+    out.stage = stage;
     memcpy(out.curve, transfer.eotf, sizeof(out.curve));
     memcpy(out.oetf, transfer.oetf, sizeof(out.oetf));
     memcpy(out.inverse, transfer.inverse, sizeof(out.inverse));
@@ -806,7 +809,7 @@ RenderShader& FormatCheck::shaderFor(const VideoShader& facts) {
 
     ScopedPtr<ObjPool> scratch{ObjPool::fromMemoryRaw()};
     StringView code = compile(*scratch.ptr, facts);
-    RenderShader* shader = ui->compileShader(*pool, code.data(), code.length());
+    RenderShader* shader = !strcmp(facts.stage, "kernel") ? ui->compileKernel(*pool, code.data(), code.length(), kernelTile) : ui->compileShader(*pool, code.data(), code.length());
 
     compiled.pushBack(CompiledShader{facts, shader});
 
@@ -1035,7 +1038,7 @@ void FormatCheck::write(AVFrame* frame, const Case& kase) {
                 double chromaY = fmin(fmax((y - siteY) / stepY, 0.), chromaHeight - 1.) * stepY + siteY;
                 double ycc[3] = {source(0, x, y), source(1, chromaX, chromaY), source(2, chromaX, chromaY)};
 
-                if (!strcmp(filter, "lanczos")) {
+                if (!strcmp(filter, "lanczos") && !strcmp(stage, "fragment")) {
                     ycc[1] = filtered(1, (x - siteX) / stepX, (y - siteY) / stepY);
                     ycc[2] = filtered(2, (x - siteX) / stepX, (y - siteY) / stepY);
                 }
@@ -1170,14 +1173,18 @@ void FormatCheck::verifyLinear(AVFrame* frame, StringView what, double tolerance
     compare(what, StringView(u8"hdr"), got, tolerance, true);
 }
 
-void FormatCheck::check(const Case& kase, StringView what) {
+bool FormatCheck::mine(StringView what) {
     u32 hash = 2166136261u;
 
     for (const u8* c = what.begin(); c != what.end(); c++) {
         hash = (hash ^ *c) * 16777619u;
     }
 
-    if (hash % buckets != bucket) {
+    return hash % buckets == bucket;
+}
+
+void FormatCheck::check(const Case& kase, StringView what) {
+    if (!mine(what)) {
         return;
     }
 
@@ -1206,6 +1213,10 @@ void FormatCheck::examine(const Case& kase, StringView what) {
     STD_DEFER {
         av_frame_free(&frame);
     };
+
+    if (!strcmp(stage, "kernel") && !kernelable(describe(frame, "sdr"))) {
+        return;
+    }
 
     if (model == Model::Palette) {
         writePalette(frame);
@@ -1284,7 +1295,67 @@ void FormatCheck::formats() {
             kase.primaries = AVCOL_PRI_SMPTE428;
         }
 
-        check(kase, StringView(StringBuilder() << StringView(descriptor->name) << StringView(u8" ") << StringView(filter)));
+        check(kase, StringView(StringBuilder() << StringView(descriptor->name) << StringView(u8" ") << StringView(filter) << StringView(u8" ") << StringView(stage)));
+    }
+}
+
+void FormatCheck::underlay() {
+    if (!mine(StringView(u8"kernel underlay"))) {
+        return;
+    }
+
+    checked++;
+
+    if (!ui->kernels()) {
+        failed++;
+        sysE << StringView(u8"video formats: the display takes no kernels") << endL;
+
+        return;
+    }
+
+    Case kase;
+
+    kase.format = AV_PIX_FMT_YUV420P;
+
+    AVFrame* frame = this->frame(kase);
+    STD_DEFER {
+        av_frame_free(&frame);
+    };
+
+    write(frame, kase);
+
+    VideoShader facts = describe(frame, "sdr");
+
+    facts.origin[0] = 1;
+    facts.origin[1] = 1;
+
+    ScopedPtr<ObjPool> owner{ObjPool::fromMemoryRaw()};
+    RenderImage* image = ui->shadeImage(*owner.ptr, shaderFor(facts), (u32)frame->width, (u32)frame->height, frame->buf[0]->data, frame->buf[0]->size, retired);
+    UiEvent event;
+    int frames = 0;
+
+    image->prepare();
+    ui->requestFrame();
+
+    while (ui->next(event)) {
+        if (event.kind != UiEvent::Kind::Frame) {
+            continue;
+        }
+
+        if (frames == 3) {
+            break;
+        }
+
+        ImVec2 at = ImGui::GetMainViewport()->Pos;
+
+        image->underlay(ImVec2(at.x + 1.f, at.y + 1.f), ImVec2(at.x + 1.f + (float)frame->width, at.y + 1.f + (float)frame->height));
+        frames++;
+        ui->requestFrame();
+    }
+
+    if (frames < 3) {
+        failed++;
+        sysE << StringView(u8"video formats: the kernel underlay saw ") << (u64)frames << StringView(u8" frames") << endL;
     }
 }
 
@@ -1482,6 +1553,10 @@ int main(int argc, char** argv) {
             check.formats();
             check.filter = "lanczos";
             check.formats();
+            check.stage = "kernel";
+            check.formats();
+            check.underlay();
+            check.stage = "fragment";
             check.filter = "bilinear";
             check.matrices();
             check.locations();

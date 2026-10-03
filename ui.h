@@ -62,11 +62,13 @@ struct Ui {
     virtual RenderImage* shadeImage(stl::ObjPool& pool, RenderShader& shader, u32 width, u32 height, const void* data, size_t size, stl::Runable& retired) = 0;
 
     virtual RenderShader* compileShader(stl::ObjPool& pool, const void* code, size_t size) = 0;
+    virtual RenderShader* compileKernel(stl::ObjPool& pool, const void* code, size_t size, u32 tile) = 0;
 
     virtual ImTextureRef loadTexture(u32 width, u32 height, const void* rgba) = 0;
     virtual void releaseTexture(ImTextureRef texture) = 0;
     virtual u32 maxTextureSide() = 0;
     virtual bool software() = 0;
+    virtual bool kernels() = 0;
 
     virtual bool drawErrorPanel(stl::StringView message) = 0;
 

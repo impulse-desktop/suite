@@ -9,6 +9,8 @@ namespace stl {
 
 struct VideoLayout;
 
+constexpr u32 kernelTile = 16;
+
 struct VideoShader {
     const VideoLayout* layout;
     const char* system;

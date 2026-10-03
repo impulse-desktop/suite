@@ -384,11 +384,13 @@ namespace {
         RenderImage* importImage(ObjPool& pool, SharedImage& source, bool hdr) override;
         RenderImage* bindImage(ObjPool& pool, u32 width, u32 height, const void* data, size_t size, size_t stride, Runable& retired) override;
         RenderShader* compileShader(ObjPool& pool, const void* code, size_t size) override;
+        RenderShader* compileKernel(ObjPool& pool, const void* code, size_t size, u32 tile) override;
         RenderImage* shadeImage(ObjPool& pool, RenderShader& shader, u32 width, u32 height, const void* data, size_t size, Runable& retired) override;
         ImTextureRef loadTexture(u32 width, u32 height, const void* rgba) override;
         void releaseTexture(ImTextureRef texture) override;
         u32 maxTextureSide() override;
         bool software() override;
+        bool kernels() override;
         bool drawErrorPanel(StringView message) override;
         void trace(StringView what) override;
         void timing(StringView line) override;
@@ -622,6 +624,10 @@ RenderShader* UiImpl::compileShader(ObjPool& owner, const void* code, size_t siz
     return renderer->compileShader(owner, code, size);
 }
 
+RenderShader* UiImpl::compileKernel(ObjPool& owner, const void* code, size_t size, u32 tile) {
+    return renderer->compileKernel(owner, code, size, tile);
+}
+
 RenderImage* UiImpl::shadeImage(ObjPool& owner, RenderShader& shader, u32 width, u32 height, const void* data, size_t size, Runable& retired) {
     return renderer->shade(owner, shader, width, height, data, size, retired);
 }
@@ -714,6 +720,10 @@ u32 UiImpl::maxTextureSide() {
 
 bool UiImpl::software() {
     return renderer->software();
+}
+
+bool UiImpl::kernels() {
+    return renderer->kernels();
 }
 
 bool UiImpl::drawErrorPanel(StringView message) {
