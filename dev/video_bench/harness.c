@@ -15,6 +15,7 @@ static VkPipelineLayout pipelineLayout;
 static VkCommandPool commandPool;
 static VkShaderModule vertexShader;
 static PFN_vkGetPipelineExecutableStatisticsKHR getStatistics;
+static PFN_vkGetPipelineExecutableInternalRepresentationsKHR getRepresentations;
 
 typedef struct {
     VkBuffer buffer;
@@ -158,7 +159,7 @@ static VkPipeline makePipeline(VkShaderModule fragment, const Target* t, int sta
     blend.attachmentCount = 1;
     blend.pAttachments = &blendAttachment;
     VkGraphicsPipelineCreateInfo info = {VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
-    info.flags = statistics ? VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR : 0;
+    info.flags = statistics ? VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR | VK_PIPELINE_CREATE_CAPTURE_INTERNAL_REPRESENTATIONS_BIT_KHR : 0;
     info.stageCount = 2;
     info.pStages = stages;
     info.pVertexInputState = &vertexInput;
@@ -192,12 +193,30 @@ static void printStatistics(const char* label, VkPipeline pipeline) {
     printf("\n");
 }
 
+static void writeAssembly(const char* path, VkPipeline pipeline) {
+    VkPipelineExecutableInfoKHR exec = {VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_INFO_KHR};
+    exec.pipeline = pipeline;
+    exec.executableIndex = 1;
+    uint32_t count = 0;
+    getRepresentations(device, &exec, &count, NULL);
+    VkPipelineExecutableInternalRepresentationKHR representations[8];
+    if (count > 8) count = 8;
+    for (uint32_t i = 0; i < count; i++) representations[i] = (VkPipelineExecutableInternalRepresentationKHR){VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_INTERNAL_REPRESENTATION_KHR};
+    getRepresentations(device, &exec, &count, representations);
+    for (uint32_t i = 0; i < count; i++) representations[i].pData = calloc(1, representations[i].dataSize + 1);
+    getRepresentations(device, &exec, &count, representations);
+    FILE* f = fopen(path, "w");
+    for (uint32_t i = 0; i < count; i++)
+        if (!strcmp(representations[i].name, "Assembly")) fputs(representations[i].pData, f);
+    fclose(f);
+}
+
 static VkDescriptorSet makeSet(Buffer* bytes, Buffer* uniform) {
     static VkDescriptorPool pool;
     if (!pool) {
-        VkDescriptorPoolSize sizes[2] = {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 8}, {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 8}};
+        VkDescriptorPoolSize sizes[2] = {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1024}, {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1024}};
         VkDescriptorPoolCreateInfo poolInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-        poolInfo.maxSets = 8;
+        poolInfo.maxSets = 1024;
         poolInfo.poolSizeCount = 2;
         poolInfo.pPoolSizes = sizes;
         CHECK(vkCreateDescriptorPool(device, &poolInfo, NULL, &pool));
@@ -234,7 +253,7 @@ static double run(VkPipeline pipeline, VkDescriptorSet set, const Target* t, uin
     VkFence fence;
     CHECK(vkCreateFence(device, &fenceInfo, NULL, &fence));
     double best = 1e30;
-    for (int round = 0; round < (readback ? 1 : 7); round++) {
+    for (int round = 0; round < 1; round++) {
         VkCommandBufferBeginInfo begin = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
         CHECK(vkBeginCommandBuffer(command, &begin));
         vkCmdResetQueryPool(command, queries, 0, 2);
@@ -276,20 +295,39 @@ static double run(VkPipeline pipeline, VkDescriptorSet set, const Target* t, uin
     return best;
 }
 
+typedef struct {
+    const char* directory;
+    VkShaderModule shaders[2];
+    Buffer bytes;
+    Buffer uniforms[2];
+    VkDescriptorSet sets[2];
+    VkPipeline pipelines[2][2];
+    double best[2][2];
+} Case;
+
+static char* joined(const char* directory, const char* name) {
+    size_t length = strlen(directory) + strlen(name) + 2;
+    char* path = malloc(length);
+    snprintf(path, length, "%s/%s", directory, name);
+    return path;
+}
+
 int main(int argc, char** argv) {
-    if (argc != 8) {
-        fprintf(stderr, "usage: harness VERT DATA OPTIMUM_SPV OPTIMUM_UBO TEMPLATE_SPV TEMPLATE_UBO DRAWS\n");
+    if (argc < 5) {
+        fprintf(stderr, "usage: harness VERT DRAWS ROUNDS CASE_DIRECTORY...\n");
         return 2;
     }
-    uint32_t draws = atoi(argv[7]);
+    uint32_t draws = atoi(argv[2]);
+    int rounds = atoi(argv[3]);
+    int count = argc - 4;
     VkApplicationInfo app = {VK_STRUCTURE_TYPE_APPLICATION_INFO};
     app.apiVersion = VK_API_VERSION_1_2;
     VkInstanceCreateInfo instanceInfo = {VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
     instanceInfo.pApplicationInfo = &app;
     VkInstance instance;
     CHECK(vkCreateInstance(&instanceInfo, NULL, &instance));
-    uint32_t count = 1;
-    vkEnumeratePhysicalDevices(instance, &count, &gpu);
+    uint32_t devices = 1;
+    vkEnumeratePhysicalDevices(instance, &devices, &gpu);
     vkGetPhysicalDeviceProperties(gpu, &props);
     float priority = 1.f;
     VkDeviceQueueCreateInfo queueInfo = {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
@@ -307,6 +345,7 @@ int main(int argc, char** argv) {
     CHECK(vkCreateDevice(gpu, &deviceInfo, NULL, &device));
     vkGetDeviceQueue(device, 0, 0, &queue);
     getStatistics = (PFN_vkGetPipelineExecutableStatisticsKHR)vkGetDeviceProcAddr(device, "vkGetPipelineExecutableStatisticsKHR");
+    getRepresentations = (PFN_vkGetPipelineExecutableInternalRepresentationsKHR)vkGetDeviceProcAddr(device, "vkGetPipelineExecutableInternalRepresentationsKHR");
 
     VkDescriptorSetLayoutBinding bindings[2] = {
         {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL},
@@ -325,48 +364,72 @@ int main(int argc, char** argv) {
     CHECK(vkCreateCommandPool(device, &commandPoolInfo, NULL, &commandPool));
     vertexShader = module(argv[1]);
 
-    size_t dataSize;
-    void* data = readFile(argv[2], &dataSize);
-    Buffer bytes = makeBuffer(dataSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-    memcpy(bytes.map, data, dataSize);
     const char* labels[2] = {"optimum", "template"};
-    VkShaderModule shaders[2] = {module(argv[3]), module(argv[5])};
-    Buffer uniforms[2];
-    VkDescriptorSet sets[2];
-    for (int k = 0; k < 2; k++) {
-        size_t size;
-        void* u = readFile(argv[4 + 2 * k], &size);
-        uniforms[k] = makeBuffer(1024, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
-        memset(uniforms[k].map, 0, 1024);
-        memcpy(uniforms[k].map, u, size);
-        sets[k] = makeSet(&bytes, &uniforms[k]);
-    }
-
-    Target check = makeTarget(VK_FORMAT_R32G32B32A32_SFLOAT, 960, 540, 1);
-    Buffer pixels[2];
-    for (int k = 0; k < 2; k++) {
-        pixels[k] = makeBuffer((VkDeviceSize)check.width * check.height * 16, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
-        VkPipeline pipeline = makePipeline(shaders[k], &check, 0);
-        run(pipeline, sets[k], &check, 1, &pixels[k]);
-    }
-    double worst = 0;
-    for (size_t i = 0; i < (size_t)check.width * check.height * 4; i++) {
-        double d = ((float*)pixels[0].map)[i] - ((float*)pixels[1].map)[i];
-        d = d < 0 ? -d : d;
-        if (d > worst) worst = d;
-    }
-    printf("difference %g\n", worst);
-
-    Target targets[2] = {makeTarget(VK_FORMAT_R8_UNORM, 3840, 2160, 0), makeTarget(VK_FORMAT_R16G16B16A16_SFLOAT, 3840, 2160, 0)};
     const char* names[2] = {"r8", "rgba16f"};
-    for (int k = 0; k < 2; k++) {
-        VkPipeline statistics = makePipeline(shaders[k], &targets[0], 1);
-        printStatistics(labels[k], statistics);
-    }
-    for (int t = 0; t < 2; t++)
+    Target check = makeTarget(VK_FORMAT_R32G32B32A32_SFLOAT, 960, 540, 1);
+    Target targets[2] = {makeTarget(VK_FORMAT_R8_UNORM, 3840, 2160, 0), makeTarget(VK_FORMAT_R16G16B16A16_SFLOAT, 3840, 2160, 0)};
+    Buffer pixels[2];
+    for (int k = 0; k < 2; k++)
+        pixels[k] = makeBuffer((VkDeviceSize)check.width * check.height * 16, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    Case* cases = calloc(count, sizeof(Case));
+    for (int i = 0; i < count; i++) {
+        Case* c = &cases[i];
+        c->directory = argv[4 + i];
+        size_t dataSize;
+        void* data = readFile(joined(c->directory, "data.bin"), &dataSize);
+        c->bytes = makeBuffer(dataSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        memcpy(c->bytes.map, data, dataSize);
+        free(data);
         for (int k = 0; k < 2; k++) {
-            VkPipeline pipeline = makePipeline(shaders[k], &targets[t], 0);
-            printf("time %s %s %.2f\n", names[t], labels[k], run(pipeline, sets[k], &targets[t], draws, NULL) / 1000.);
+            char shader[32], uniform[32];
+            snprintf(shader, sizeof(shader), "%s.spv", labels[k]);
+            snprintf(uniform, sizeof(uniform), "%s.ubo", labels[k]);
+            c->shaders[k] = module(joined(c->directory, shader));
+            size_t size;
+            void* u = readFile(joined(c->directory, uniform), &size);
+            c->uniforms[k] = makeBuffer(1024, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+            memset(c->uniforms[k].map, 0, 1024);
+            memcpy(c->uniforms[k].map, u, size);
+            free(u);
+            c->sets[k] = makeSet(&c->bytes, &c->uniforms[k]);
+            VkPipeline pipeline = makePipeline(c->shaders[k], &check, 0);
+            run(pipeline, c->sets[k], &check, 1, &pixels[k]);
+            vkDestroyPipeline(device, pipeline, NULL);
         }
+        double worst = 0;
+        for (size_t p = 0; p < (size_t)check.width * check.height * 4; p++) {
+            double d = ((float*)pixels[0].map)[p] - ((float*)pixels[1].map)[p];
+            d = d < 0 ? -d : d;
+            if (d > worst) worst = d;
+        }
+        printf("case %s\n", c->directory);
+        printf("difference %s %g\n", c->directory, worst);
+        for (int k = 0; k < 2; k++) {
+            VkPipeline statistics = makePipeline(c->shaders[k], &targets[0], 1);
+            printf("%s ", c->directory);
+            printStatistics(labels[k], statistics);
+            char assembly[32];
+            snprintf(assembly, sizeof(assembly), "%s.s", labels[k]);
+            writeAssembly(joined(c->directory, assembly), statistics);
+            vkDestroyPipeline(device, statistics, NULL);
+        }
+        for (int t = 0; t < 2; t++)
+            for (int k = 0; k < 2; k++) {
+                c->pipelines[t][k] = makePipeline(c->shaders[k], &targets[t], 0);
+                c->best[t][k] = 1e30;
+            }
+        fflush(stdout);
+    }
+    for (int round = 0; round < rounds; round++)
+        for (int i = 0; i < count; i++)
+            for (int t = 0; t < 2; t++)
+                for (int k = 0; k < 2; k++) {
+                    double ns = run(cases[i].pipelines[t][k], cases[i].sets[k], &targets[t], draws, NULL);
+                    if (ns < cases[i].best[t][k]) cases[i].best[t][k] = ns;
+                }
+    for (int i = 0; i < count; i++)
+        for (int t = 0; t < 2; t++)
+            for (int k = 0; k < 2; k++)
+                printf("time %s %s %s %.2f\n", cases[i].directory, names[t], labels[k], cases[i].best[t][k] / 1000.);
     return 0;
 }

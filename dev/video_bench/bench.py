@@ -5,11 +5,14 @@
 Every case renders one variant of the video templates and the hand-written shader
 dev/video_bench/hand/NAME.frag over the same random frame, checks that the
 two agree, and times both at 3840x2160 into R8 (arithmetic-bound) and
-RGBA16F (bandwidth-bound) targets. The table gives template/hand ratios and
+RGBA16F (bandwidth-bound) targets. The cases are prepared by one process
+each, as many at once as there are cores; then one harness times them all
+on one device, a round over every case at a time, keeping each case's best.
+The table gives template/hand ratios and
 their geometric means; the instruction and memory counts come from the
 driver through VK_KHR_pipeline_executable_properties.
 
-  ix run set/pg/libs lib/vulkan/drivers --vulkan=amd/radv -- python3 dev/video_bench/bench.py [--runs N] [--work DIR] [CASE...]
+  ix run set/pg/libs lib/vulkan/drivers --vulkan=amd/radv -- python3 dev/video_bench/bench.py [--rounds N] [--work DIR] [CASE...]
 """
 
 import argparse
@@ -216,14 +219,41 @@ def template(case, layout, components, offsets, lines):
     return (system, shape, conversion, output), uniform
 
 
-def prepare(case, directory):
+FACTS = {
+    **{f"frame.decode[{c}][{r}]": 64 + 16 * c + 4 * r for c in range(3) for r in range(3)},
+    **{f"frame.bias[{i}]": 112 + 4 * i for i in range(4)},
+    **{f"frame.weights[{i}]": 144 + 4 * i for i in range(2)},
+    **{f"frame.{name}[{s}][{i}]": base + 16 * s + 4 * i for name, base in (("curve", 160), ("oetf", 208), ("inverse", 256)) for s in range(3) for i in range(4)},
+    **{f"frame.toOutput[{c}][{r}]": 304 + 16 * c + 4 * r for c in range(3) for r in range(3)},
+    **{f"frame.light[{i}]": 352 + 4 * i for i in range(3)},
+    **{f"frame.luminance[{i}]": 368 + 4 * i for i in range(3)},
+}
+
+
+def structure(values):
+    facts, seen = {}, {}
+    for path, value in values.items():
+        if value in (0.0, 1.0, -1.0):
+            facts[path] = value
+        elif value in seen:
+            facts[path] = seen[value]
+        else:
+            seen[value] = path
+    return facts
+
+
+def prepare(case, directory, intermediate=False, hot=False, structural=False):
     name, layout, components = layout_of(case["format"])
     data, offsets, lines = frame(case, layout, components)
     (system, shape, conversion, output), uniform = template(case, layout, components, offsets, lines)
+    if intermediate and output == "any":
+        output = case["output"]
+    values = {path: struct.unpack_from("<f", uniform, offset)[0] for path, offset in FACTS.items()}
+    facts = values if hot else structure(values) if structural else None
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "data.bin").write_bytes(data)
     (directory / "template.ubo").write_bytes(uniform)
-    (directory / "template.frag").write_text(video_shaders.render(SHADERS, (name, system, shape, conversion, output)))
+    (directory / "template.frag").write_text(video_shaders.render(SHADERS, (name, system, shape, conversion, output), facts, intermediate))
     sx, sy = case["subsampling"]
     (directory / "optimum.ubo").write_bytes(struct.pack("<4I", *offsets) + struct.pack("<4I", *lines) + struct.pack("<4I", W, H, -(-W >> sx), -(-H >> sy)) + struct.pack("<4f", WHITE, 0, 0, 0))
     (directory / "optimum.frag").write_text((HERE / "hand" / f"{case['name']}.frag").read_text())
@@ -232,12 +262,16 @@ def prepare(case, directory):
     return "_".join((name, system, shape, conversion, output))
 
 
-def measure(harness, vertex, directory):
-    files = [str(directory / name) for name in ("data.bin", "optimum.spv", "optimum.ubo", "template.spv", "template.ubo")]
-    text = subprocess.run([str(harness), str(vertex), *files, str(DRAWS)], check=True, capture_output=True, text=True).stdout
-    times = {(target, shader): float(value) for target, shader, value in re.findall(r"time (\w+) (\w+) ([\d.]+)", text)}
-    stats = {shader: {key: int(value) for key, value in re.findall(r"(\w[\w ]*?)=(\d+)", rest)} for shader, rest in re.findall(r"stats (\w+) (.*)", text)}
-    return float(re.search(r"difference (\S+)", text).group(1)), times, stats
+def measure(harness, vertex, directories, rounds):
+    text = subprocess.run([str(harness), str(vertex), str(DRAWS), str(rounds), *map(str, directories)], check=True, capture_output=True, text=True).stdout
+    results = {str(directory): {"times": {}, "stats": {}} for directory in directories}
+    for directory, value in re.findall(r"^difference (\S+) (\S+)$", text, re.M):
+        results[directory]["difference"] = float(value)
+    for directory, shader, rest in re.findall(r"^(\S+) stats (\w+) (.*)$", text, re.M):
+        results[directory]["stats"][shader] = {key: int(value) for key, value in re.findall(r"(\w[\w ]*?)=(\d+)", rest)}
+    for directory, target, shader, value in re.findall(r"^time (\S+) (\w+) (\w+) ([\d.]+)$", text, re.M):
+        results[directory]["times"][(target, shader)] = float(value)
+    return results
 
 
 def geomean(values):
@@ -246,11 +280,20 @@ def geomean(values):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--runs", type=int, default=3)
+    parser.add_argument("--rounds", type=int, default=5)
     parser.add_argument("--work", default=str(SUITE / ".build" / "video_bench"))
+    parser.add_argument("--prepare", action="store_true")
+    parser.add_argument("--ir", action="store_true")
+    parser.add_argument("--hot", action="store_true")
+    parser.add_argument("--structure", action="store_true")
     parser.add_argument("cases", nargs="*")
     args = parser.parse_args()
     work = Path(args.work)
+    cases = [dict(zip(FIELDS, entry)) for entry in CORPUS if not args.cases or entry[1] in args.cases]
+    if args.prepare:
+        for case in cases:
+            (work / case["name"] / "variant").write_text(prepare(case, work / case["name"], args.ir, args.hot, args.structure))
+        return
     work.mkdir(parents=True, exist_ok=True)
     harness = work / "harness"
     flags = " ".join(os.environ.get(name, "") for name in ("CPPFLAGS", "CFLAGS"))
@@ -258,23 +301,29 @@ def main():
     subprocess.run(f"cc {flags} -o {harness} {HERE / 'harness.c'} $(pkg-config --cflags --libs vulkan) {libraries}", shell=True, check=True)
     vertex = work / "fullscreen.vert.spv"
     subprocess.run(["glslangValidator", "--quiet", "--target-env", "vulkan1.1", "-V", str(HERE / "fullscreen.vert"), "-o", str(vertex)], check=True)
-    cases = [dict(zip(FIELDS, entry)) for entry in CORPUS if not args.cases or entry[1] in args.cases]
+    pending, running = list(cases), []
+    while pending or running:
+        while pending and len(running) < (os.cpu_count() or 1):
+            case = pending.pop(0)
+            running.append(subprocess.Popen([sys.executable, __file__, "--prepare", "--work", str(work), *(["--ir"] if args.ir else []), *(["--hot"] if args.hot else []), *(["--structure"] if args.structure else []), case["name"]]))
+        running[0].wait()
+        if running[0].returncode:
+            raise SystemExit(f"preparing a case failed: {running[0].args}")
+        running = [process for process in running if process.poll() is None or process.returncode]
+    directories = [work / case["name"] for case in cases]
+    results = measure(harness, vertex, directories, args.rounds)
     rows = []
-    for case in cases:
-        directory = work / case["name"]
-        variant = prepare(case, directory)
-        runs = [measure(harness, vertex, directory) for _ in range(args.runs)]
-        best = {key: min(run[1][key] for run in runs) for key in runs[0][1]}
-        stats = runs[0][2]
-        row = dict(case, variant=variant, difference=runs[0][0], stats=stats, best=best)
+    for case, directory in zip(cases, directories):
+        result = results[str(directory)]
+        best, stats = result["times"], result["stats"]
+        row = dict(case, variant=(directory / "variant").read_text(), difference=result["difference"], stats=stats, best=best)
         row["r8"] = best[("r8", "template")] / best[("r8", "optimum")]
         row["rgba16f"] = best[("rgba16f", "template")] / best[("rgba16f", "optimum")]
         row["instructions"] = stats["template"]["Instructions"] / stats["optimum"]["Instructions"]
         rows.append(row)
         print(
             f"{case['name']:22} r8 {row['r8']:.3f}  rgba16f {row['rgba16f']:.3f}  instructions {stats['optimum']['Instructions']}/{stats['template']['Instructions']}"
-            f"  loads {stats['optimum']['VMEM']}/{stats['template']['VMEM']}  difference {row['difference']:.3g}  {variant}",
-            flush=True,
+            f"  loads {stats['optimum']['VMEM']}/{stats['template']['VMEM']}  difference {row['difference']:.3g}  {row['variant']}"
         )
     groups = [("all", rows)] + [(group, [row for row in rows if row["group"] == group]) for group in dict.fromkeys(row["group"] for row in rows)]
     for label, members in groups:
