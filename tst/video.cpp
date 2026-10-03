@@ -1180,8 +1180,8 @@ void FormatCheck::verifyLinear(AVFrame* frame, StringView what, double tolerance
 void FormatCheck::check(const Case& kase, StringView what) {
     u32 hash = 2166136261u;
 
-    for (const char* c = what.begin(); c != what.end(); c++) {
-        hash = (hash ^ (u8)*c) * 16777619u;
+    for (const u8* c = what.begin(); c != what.end(); c++) {
+        hash = (hash ^ *c) * 16777619u;
     }
 
     if (hash % buckets != bucket) {
