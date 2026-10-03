@@ -1446,7 +1446,15 @@ void FormatCheck::primaries() {
     }
 }
 
-int main() {
+int main(int argc, char** argv) {
+    StringView part(argc > 1 ? argv[1] : "");
+
+    if (part != StringView(u8"formats") && part != StringView(u8"lanczos") && part != StringView(u8"colors")) {
+        sysE << StringView(u8"usage: video_test formats|lanczos|colors") << endL;
+
+        return 2;
+    }
+
     ObjPool::Ref owner = ObjPool::fromMemory();
     ObjPool& pool = *owner;
     Ui& ui = *Ui::create(pool, StringView(u8"video-test"), {64_d, 64_d});
@@ -1454,15 +1462,16 @@ int main() {
     bool crashed = false;
     auto body = makeRunable([&] {
         try {
-            check.formats();
-            check.filter = "lanczos";
-            check.formats();
-            check.filter = "bilinear";
-            check.matrices();
-            check.locations();
-            check.systems();
-            check.transfers();
-            check.primaries();
+            if (part == StringView(u8"colors")) {
+                check.matrices();
+                check.locations();
+                check.systems();
+                check.transfers();
+                check.primaries();
+            } else {
+                check.filter = part == StringView(u8"lanczos") ? "lanczos" : "bilinear";
+                check.formats();
+            }
         } catch (...) {
             crashed = true;
             sysE << StringView(u8"video formats: ") << Exception::current() << endL;
