@@ -814,6 +814,18 @@ namespace {
         }
     }
 
+    struct LanczosFit {
+        double c[lanczosTaps][lanczosDegree + 1];
+
+        LanczosFit();
+    };
+
+    static const LanczosFit& lanczosFitted() {
+        static const LanczosFit fit;
+
+        return fit;
+    }
+
     static void lanczosFit(double (&out)[lanczosTaps][lanczosDegree + 1]) {
         constexpr int n = lanczosDegree + 1;
         double m[n][n + lanczosTaps];
@@ -867,6 +879,10 @@ namespace {
                 out[k][e] = m[e][n + k] / m[e][e];
             }
         }
+    }
+
+    LanczosFit::LanczosFit() {
+        lanczosFit(c);
     }
 
     struct Video {
@@ -1015,12 +1031,11 @@ namespace {
         }
 
         void lanczosAxis(Node* at, Node*& base, Node* (&w)[lanczosTaps]) {
-            double fit[lanczosTaps][lanczosDegree + 1];
+            const LanczosFit& fit = lanczosFitted();
             Node* floor = g.floor(at);
             Node* t = g.sub(g.mul(g.sub(at, floor), 2.), 1.);
             Node* square = g.mul(t, t);
 
-            lanczosFit(fit);
             base = g.convert(floor, Kind::Int);
 
             for (int k = 0; k < lanczosRadius; k++) {
@@ -1028,11 +1043,11 @@ namespace {
                 Node* odd = g.f(0.);
 
                 for (int e = lanczosDegree - lanczosDegree % 2; e >= 0; e -= 2) {
-                    even = g.add(g.mul(even, square), fit[k][e]);
+                    even = g.add(g.mul(even, square), fit.c[k][e]);
                 }
 
                 for (int e = lanczosDegree - 1 + lanczosDegree % 2; e >= 1; e -= 2) {
-                    odd = g.add(g.mul(odd, square), fit[k][e]);
+                    odd = g.add(g.mul(odd, square), fit.c[k][e]);
                 }
 
                 odd = g.mul(odd, t);

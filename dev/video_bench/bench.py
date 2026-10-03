@@ -71,12 +71,17 @@ CORPUS = [
     ("scale", "yuv420p_bilinear_1.42", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (1920, 1080), (2731, 1536), "yuv420p_709_sdr"),
     ("scale", "yuv420p_lanczos3_1.42", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (1920, 1080), (2731, 1536), "yuv420p_709_sdr_lanczos3", "lanczos"),
     ("scale", "yuv420p_lanczos3fast_1.42", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (1920, 1080), (2731, 1536), "yuv420p_709_sdr_lanczos3_fast", "lanczos"),
+    ("scale", "yuv420p_chart_bilinear_1.42", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (1920, 1080), (2731, 1536), "yuv420p_709_sdr_lanczos3", "bilinear", "chart"),
+    ("scale", "yuv420p_chart_lanczos3_1.42", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (1920, 1080), (2731, 1536), "yuv420p_709_sdr_lanczos3", "lanczos", "chart"),
+    ("approx", "yuv420p_chart_f1_1.42", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (1920, 1080), (2731, 1536), "yuv420p_709_sdr_lanczos3_f1", "lanczos", "chart"),
+    ("approx", "yuv420p_chart_f2_1.42", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (1920, 1080), (2731, 1536), "yuv420p_709_sdr_lanczos3_f2", "lanczos", "chart"),
+    ("approx", "yuv420p_chart_f3_1.42", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (1920, 1080), (2731, 1536), "yuv420p_709_sdr_lanczos3_f3", "lanczos", "chart"),
     ("scale", "yuv420p_bilinear_1.46", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (1280, 720), (1867, 1050), "yuv420p_709_sdr"),
     ("scale", "yuv420p_lanczos3_1.46", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (1280, 720), (1867, 1050), "yuv420p_709_sdr_lanczos3", "lanczos"),
     ("scale", "yuv420p_lanczos3fast_1.46", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (1280, 720), (1867, 1050), "yuv420p_709_sdr_lanczos3_fast", "lanczos"),
 ]
-FIELDS = ("group", "name", "format", "subsampling", "matrix", "range", "transfer", "primaries", "location", "output", "source", "target", "hand", "filter")
-SIZES = {"source": (1920, 1080), "target": (3840, 2160), "filter": "bilinear"}
+FIELDS = ("group", "name", "format", "subsampling", "matrix", "range", "transfer", "primaries", "location", "output", "source", "target", "hand", "filter", "content")
+SIZES = {"source": (1920, 1080), "target": (3840, 2160), "filter": "bilinear", "content": "noise"}
 
 MODULE = video_shaders.tables()
 LAYOUTS = video_shaders.layouts(MODULE)
@@ -92,6 +97,22 @@ def layout_of(format):
 
 def half(value):
     return struct.unpack("<H", struct.pack("<e", value))[0]
+
+
+def chart(c, x, y, W, H):
+    u, v = x / W, y / H
+    value = 0.25 + 0.3 * u + 0.2 * v * (1 + c) / 3
+    r2 = ((u - 0.75) * W) ** 2 + ((v - 0.3) * H) ** 2
+    if r2 < (0.2 * W) ** 2:
+        value = 0.5 + 0.45 * math.cos(math.pi * r2 / (0.4 * W))
+    elif 0.1 < u < 0.4 and 0.15 < v < 0.45:
+        value = 0.85 - 0.1 * c
+    elif (u - 0.25) ** 2 + (v - 0.7) ** 2 < 0.02:
+        value = 0.1 + 0.05 * c
+    if 0.5 < v < 0.9 and 0.5 < u < 0.95 and int(x) % 7 == 0:
+        value = 0.95
+    value += 0.04 * (math.sin(0.11 * x + 1.3 * c) * math.sin(0.07 * y) + 0.5 * math.sin(0.37 * x + 0.23 * y + c))
+    return min(max(value, 0.0), 1.0)
 
 
 def frame(case, layout, components):
@@ -123,11 +144,15 @@ def frame(case, layout, components):
             shift, depth = 0, 8 * step
         size = 1 if shift + depth <= 8 else 2 if shift + depth <= 16 else 4
         start = offset + 1 if big and size == 1 else offset
+        scale = (W / width, H / height)
         for y in range(height):
             row = offsets[plane] + y * lines[plane]
             for x in range(width):
+                level = chart(c, x * scale[0], y * scale[1], W, H) if case["content"] == "chart" else rng.random()
                 if "float" in layout["flags"]:
-                    value = half(rng.random()) if depth == 16 else struct.unpack("<I", struct.pack("<f", rng.random()))[0]
+                    value = half(level) if depth == 16 else struct.unpack("<I", struct.pack("<f", level))[0]
+                elif case["content"] == "chart":
+                    value = round(level * (2**depth - 1)) << shift
                 else:
                     value = rng.getrandbits(depth) << shift
                 at = row + x * step + start
@@ -241,6 +266,8 @@ def measure(harness, vertex, directories, rounds):
         results[directory]["build"][shader] = float(value)
     for directory, value in re.findall(r"^difference (\S+) (\S+)$", text, re.M):
         results[directory]["difference"] = float(value)
+    for directory, value in re.findall(r"^rmse (\S+) (\S+)$", text, re.M):
+        results[directory]["rmse"] = float(value)
     for directory, shader, rest in re.findall(r"^(\S+) stats (\w+) (.*)$", text, re.M):
         results[directory]["stats"][shader] = {key: int(value) for key, value in re.findall(r"(\w[\w ]*?)=(\d+)", rest)}
     for directory, target, shader, value in re.findall(r"^time (\S+) (\w+) (\w+) ([\d.]+)$", text, re.M):
@@ -288,7 +315,7 @@ def main():
     for case, directory in zip(cases, directories):
         result = results[str(directory)]
         best, stats = result["times"], result["stats"]
-        row = dict(case, variant=(directory / "variant").read_text(), difference=result["difference"], stats=stats, best=best)
+        row = dict(case, variant=(directory / "variant").read_text(), difference=result["difference"], rmse=result["rmse"], stats=stats, best=best)
         row["r8"] = best[("r8", "template")] / best[("r8", "optimum")]
         row["rgba16f"] = best[("rgba16f", "template")] / best[("rgba16f", "optimum")]
         row["instructions"] = stats["template"]["Instructions"] / stats["optimum"]["Instructions"]
@@ -297,10 +324,10 @@ def main():
         rows.append(row)
         print(
             f"{case['name']:22} r8 {row['r8']:.3f}  rgba16f {row['rgba16f']:.3f}  instructions {stats['optimum']['Instructions']}/{stats['template']['Instructions']}"
-            f"  loads {stats['optimum']['VMEM']}/{stats['template']['VMEM']}  difference {row['difference']:.3g}"
+            f"  loads {stats['optimum']['VMEM']}/{stats['template']['VMEM']}  difference {row['difference']:.3g} rmse {row['rmse']:.2g}"
             f"  build {row['compile']:.0f} us + {row['build']['template']:.2f} ms (hand {row['build']['optimum']:.2f} ms)  {row['variant']}"
         )
-    groups = [("all", [row for row in rows if row["group"] != "scale"])] + [(group, [row for row in rows if row["group"] == group]) for group in dict.fromkeys(row["group"] for row in rows)]
+    groups = [("all", [row for row in rows if row["group"] not in ("scale", "approx")])] + [(group, [row for row in rows if row["group"] == group]) for group in dict.fromkeys(row["group"] for row in rows)]
     for label, members in groups:
         if members:
             print(

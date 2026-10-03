@@ -452,6 +452,12 @@ namespace {
         }
     }
 
+    static void aim(VideoShader& facts, u32 width, u32 height) {
+        facts.target[0] = width;
+        facts.target[1] = height;
+        facts.filter = width > facts.size[0] && height > facts.size[1] ? "lanczos" : "bilinear";
+    }
+
     static VideoShader describeFrame(const AVFrame* frame, const char* output, float sdrWhiteNits) {
         AVPixelFormat format = (AVPixelFormat)frame->format;
         const AVPixFmtDescriptor* descriptor = av_pix_fmt_desc_get(format);
@@ -1719,8 +1725,7 @@ void Screen::makeRender(VideoImage* image) {
     image->facts = describeFrame(frame, output, RendererOptions{}.sdrWhiteNits);
 
     if (targetWidth) {
-        image->facts.target[0] = targetWidth;
-        image->facts.target[1] = targetHeight;
+        aim(image->facts, targetWidth, targetHeight);
     }
 
     RenderShader& shader = shaderFor(image->facts);
@@ -1767,7 +1772,7 @@ RenderShader& Screen::shaderFor(const VideoShader& facts) {
     compiled.pushBack(CompiledShader{facts, owner.ptr, shader, code.length(), compiledClock});
     compiledBytes += code.length();
     owner.drop();
-    player->ui->trace(StringView(StringBuilder() << StringView(u8"compiled video shader ") << StringView(facts.layout->name) << StringView(u8" ") << StringView(facts.system) << StringView(u8" ") << StringView(facts.transfer) << StringView(u8" ") << StringView(facts.conversion) << StringView(u8" ") << StringView(facts.output) << StringView(u8" ") << (u64)facts.target[0] << StringView(u8"x") << (u64)facts.target[1] << StringView(u8" compile_us=") << (built - start) << StringView(u8" driver_us=") << (done - built)));
+    player->ui->trace(StringView(StringBuilder() << StringView(u8"compiled video shader ") << StringView(facts.layout->name) << StringView(u8" ") << StringView(facts.system) << StringView(u8" ") << StringView(facts.transfer) << StringView(u8" ") << StringView(facts.conversion) << StringView(u8" ") << StringView(facts.output) << StringView(u8" ") << StringView(facts.filter) << StringView(u8" ") << (u64)facts.target[0] << StringView(u8"x") << (u64)facts.target[1] << StringView(u8" compile_us=") << (built - start) << StringView(u8" driver_us=") << (done - built)));
 
     return *shader;
 }
@@ -1926,8 +1931,7 @@ void Screen::draw() {
         targetHeight = (u32)(p1.y - p0.y);
 
         if (image->facts.target[0] != targetWidth || image->facts.target[1] != targetHeight) {
-            image->facts.target[0] = targetWidth;
-            image->facts.target[1] = targetHeight;
+            aim(image->facts, targetWidth, targetHeight);
             image->render->shadeWith(shaderFor(image->facts));
         }
 

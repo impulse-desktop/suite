@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <math.h>
 
 #define CHECK(x) do { VkResult r_ = (x); if (r_ != VK_SUCCESS) { fprintf(stderr, "%s failed: %d\n", #x, r_); exit(1); } } while (0)
 
@@ -468,13 +469,16 @@ int main(int argc, char** argv) {
             vkDestroyPipeline(device, pipeline, NULL);
         }
         double worst = 0;
+        double squares = 0;
         for (size_t p = 0; p < (size_t)check->width * check->height * 4; p++) {
             double d = ((float*)pixels[0].map)[p] - ((float*)pixels[1].map)[p];
+            if (p % 4 != 3) squares += d * d;
             d = d < 0 ? -d : d;
             if (d > worst) worst = d;
         }
         printf("case %s\n", c->directory);
         printf("difference %s %g\n", c->directory, worst);
+        printf("rmse %s %g\n", c->directory, sqrt(squares / ((double)check->width * check->height * 3)));
         for (int k = 0; k < 2; k++) {
             char shader[32];
             snprintf(shader, sizeof(shader), "%s.spv", labels[k]);
