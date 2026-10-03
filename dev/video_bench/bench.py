@@ -76,6 +76,13 @@ CORPUS = [
     ("approx", "yuv420p_chart_f1_1.42", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (1920, 1080), (2731, 1536), "yuv420p_709_sdr_lanczos3_f1", "lanczos", "chart"),
     ("approx", "yuv420p_chart_f2_1.42", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (1920, 1080), (2731, 1536), "yuv420p_709_sdr_lanczos3_f2", "lanczos", "chart"),
     ("approx", "yuv420p_chart_f3_1.42", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (1920, 1080), (2731, 1536), "yuv420p_709_sdr_lanczos3_f3", "lanczos", "chart"),
+    ("down", "yuv420p_hermite_0.5", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (3840, 2160), (1920, 1080), "yuv420p_709_sdr_hermite", "bilinear", "chart"),
+    ("down", "yuv420p_hermite_0.667", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (3840, 2160), (2560, 1440), "yuv420p_709_sdr_hermite", "bilinear", "chart"),
+    ("down", "yuv420p_hermite_0.333", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (3840, 2160), (1280, 720), "yuv420p_709_sdr_hermite", "bilinear", "chart"),
+    ("down", "yuv420p_hermite_0.25", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (3840, 2160), (960, 540), "yuv420p_709_sdr_hermite", "bilinear", "chart"),
+    ("down", "yuv420p_hermite_0.5005", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (3840, 2160), (1922, 1081), "yuv420p_709_sdr_hermite", "bilinear", "chart"),
+    ("down", "yuv420p_hermite_noise_0.5", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (3840, 2160), (1920, 1080), "yuv420p_709_sdr_hermite", "bilinear", "noise"),
+    ("down", "yuv420p_vs_bilinear_0.5", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (3840, 2160), (1920, 1080), "yuv420p_709_sdr", "bilinear", "chart"),
     ("scale", "yuv420p_bilinear_1.46", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (1280, 720), (1867, 1050), "yuv420p_709_sdr"),
     ("scale", "yuv420p_lanczos3_1.46", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (1280, 720), (1867, 1050), "yuv420p_709_sdr_lanczos3", "lanczos"),
     ("scale", "yuv420p_lanczos3fast_1.46", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (1280, 720), (1867, 1050), "yuv420p_709_sdr_lanczos3_fast", "lanczos"),
@@ -252,7 +259,7 @@ def prepare(case, directory, compiler):
     (directory / "size").write_text("%d %d" % case["target"])
     sx, sy = case["subsampling"]
     W, H = case["source"]
-    (directory / "optimum.ubo").write_bytes(struct.pack("<4I", *offsets) + struct.pack("<4I", *lines) + struct.pack("<4I", W, H, -(-W >> sx), -(-H >> sy)) + struct.pack("<4f", WHITE, 0, 0, 0))
+    (directory / "optimum.ubo").write_bytes(struct.pack("<4I", *offsets) + struct.pack("<4I", *lines) + struct.pack("<4I", W, H, -(-W >> sx), -(-H >> sy)) + struct.pack("<4f", WHITE, *case["target"], 0))
     (directory / "optimum.frag").write_text((HERE / "hand" / f"{case.get('hand', case['name'])}.frag").read_text())
     subprocess.run(["glslangValidator", "--quiet", "--target-env", "vulkan1.1", "-V", "-S", "frag", str(directory / "optimum.frag"), "-o", str(directory / "optimum.spv")], check=True)
     return "_".join((name, *arguments[1:6]))
@@ -327,7 +334,7 @@ def main():
             f"  loads {stats['optimum']['VMEM']}/{stats['template']['VMEM']}  difference {row['difference']:.3g} rmse {row['rmse']:.2g}"
             f"  build {row['compile']:.0f} us + {row['build']['template']:.2f} ms (hand {row['build']['optimum']:.2f} ms)  {row['variant']}"
         )
-    groups = [("all", [row for row in rows if row["group"] not in ("scale", "approx")])] + [(group, [row for row in rows if row["group"] == group]) for group in dict.fromkeys(row["group"] for row in rows)]
+    groups = [("all", [row for row in rows if row["group"] not in ("scale", "approx", "down")])] + [(group, [row for row in rows if row["group"] == group]) for group in dict.fromkeys(row["group"] for row in rows)]
     for label, members in groups:
         if members:
             print(

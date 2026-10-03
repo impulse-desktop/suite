@@ -798,6 +798,7 @@ namespace {
     constexpr int lanczosRadius = 3;
     constexpr int lanczosTaps = 2 * lanczosRadius;
     constexpr int lanczosDegree = 5;
+    constexpr int maxTaps = 8;
 
     static void lanczosWeights(double f, double (&out)[lanczosTaps]) {
         double total = 0.;
@@ -1030,54 +1031,93 @@ namespace {
             }
         }
 
-        void lanczosAxis(Node* at, Node*& base, Node* (&w)[lanczosTaps]) {
-            const LanczosFit& fit = lanczosFitted();
+        struct Axis {
+            int taps;
+            Node* origin;
+            Node* w[maxTaps];
+        };
+
+        Axis axis(Node* at, double ratio, bool sharp) {
+            Axis a;
             Node* floor = g.floor(at);
-            Node* t = g.sub(g.mul(g.sub(at, floor), 2.), 1.);
-            Node* square = g.mul(t, t);
+            Node* base = g.convert(floor, Kind::Int);
+            Node* f = g.sub(at, floor);
 
-            base = g.convert(floor, Kind::Int);
+            if (ratio >= 1. && sharp) {
+                const LanczosFit& fit = lanczosFitted();
+                Node* t = g.sub(g.mul(f, 2.), 1.);
+                Node* square = g.mul(t, t);
 
-            for (int k = 0; k < lanczosRadius; k++) {
-                Node* even = g.f(0.);
-                Node* odd = g.f(0.);
+                a.taps = lanczosTaps;
 
-                for (int e = lanczosDegree - lanczosDegree % 2; e >= 0; e -= 2) {
-                    even = g.add(g.mul(even, square), fit.c[k][e]);
+                for (int k = 0; k < lanczosRadius; k++) {
+                    Node* even = g.f(0.);
+                    Node* odd = g.f(0.);
+
+                    for (int e = lanczosDegree - lanczosDegree % 2; e >= 0; e -= 2) {
+                        even = g.add(g.mul(even, square), fit.c[k][e]);
+                    }
+
+                    for (int e = lanczosDegree - 1 + lanczosDegree % 2; e >= 1; e -= 2) {
+                        odd = g.add(g.mul(odd, square), fit.c[k][e]);
+                    }
+
+                    odd = g.mul(odd, t);
+                    a.w[k] = g.add(even, odd);
+                    a.w[lanczosTaps - 1 - k] = g.sub(even, odd);
+                }
+            } else if (ratio >= 1.) {
+                a.taps = 2;
+                a.w[0] = g.sub(1., f);
+                a.w[1] = f;
+            } else {
+                double reach = ::fmin(1. / ratio, maxTaps / 2.);
+                int half = (int)::ceil(reach - 1e-9);
+                Node* total = g.f(0.);
+
+                a.taps = 2 * half;
+
+                for (int k = 0; k < a.taps; k++) {
+                    Node* x = g.min(g.mul(g.abs(g.sub(f, k + 1 - half)), 1. / reach), 1.);
+
+                    a.w[k] = g.add(g.mul(g.mul(g.sub(g.mul(x, 2.), 3.), x), x), 1.);
+                    total = g.add(total, a.w[k]);
                 }
 
-                for (int e = lanczosDegree - 1 + lanczosDegree % 2; e >= 1; e -= 2) {
-                    odd = g.add(g.mul(odd, square), fit.c[k][e]);
-                }
+                Node* inverse = g.div(1., total);
 
-                odd = g.mul(odd, t);
-                w[k] = g.add(even, odd);
-                w[lanczosTaps - 1 - k] = g.sub(even, odd);
+                for (int k = 0; k < a.taps; k++) {
+                    a.w[k] = g.mul(a.w[k], inverse);
+                }
             }
+
+            a.origin = g.add(base, 1 - a.taps / 2);
+
+            return a;
         }
 
         Node* funnel(Node* lo, Node* hi, Node* s) {
             return g.select(g.eq(s, 0), lo, g.bor(g.shl(hi, g.sub(32, s)), g.shr(lo, s)));
         }
 
-        int span(int c) const {
+        int span(int c, int taps) const {
             const int* k = l.components[c];
 
-            return (lanczosTaps - 1) * k[1] + (k[3] + k[4] <= 8 ? 1 : k[3] + k[4] <= 16 ? 2 : 4);
+            return (taps - 1) * k[1] + (k[3] + k[4] <= 8 ? 1 : k[3] + k[4] <= 16 ? 2 : 4);
         }
 
         bool windowed(int c) const {
             return !l.bits && !(c == 0 && l.luma[0]) && l.components[c][1] <= 8;
         }
 
-        void run(int c, Node* row, Node* left, Node* (&out)[lanczosTaps]) {
+        void run(int c, Node* row, Node* left, int taps, Node* (&out)[maxTaps]) {
             int step = l.components[c][1];
             int first = start(c);
             Node* byte = g.add(g.mul(left, step), first);
             Node* index = g.add(row, g.shr(byte, 2));
             bool known = step % 4 == 0;
-            int count = ((known ? first % 4 : 3) + span(c) + 3) / 4;
-            Node* words[16];
+            int count = ((known ? first % 4 : 3) + span(c, taps) + 3) / 4;
+            Node* words[20];
 
             for (int i = 0; i < count; i++) {
                 words[i] = g.load(g.add(index, i));
@@ -1094,43 +1134,45 @@ namespace {
                 first = 0;
             }
 
-            for (int m = 0; m < lanczosTaps; m++) {
+            for (int m = 0; m < taps; m++) {
                 int at = (known ? first % 4 : 0) + m * step;
 
                 out[m] = value(c, g.shr(words[at / 4], 8 * (at % 4)));
             }
         }
 
-        void fold(Node* origin, Node* left, Node* const (&w)[lanczosTaps], Node* (&v)[lanczosTaps]) {
-            Node* d = g.sub(origin, g.convert(left, Kind::Int));
-            Node* prefix[lanczosTaps];
-            Node* suffix[lanczosTaps];
+        void fold(const Axis& a, Node* left, Node* (&v)[maxTaps]) {
+            int taps = a.taps;
+            int half = taps / 2;
+            Node* d = g.sub(a.origin, g.convert(left, Kind::Int));
+            Node* prefix[maxTaps];
+            Node* suffix[maxTaps];
 
-            prefix[0] = w[0];
-            suffix[lanczosTaps - 1] = w[lanczosTaps - 1];
+            prefix[0] = a.w[0];
+            suffix[taps - 1] = a.w[taps - 1];
 
-            for (int k = 1; k < lanczosTaps; k++) {
-                prefix[k] = g.add(prefix[k - 1], w[k]);
-                suffix[lanczosTaps - 1 - k] = g.add(suffix[lanczosTaps - k], w[lanczosTaps - 1 - k]);
+            for (int k = 1; k < taps; k++) {
+                prefix[k] = g.add(prefix[k - 1], a.w[k]);
+                suffix[taps - 1 - k] = g.add(suffix[taps - k], a.w[taps - 1 - k]);
             }
 
-            for (int m = 0; m < lanczosTaps; m++) {
-                Node* folded = w[m];
+            for (int m = 0; m < taps; m++) {
+                Node* folded = a.w[m];
 
-                for (int e = -lanczosRadius; e <= lanczosRadius; e++) {
+                for (int e = -half; e <= half; e++) {
                     int k = m + e;
-                    Node* moved = k >= 0 && k < lanczosTaps ? w[k] : g.f(0.);
+                    Node* moved = k >= 0 && k < taps ? a.w[k] : g.f(0.);
 
                     if (e == 0) {
                         continue;
                     }
 
                     if (e > 0 && m == 0) {
-                        moved = prefix[e];
+                        moved = prefix[e < taps ? e : taps - 1];
                     }
 
-                    if (e < 0 && m == lanczosTaps - 1) {
-                        moved = suffix[lanczosTaps - 1 + e];
+                    if (e < 0 && m == taps - 1) {
+                        moved = suffix[taps - 1 + e > 0 ? taps - 1 + e : 0];
                     }
 
                     folded = g.select(g.eq(d, -e), moved, folded);
@@ -1140,25 +1182,20 @@ namespace {
             }
         }
 
-        void lanczos(Node* const (&at)[2], Node* const (&extent)[2], const int* members, int count, Node* (&slots)[4]) {
-            Node* base[2];
-            Node* w[2][lanczosTaps];
-            bool whole = extent[0]->value >= lanczosTaps;
-
-            for (int i = 0; i < 2; i++) {
-                lanczosAxis(at[i], base[i], w[i]);
-            }
+        void filtered(Node* const (&at)[2], Node* const (&extent)[2], const double (&ratio)[2], bool sharp, const int* members, int count, Node* (&slots)[4]) {
+            Axis a[2] = {axis(at[0], ratio[0], sharp), axis(at[1], ratio[1], sharp)};
+            int taps = a[0].taps;
+            bool whole = extent[0]->value >= taps;
 
             for (int m = 0; m < count; m++) {
                 whole = whole && windowed(members[m]);
             }
 
-            Node* origin = g.add(base[0], -(lanczosRadius - 1));
-            Node* left = g.convert(g.clamp(origin, 0, extent[0]->value - lanczosTaps), Kind::Uint);
-            Node* v[lanczosTaps];
+            Node* left = g.convert(g.clamp(a[0].origin, 0, extent[0]->value - taps), Kind::Uint);
+            Node* v[maxTaps];
 
             if (whole) {
-                fold(origin, left, w[0], v);
+                fold(a[0], left, v);
             }
 
             for (int m = 0; m < count; m++) {
@@ -1166,28 +1203,28 @@ namespace {
                 int plane = l.components[c][0];
                 Node* offset = g.u(s.planeOffset[plane]);
                 Node* line = g.u(s.lineSize[plane]);
-                Node* columns[lanczosTaps];
+                Node* columns[maxTaps];
                 Node* total = g.f(0.);
 
-                for (int k = 0; k < lanczosTaps && !whole; k++) {
-                    columns[k] = g.convert(g.clamp(g.add(base[0], k - (lanczosRadius - 1)), 0, g.sub(g.convert(extent[0], Kind::Int), 1)), Kind::Uint);
+                for (int k = 0; k < taps && !whole; k++) {
+                    columns[k] = g.convert(g.clamp(g.add(a[0].origin, k), 0, g.sub(g.convert(extent[0], Kind::Int), 1)), Kind::Uint);
                 }
 
-                for (int j = 0; j < lanczosTaps; j++) {
-                    Node* y = g.convert(g.clamp(g.add(base[1], j - (lanczosRadius - 1)), 0, g.sub(g.convert(extent[1], Kind::Int), 1)), Kind::Uint);
+                for (int j = 0; j < a[1].taps; j++) {
+                    Node* y = g.convert(g.clamp(g.add(a[1].origin, j), 0, g.sub(g.convert(extent[1], Kind::Int), 1)), Kind::Uint);
                     Node* row = g.shr(g.add(offset, g.mul(y, line)), 2);
-                    Node* samples[lanczosTaps];
+                    Node* samples[maxTaps];
                     Node* sum = g.f(0.);
 
                     if (whole) {
-                        run(c, row, left, samples);
+                        run(c, row, left, taps, samples);
                     }
 
-                    for (int k = 0; k < lanczosTaps; k++) {
-                        sum = g.add(sum, g.mul(whole ? v[k] : w[0][k], whole ? samples[k] : value(c, window(c, row, columns[k]))));
+                    for (int k = 0; k < taps; k++) {
+                        sum = g.add(sum, g.mul(whole ? v[k] : a[0].w[k], whole ? samples[k] : value(c, window(c, row, columns[k]))));
                     }
 
-                    total = g.add(total, g.mul(w[1][j], sum));
+                    total = g.add(total, g.mul(a[1].w[j], sum));
                 }
 
                 slots[l.alpha && c == l.count - 1 ? 3 : c] = total;
@@ -1361,11 +1398,14 @@ namespace {
                 fail(StringView(u8"a video shader has an unknown filter"));
             }
 
+            double ratio[2] = {(double)s.target[0] / s.size[0], (double)s.target[1] / s.size[1]};
+            bool shaped = sharp || ratio[0] < 1. || ratio[1] < 1.;
+
             if (!model("yuv")) {
                 const int members[4] = {0, 1, 2, 3};
 
-                if (sharp) {
-                    lanczos(at, extent, members, l.count, out);
+                if (shaped) {
+                    filtered(at, extent, ratio, sharp, members, l.count, out);
                 } else {
                     grid(at, extent, members, l.count, out);
                 }
@@ -1379,9 +1419,11 @@ namespace {
             Node* chromaExtent[2] = {g.u(s.size[2]), g.u(s.size[3])};
             Node* sampled[4] = {g.f(0.), g.f(0.), g.f(0.), g.f(0.)};
 
-            if (sharp) {
-                lanczos(at, extent, luma, l.alpha ? 2 : 1, out);
-                lanczos(chromaAt, chromaExtent, chroma, 2, sampled);
+            double chromaRatio[2] = {(double)s.target[0] / s.size[2], (double)s.target[1] / s.size[3]};
+
+            if (shaped) {
+                filtered(at, extent, ratio, sharp, luma, l.alpha ? 2 : 1, out);
+                filtered(chromaAt, chromaExtent, chromaRatio, sharp, chroma, 2, sampled);
             } else {
                 grid(at, extent, luma, l.alpha ? 2 : 1, out);
                 grid(chromaAt, chromaExtent, chroma, 2, sampled);
