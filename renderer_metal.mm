@@ -79,6 +79,7 @@ namespace {
         ~MetalImage() noexcept;
         void prepare() override;
         void draw(ImDrawList& list, ImVec2 lo, ImVec2 hi) override;
+        void underlay(ImVec2 lo, ImVec2 hi) override;
         void read(int x0, int y0, int x1, int y1, ImagePixels& out) override;
         void shadeWith(RenderShader& with) override;
         void readShaded(int x0, int y0, int x1, int y1, ImagePixels& out);
@@ -102,6 +103,7 @@ namespace {
         CAMetalDisplayLink* displayLink = nil;
         ImMetalDisplayTarget* target = nil;
         Vector<MetalImage*> drawn;
+        Vector<ImageDraw> underlays;
         SmallObjAllocator* smallObjects = nullptr;
         Channel* landed = nullptr;
         bool waiting = false;
@@ -137,6 +139,8 @@ namespace {
         void drawHdr(ImDrawData& draw);
         bool clip(const ImDrawCmd& command);
         void drawImage(const ImageDraw& image, const ImDrawCmd& command);
+        void drawShaded(const ImageDraw& image);
+        void drawUnderlays(ImDrawData& draw);
     };
 
     static void checkCommand(id<MTLCommandBuffer> command) {
@@ -279,6 +283,14 @@ void MetalImage::shadeWith(RenderShader& with) {
     shader = static_cast<MetalShader*>(&with);
 }
 
+void MetalImage::underlay(ImVec2 lo, ImVec2 hi) {
+    if (!shader) {
+        fail(StringView(u8"only a shaded image goes under the interface"));
+    }
+    renderer->drawn.pushBack(this);
+    renderer->underlays.pushBack(ImageDraw{this, lo, hi});
+}
+
 void MetalImage::draw(ImDrawList& list, ImVec2 lo, ImVec2 hi) {
     renderer->drawn.pushBack(this);
     if (hdr || shader) {
@@ -416,6 +428,24 @@ void MetalRenderer::drawImage(const ImageDraw& image, const ImDrawCmd& command) 
     if (!clip(command)) {
         return;
     }
+    drawShaded(image);
+}
+
+void MetalRenderer::drawUnderlays(ImDrawData& draw) {
+    if (underlays.empty()) {
+        return;
+    }
+    drawing = &draw;
+    [encoder setViewport:MTLViewport{0, 0, (double)drawable.texture.width, (double)drawable.texture.height, 0, 1}];
+    [encoder setScissorRect:MTLScissorRect{0, 0, drawable.texture.width, drawable.texture.height}];
+    for (const ImageDraw& image : underlays) {
+        drawShaded(image);
+    }
+    underlays.clear();
+    drawing = nullptr;
+}
+
+void MetalRenderer::drawShaded(const ImageDraw& image) {
     float transform[] = {2.f / drawing->DisplaySize.x, -2.f / drawing->DisplaySize.y, -1.f - 2.f * drawing->DisplayPos.x / drawing->DisplaySize.x, 1.f + 2.f * drawing->DisplayPos.y / drawing->DisplaySize.y};
     float rect[] = {image.lo.x, image.lo.y, image.hi.x, image.hi.y};
     [encoder setVertexBytes:transform length:sizeof(transform) atIndex:0];
@@ -577,6 +607,7 @@ bool MetalRenderer::endFrame(ImDrawData* draw) {
         if (!encoder) {
             fail(StringView(u8"cannot begin Metal frame"));
         }
+        drawUnderlays(*draw);
         if (hdr) {
             drawHdr(*draw);
         } else {

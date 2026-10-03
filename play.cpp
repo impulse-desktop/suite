@@ -1905,7 +1905,7 @@ void Screen::draw() {
     ImGui::SetNextWindowPos(vp->Pos);
     ImGui::SetNextWindowSize(vp->Size);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-    ImGui::Begin("##play", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoSavedSettings);
+    ImGui::Begin("##play", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBackground);
     ImGui::PopStyleVar();
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -1913,8 +1913,9 @@ void Screen::draw() {
     ImVec2 hi(vp->Pos.x + vp->Size.x, vp->Pos.y + vp->Size.y - bar);
     float width = hi.x - lo.x;
     float height = hi.y - lo.y;
+    ImU32 black = IM_COL32(0, 0, 0, 255);
 
-    dl->AddRectFilled(lo, hi, IM_COL32(0, 0, 0, 255));
+    dl->AddRectFilled(ImVec2(lo.x, hi.y), ImVec2(hi.x, vp->Pos.y + vp->Size.y), ImGui::GetColorU32(ImGuiCol_WindowBg));
 
     if (shown && width >= 1.f && height >= 1.f) {
         float aspect = (float)shown->aspect;
@@ -1942,9 +1943,15 @@ void Screen::draw() {
         }
 
         image->draws++;
-        image->render->draw(*dl, p0, p1);
+        image->render->underlay(p0, p1);
+        dl->AddRectFilled(lo, ImVec2(hi.x, p0.y), black);
+        dl->AddRectFilled(ImVec2(lo.x, p1.y), hi, black);
+        dl->AddRectFilled(ImVec2(lo.x, p0.y), ImVec2(p0.x, p1.y), black);
+        dl->AddRectFilled(ImVec2(p1.x, p0.y), ImVec2(hi.x, p1.y), black);
     } else {
         const char* text = hasVideo ? "opening" : "no video";
+
+        dl->AddRectFilled(lo, hi, black);
         ImVec2 extent = ImGui::CalcTextSize(text);
 
         dl->AddText(ImVec2(lo.x + (width - extent.x) / 2.f, lo.y + (height - extent.y) / 2.f), ImGui::GetColorU32(ImGuiCol_TextDisabled), text);

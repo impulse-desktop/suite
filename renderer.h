@@ -50,6 +50,7 @@ struct RenderImage {
     // before transferring the image to the UI through a Channel.
     virtual void prepare() = 0;
     virtual void draw(ImDrawList& list, ImVec2 lo, ImVec2 hi) = 0;
+    virtual void underlay(ImVec2 lo, ImVec2 hi) = 0;
     virtual void read(int x0, int y0, int x1, int y1, ImagePixels& out) = 0;
     virtual void shadeWith(RenderShader& shader) = 0;
 };

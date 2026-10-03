@@ -112,6 +112,15 @@ namespace {
         void ready() override;
     };
 
+    struct ImageDraw {
+        Gpu* gpu;
+        VkPipeline pipeline;
+        VkPipelineLayout layout;
+        VkDescriptorSet texture;
+        float x0, y0, x1, y1;
+        float sdrWhiteNits;
+    };
+
     struct Gpu {
         VulkanChaos* chaos = nullptr;
 
@@ -129,6 +138,7 @@ namespace {
         SmallObjAllocator* smallObjects = nullptr;
         PFN_vkGetFenceFdKHR fenceFd = nullptr;
         Vector<VulkanImage*> drawn;
+        Vector<ImageDraw> underlays;
         u64 submitted = 0;
         u64 completed = 0;
         bool acquired = false;
@@ -178,6 +188,7 @@ namespace {
         void track(VkFence fence);
         void landed(Flight* flight);
         void recordImages(VkCommandBuffer command);
+        void recordUnderlays(VkCommandBuffer command, const ImDrawData& draw);
         VkShaderModule shaderModule(const u32* code, size_t bytes);
         VkPipeline vertexlessPipeline(const u32* vertCode, size_t vertBytes, const u32* fragCode, size_t fragBytes, VkPipelineLayout layout, VkRenderPass pass);
         void frameRender(ImDrawData* draw);
@@ -196,16 +207,8 @@ namespace {
         void destroyLinearHdr();
     };
 
-    struct ImageDraw {
-        Gpu* gpu;
-        VkPipeline pipeline;
-        VkPipelineLayout layout;
-        VkDescriptorSet texture;
-        float x0, y0, x1, y1;
-        float sdrWhiteNits;
-    };
-
     static void drawImage(const ImDrawList*, const ImDrawCmd* cmd);
+    static void recordDraw(VkCommandBuffer command, const ImageDraw& draw, const ImDrawData& data, VkRect2D scissor);
 }
 #ifdef IM_FOR_TESTS
 namespace {
@@ -980,6 +983,19 @@ bool Gpu::acquireFrame() {
     return true;
 }
 
+void Gpu::recordUnderlays(VkCommandBuffer command, const ImDrawData& draw) {
+    VkViewport viewport{0, 0, (float)present.width, (float)present.height, 0, 1};
+    VkRect2D scissor{{0, 0}, {(u32)present.width, (u32)present.height}};
+
+    if (!underlays.empty()) {
+        vkCmdSetViewport(command, 0, 1, &viewport);
+    }
+    for (const ImageDraw& image : underlays) {
+        recordDraw(command, image, draw, scissor);
+    }
+    underlays.clear();
+}
+
 void Gpu::frameRender(ImDrawData* draw) {
     Sync& sync = present.syncs.mut(present.syncIndex);
     Frame& fd = present.frames.mut(present.frameIndex);
@@ -1006,6 +1022,7 @@ void Gpu::frameRender(ImDrawData* draw) {
         rp.framebuffer = sceneFramebuffer;
         rp.pClearValues = &sceneClear;
         vkCmdBeginRenderPass(fd.commandBuffer, &rp, VK_SUBPASS_CONTENTS_INLINE);
+        recordUnderlays(fd.commandBuffer, *draw);
         ImGui_ImplVulkan_RenderDrawData(draw, fd.commandBuffer);
         vkCmdEndRenderPass(fd.commandBuffer);
 
@@ -1030,6 +1047,7 @@ void Gpu::frameRender(ImDrawData* draw) {
         rp.renderPass = present.renderPass;
         rp.framebuffer = fd.framebuffer;
         vkCmdBeginRenderPass(fd.commandBuffer, &rp, VK_SUBPASS_CONTENTS_INLINE);
+        recordUnderlays(fd.commandBuffer, *draw);
         ImGui_ImplVulkan_RenderDrawData(draw, fd.commandBuffer);
         vkCmdEndRenderPass(fd.commandBuffer);
     }
@@ -1691,6 +1709,26 @@ void Gpu::destroyTexture(Texture& tex) {
 }
 
 namespace {
+    static void recordDraw(VkCommandBuffer command, const ImageDraw& draw, const ImDrawData& data, VkRect2D scissor) {
+        vkCmdSetScissor(command, 0, 1, &scissor);
+        vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.pipeline);
+        vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.layout, 0, 1, &draw.texture, 0, nullptr);
+
+        ImagePush push;
+
+        push.scale[0] = 2.f / data.DisplaySize.x;
+        push.scale[1] = 2.f / data.DisplaySize.y;
+        push.translate[0] = -1.f - data.DisplayPos.x * push.scale[0];
+        push.translate[1] = -1.f - data.DisplayPos.y * push.scale[1];
+        push.rect[0] = draw.x0;
+        push.rect[1] = draw.y0;
+        push.rect[2] = draw.x1;
+        push.rect[3] = draw.y1;
+        push.sdrWhiteNits = draw.sdrWhiteNits;
+        vkCmdPushConstants(command, draw.layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
+        vkCmdDraw(command, 6, 1, 0, 0);
+    }
+
     static void drawImage(const ImDrawList*, const ImDrawCmd* cmd) {
         const ImageDraw& draw = *(const ImageDraw*)cmd->UserCallbackData;
         auto* state = (ImGui_ImplVulkan_RenderState*)ImGui::GetPlatformIO().Renderer_RenderState;
@@ -1709,23 +1747,7 @@ namespace {
 
         VkRect2D scissor{{(i32)clipX0, (i32)clipY0}, {(u32)(clipX1 - clipX0), (u32)(clipY1 - clipY0)}};
 
-        vkCmdSetScissor(state->CommandBuffer, 0, 1, &scissor);
-        vkCmdBindPipeline(state->CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.pipeline);
-        vkCmdBindDescriptorSets(state->CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.layout, 0, 1, &draw.texture, 0, nullptr);
-
-        ImagePush push;
-
-        push.scale[0] = 2.f / dd->DisplaySize.x;
-        push.scale[1] = 2.f / dd->DisplaySize.y;
-        push.translate[0] = -1.f - dd->DisplayPos.x * push.scale[0];
-        push.translate[1] = -1.f - dd->DisplayPos.y * push.scale[1];
-        push.rect[0] = draw.x0;
-        push.rect[1] = draw.y0;
-        push.rect[2] = draw.x1;
-        push.rect[3] = draw.y1;
-        push.sdrWhiteNits = draw.sdrWhiteNits;
-        vkCmdPushConstants(state->CommandBuffer, draw.layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
-        vkCmdDraw(state->CommandBuffer, 6, 1, 0, 0);
+        recordDraw(state->CommandBuffer, draw, *dd, scissor);
     }
 }
 
@@ -1841,6 +1863,7 @@ namespace {
         void record(VkCommandBuffer command);
         void readShaded(int x0, int y0, int x1, int y1, ImagePixels& out);
         void draw(ImDrawList& list, ImVec2 lo, ImVec2 hi) override;
+        void underlay(ImVec2 lo, ImVec2 hi) override;
         void read(int x0, int y0, int x1, int y1, ImagePixels& out) override;
         void shadeWith(RenderShader& with) override;
     };
@@ -2175,6 +2198,14 @@ void VulkanImage::shadeWith(RenderShader& with) {
         fail(StringView(u8"only a shaded image takes another shader"));
     }
     shader = static_cast<VulkanShader*>(&with);
+}
+
+void VulkanImage::underlay(ImVec2 lo, ImVec2 hi) {
+    if (!shader) {
+        fail(StringView(u8"only a shaded image goes under the interface"));
+    }
+    gpu->drawn.pushBack(this);
+    gpu->underlays.pushBack(ImageDraw{gpu, shader->pipeline, gpu->shadePipelineLayout, shadeSet, lo.x, lo.y, hi.x, hi.y, gpu->sdrWhiteNits});
 }
 
 void VulkanImage::draw(ImDrawList& list, ImVec2 lo, ImVec2 hi) {
