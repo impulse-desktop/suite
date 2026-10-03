@@ -773,6 +773,8 @@ VideoShader FormatCheck::describe(const AVFrame* frame, const char* output) {
     out.size[1] = (u32)frame->height;
     out.size[2] = (u32)AV_CEIL_RSHIFT(frame->width, shiftX);
     out.size[3] = (u32)AV_CEIL_RSHIFT(frame->height, shiftY);
+    out.target[0] = (u32)frame->width;
+    out.target[1] = (u32)frame->height;
     out.chroma[0] = exp2(-shiftX);
     out.chroma[1] = exp2(-shiftY);
     out.chroma[2] = within(kase.location, 0) * (exp2(shiftX) - 1.) * exp2(-shiftX);

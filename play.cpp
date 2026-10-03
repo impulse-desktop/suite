@@ -49,6 +49,7 @@ namespace {
     constexpr Design buttonWidth = 72_d;
     constexpr size_t framePermits = 10;
     constexpr size_t planeAlignment = 64;
+    constexpr size_t shaderBudget = 1 << 20;
     constexpr size_t channelCapacity = 1024;
     constexpr size_t threadStack = 8u << 20;
     constexpr size_t controllerStack = 8u << 20;
@@ -91,6 +92,7 @@ namespace {
         AVFrame* frame;
         ObjPool* pool = nullptr;
         RenderImage* render = nullptr;
+        VideoShader facts;
         u32 draws = 0;
 
         explicit VideoImage(Player* player);
@@ -100,7 +102,10 @@ namespace {
 
     struct CompiledShader {
         VideoShader facts;
+        ObjPool* pool;
         RenderShader* shader;
+        size_t bytes;
+        u64 used;
     };
 
     struct Control final: public Typed<Kind::Control> {
@@ -250,6 +255,10 @@ namespace {
         double duration;
         const char* output = "sdr";
         Vector<CompiledShader> compiled;
+        size_t compiledBytes = 0;
+        u64 compiledClock = 0;
+        u32 targetWidth = 0;
+        u32 targetHeight = 0;
         int shownWidth = 0;
         int shownHeight = 0;
         int shownFormat = AV_PIX_FMT_NONE;
@@ -655,6 +664,8 @@ namespace {
         out.size[1] = (u32)frame->height;
         out.size[2] = (u32)AV_CEIL_RSHIFT(frame->width, shiftX);
         out.size[3] = (u32)AV_CEIL_RSHIFT(frame->height, shiftY);
+        out.target[0] = (u32)frame->width;
+        out.target[1] = (u32)frame->height;
         out.chroma[0] = exp2(-shiftX);
         out.chroma[1] = exp2(-shiftY);
         out.chroma[2] = location->site[0] * (exp2(shiftX) - 1.) * exp2(-shiftX);
@@ -1487,6 +1498,10 @@ Screen::~Screen() noexcept {
     }
 
     delete shown;
+
+    for (const CompiledShader& known : compiled) {
+        delete known.pool;
+    }
 }
 
 void Screen::run() {
@@ -1700,8 +1715,14 @@ void Screen::makeRender(VideoImage* image) {
         player->ui->trace(StringView(StringBuilder() << StringView(u8"video ") << (i64)frame->width << StringView(u8"x") << (i64)frame->height << StringView(u8" ") << StringView(av_get_pix_fmt_name((AVPixelFormat)frame->format))));
     }
 
-    VideoShader shading = describeFrame(frame, output, RendererOptions{}.sdrWhiteNits);
-    RenderShader& shader = shaderFor(shading);
+    image->facts = describeFrame(frame, output, RendererOptions{}.sdrWhiteNits);
+
+    if (targetWidth) {
+        image->facts.target[0] = targetWidth;
+        image->facts.target[1] = targetHeight;
+    }
+
+    RenderShader& shader = shaderFor(image->facts);
     ScopedPtr<ObjPool> owner{ObjPool::fromMemoryRaw()};
 
     image->render = player->ui->shadeImage(*owner.ptr, shader, (u32)frame->width, (u32)frame->height, frame->buf[0]->data, frame->buf[0]->size, *image);
@@ -1711,18 +1732,41 @@ void Screen::makeRender(VideoImage* image) {
 }
 
 RenderShader& Screen::shaderFor(const VideoShader& facts) {
-    for (const CompiledShader& known : compiled) {
-        if (!memcmp(&known.facts, &facts, sizeof(facts))) {
-            return *known.shader;
+    compiledClock++;
+
+    for (size_t i = 0; i < compiled.length(); i++) {
+        if (!memcmp(&compiled[i].facts, &facts, sizeof(facts))) {
+            compiled.mut(i).used = compiledClock;
+
+            return *compiled[i].shader;
         }
     }
 
+    u64 start = monotonicNowUs();
     ScopedPtr<ObjPool> scratch{ObjPool::fromMemoryRaw()};
     StringView code = compile(*scratch.ptr, facts);
-    RenderShader* shader = player->ui->compileShader(*player->pool, code.data(), code.length());
+    u64 built = monotonicNowUs();
+    ScopedPtr<ObjPool> owner{ObjPool::fromMemoryRaw()};
+    RenderShader* shader = player->ui->compileShader(*owner.ptr, code.data(), code.length());
+    u64 done = monotonicNowUs();
 
-    compiled.pushBack(CompiledShader{facts, shader});
-    player->ui->trace(StringView(StringBuilder() << StringView(u8"compiled video shader ") << StringView(facts.layout->name) << StringView(u8" ") << StringView(facts.system) << StringView(u8" ") << StringView(facts.transfer) << StringView(u8" ") << StringView(facts.conversion) << StringView(u8" ") << StringView(facts.output)));
+    while (!compiled.empty() && compiledBytes + code.length() > shaderBudget) {
+        size_t oldest = 0;
+
+        for (size_t i = 1; i < compiled.length(); i++) {
+            oldest = compiled[i].used < compiled[oldest].used ? i : oldest;
+        }
+
+        compiledBytes -= compiled[oldest].bytes;
+        delete compiled[oldest].pool;
+        compiled.mut(oldest) = compiled.back();
+        compiled.popBack();
+    }
+
+    compiled.pushBack(CompiledShader{facts, owner.ptr, shader, code.length(), compiledClock});
+    compiledBytes += code.length();
+    owner.drop();
+    player->ui->trace(StringView(StringBuilder() << StringView(u8"compiled video shader ") << StringView(facts.layout->name) << StringView(u8" ") << StringView(facts.system) << StringView(u8" ") << StringView(facts.transfer) << StringView(u8" ") << StringView(facts.conversion) << StringView(u8" ") << StringView(facts.output) << StringView(u8" ") << (u64)facts.target[0] << StringView(u8"x") << (u64)facts.target[1] << StringView(u8" compile_us=") << (built - start) << StringView(u8" driver_us=") << (done - built)));
 
     return *shader;
 }
@@ -1874,9 +1918,20 @@ void Screen::draw() {
         }
 
         ImVec2 p0(floorf(lo.x + (width - w) / 2.f), floorf(lo.y + (height - h) / 2.f));
+        ImVec2 p1(p0.x + fmaxf(floorf(w), 1.f), p0.y + fmaxf(floorf(h), 1.f));
+        VideoImage* image = shown->image;
 
-        shown->image->draws++;
-        shown->image->render->draw(*dl, p0, ImVec2(p0.x + floorf(w), p0.y + floorf(h)));
+        targetWidth = (u32)(p1.x - p0.x);
+        targetHeight = (u32)(p1.y - p0.y);
+
+        if (image->facts.target[0] != targetWidth || image->facts.target[1] != targetHeight) {
+            image->facts.target[0] = targetWidth;
+            image->facts.target[1] = targetHeight;
+            image->render->shadeWith(shaderFor(image->facts));
+        }
+
+        image->draws++;
+        image->render->draw(*dl, p0, p1);
     } else {
         const char* text = hasVideo ? "opening" : "no video";
         ImVec2 extent = ImGui::CalcTextSize(text);

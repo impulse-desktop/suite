@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define CHECK(x) do { VkResult r_ = (x); if (r_ != VK_SUCCESS) { fprintf(stderr, "%s failed: %d\n", #x, r_); exit(1); } } while (0)
 
@@ -71,15 +72,27 @@ static Buffer makeBuffer(VkDeviceSize size, VkBufferUsageFlags usage) {
     return b;
 }
 
-static VkShaderModule module(const char* path) {
-    size_t size;
-    uint32_t* code = readFile(path, &size);
+static VkShaderModule moduleOf(const uint32_t* code, size_t size) {
     VkShaderModuleCreateInfo info = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
     info.codeSize = size;
     info.pCode = code;
     VkShaderModule m;
     CHECK(vkCreateShaderModule(device, &info, NULL, &m));
     return m;
+}
+
+static VkShaderModule module(const char* path) {
+    size_t size;
+    uint32_t* code = readFile(path, &size);
+    VkShaderModule m = moduleOf(code, size);
+    free(code);
+    return m;
+}
+
+static double seconds(void) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (double)now.tv_sec + now.tv_nsec / 1e9;
 }
 
 static Target makeTarget(VkFormat format, uint32_t width, uint32_t height, int readable) {
@@ -296,7 +309,14 @@ static double run(VkPipeline pipeline, VkDescriptorSet set, const Target* t, uin
 }
 
 typedef struct {
+    uint32_t width, height;
+    Target check;
+    Target timing[2];
+} Size;
+
+typedef struct {
     const char* directory;
+    Size* size;
     VkShaderModule shaders[2];
     Buffer bytes;
     Buffer uniforms[2];
@@ -310,6 +330,42 @@ static char* joined(const char* directory, const char* name) {
     char* path = malloc(length);
     snprintf(path, length, "%s/%s", directory, name);
     return path;
+}
+
+static Size sizes[16];
+static int sizeCount;
+
+static Size* sizeOf(uint32_t width, uint32_t height) {
+    for (int i = 0; i < sizeCount; i++)
+        if (sizes[i].width == width && sizes[i].height == height) return &sizes[i];
+    if (sizeCount == 16) {
+        fprintf(stderr, "too many target sizes\n");
+        exit(1);
+    }
+    Size* s = &sizes[sizeCount++];
+    s->width = width;
+    s->height = height;
+    s->check = makeTarget(VK_FORMAT_R32G32B32A32_SFLOAT, width, height, 1);
+    s->timing[0] = makeTarget(VK_FORMAT_R8_UNORM, width, height, 0);
+    s->timing[1] = makeTarget(VK_FORMAT_R16G16B16A16_SFLOAT, width, height, 0);
+    return s;
+}
+
+static double buildTime(const char* path, const Target* t) {
+    size_t size;
+    uint32_t* code = readFile(path, &size);
+    double best = 1e30;
+    for (int i = 0; i < 5; i++) {
+        double start = seconds();
+        VkShaderModule fragment = moduleOf(code, size);
+        VkPipeline pipeline = makePipeline(fragment, t, 0);
+        double spent = seconds() - start;
+        if (spent < best) best = spent;
+        vkDestroyPipeline(device, pipeline, NULL);
+        vkDestroyShaderModule(device, fragment, NULL);
+    }
+    free(code);
+    return best;
 }
 
 int main(int argc, char** argv) {
@@ -366,15 +422,30 @@ int main(int argc, char** argv) {
 
     const char* labels[2] = {"optimum", "template"};
     const char* names[2] = {"r8", "rgba16f"};
-    Target check = makeTarget(VK_FORMAT_R32G32B32A32_SFLOAT, 960, 540, 1);
-    Target targets[2] = {makeTarget(VK_FORMAT_R8_UNORM, 3840, 2160, 0), makeTarget(VK_FORMAT_R16G16B16A16_SFLOAT, 3840, 2160, 0)};
-    Buffer pixels[2];
-    for (int k = 0; k < 2; k++)
-        pixels[k] = makeBuffer((VkDeviceSize)check.width * check.height * 16, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
     Case* cases = calloc(count, sizeof(Case));
+    VkDeviceSize largest = 0;
     for (int i = 0; i < count; i++) {
         Case* c = &cases[i];
         c->directory = argv[4 + i];
+        size_t length;
+        char* text = readFile(joined(c->directory, "size"), &length);
+        text[length] = 0;
+        unsigned width, height;
+        if (sscanf(text, "%u %u", &width, &height) != 2) {
+            fprintf(stderr, "%s: no target size\n", c->directory);
+            return 1;
+        }
+        free(text);
+        c->size = sizeOf(width, height);
+        if ((VkDeviceSize)width * height * 16 > largest) largest = (VkDeviceSize)width * height * 16;
+    }
+    Buffer pixels[2];
+    for (int k = 0; k < 2; k++)
+        pixels[k] = makeBuffer(largest, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    for (int i = 0; i < count; i++) {
+        Case* c = &cases[i];
+        const Target* check = &c->size->check;
+        const Target* targets = c->size->timing;
         size_t dataSize;
         void* data = readFile(joined(c->directory, "data.bin"), &dataSize);
         c->bytes = makeBuffer(dataSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
@@ -392,18 +463,23 @@ int main(int argc, char** argv) {
             memcpy(c->uniforms[k].map, u, size);
             free(u);
             c->sets[k] = makeSet(&c->bytes, &c->uniforms[k]);
-            VkPipeline pipeline = makePipeline(c->shaders[k], &check, 0);
-            run(pipeline, c->sets[k], &check, 1, &pixels[k]);
+            VkPipeline pipeline = makePipeline(c->shaders[k], check, 0);
+            run(pipeline, c->sets[k], check, 1, &pixels[k]);
             vkDestroyPipeline(device, pipeline, NULL);
         }
         double worst = 0;
-        for (size_t p = 0; p < (size_t)check.width * check.height * 4; p++) {
+        for (size_t p = 0; p < (size_t)check->width * check->height * 4; p++) {
             double d = ((float*)pixels[0].map)[p] - ((float*)pixels[1].map)[p];
             d = d < 0 ? -d : d;
             if (d > worst) worst = d;
         }
         printf("case %s\n", c->directory);
         printf("difference %s %g\n", c->directory, worst);
+        for (int k = 0; k < 2; k++) {
+            char shader[32];
+            snprintf(shader, sizeof(shader), "%s.spv", labels[k]);
+            printf("build %s %s %.3f\n", c->directory, labels[k], buildTime(joined(c->directory, shader), &targets[1]) * 1e3);
+        }
         for (int k = 0; k < 2; k++) {
             VkPipeline statistics = makePipeline(c->shaders[k], &targets[0], 1);
             printf("%s ", c->directory);
@@ -424,7 +500,7 @@ int main(int argc, char** argv) {
         for (int i = 0; i < count; i++)
             for (int t = 0; t < 2; t++)
                 for (int k = 0; k < 2; k++) {
-                    double ns = run(cases[i].pipelines[t][k], cases[i].sets[k], &targets[t], draws, NULL);
+                    double ns = run(cases[i].pipelines[t][k], cases[i].sets[k], &cases[i].size->timing[t], draws, NULL);
                     if (ns < cases[i].best[t][k]) cases[i].best[t][k] = ns;
                 }
     for (int i = 0; i < count; i++)

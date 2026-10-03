@@ -1802,6 +1802,7 @@ namespace {
         Buffer code;
         VkPipeline pipeline = VK_NULL_HANDLE;
         VkPipeline readPipeline = VK_NULL_HANDLE;
+        u64 lastUse = 0;
 
         ~VulkanShader() noexcept;
     };
@@ -1840,6 +1841,7 @@ namespace {
         void readShaded(int x0, int y0, int x1, int y1, ImagePixels& out);
         void draw(ImDrawList& list, ImVec2 lo, ImVec2 hi) override;
         void read(int x0, int y0, int x1, int y1, ImagePixels& out) override;
+        void shadeWith(RenderShader& with) override;
     };
 }
 
@@ -1913,6 +1915,9 @@ void Gpu::recordImages(VkCommandBuffer command) {
     for (VulkanImage* image : drawn) {
         image->record(command);
         image->lastUse = submitted + 1;
+        if (image->shader) {
+            image->shader->lastUse = submitted + 1;
+        }
     }
 }
 
@@ -2125,6 +2130,10 @@ VulkanImage::~VulkanImage() noexcept {
 }
 
 VulkanShader::~VulkanShader() noexcept {
+    if (lastUse > gpu->completed) {
+        vkDeviceWaitIdle(gpu->device);
+        gpu->completed = gpu->submitted;
+    }
     if (pipeline) {
         vkDestroyPipeline(gpu->device, pipeline, gpu->alloc);
     }
@@ -2158,6 +2167,13 @@ void VulkanImage::setupShade() {
     write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     write.pBufferInfo = &source;
     vkUpdateDescriptorSets(gpu->device, 1, &write, 0, nullptr);
+}
+
+void VulkanImage::shadeWith(RenderShader& with) {
+    if (!shader) {
+        fail(StringView(u8"only a shaded image takes another shader"));
+    }
+    shader = static_cast<VulkanShader*>(&with);
 }
 
 void VulkanImage::draw(ImDrawList& list, ImVec2 lo, ImVec2 hi) {

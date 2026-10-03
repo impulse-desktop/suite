@@ -2,6 +2,7 @@
 #include "shader.h"
 
 #include <std/ios/sys.h>
+#include <std/sys/crt.h>
 #include <std/str/view.h>
 #include <std/mem/obj_pool.h>
 
@@ -75,6 +76,7 @@ int main(int argc, char** argv) {
     numbers.words(shader.planeOffset, 4);
     numbers.words(shader.lineSize, 4);
     numbers.words(shader.size, 4);
+    numbers.words(shader.target, 2);
     numbers.numbers(shader.chroma, 4);
     numbers.numbers(&shader.decode[0][0], 9);
     numbers.numbers(shader.bias, 4);
@@ -91,6 +93,15 @@ int main(int argc, char** argv) {
         raiseError(StringView(u8"video_shader: too many numbers"));
     }
 
+    u64 start = monotonicNowUs();
+
+    for (int i = 0; i < 100; i++) {
+        ObjPool::Ref scratch = ObjPool::fromMemory();
+
+        compile(*scratch, shader);
+    }
+
+    sysE << StringView(u8"compile ") << (monotonicNowUs() - start) * 10 << StringView(u8" ns") << endL;
     sysO << compile(*owner, shader);
 
     return 0;

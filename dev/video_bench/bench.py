@@ -5,8 +5,9 @@
 Every case compiles its frame's facts into the player's video shader
 through shader.cpp (the video_shader program the build makes) and renders it
 and the hand-written shader dev/video_bench/hand/NAME.frag over the same
-random frame, checks that the two agree, and times both at 3840x2160 into R8 (arithmetic-bound) and
-RGBA16F (bandwidth-bound) targets. The cases are prepared by one process
+random frame, checks that the two agree at the case's output size, and
+times both there into R8 (arithmetic-bound) and RGBA16F (bandwidth-bound)
+targets. The cases are prepared by one process
 each, as many at once as there are cores; then one harness times them all
 on one device, a round over every case at a time, keeping each case's best.
 The table gives template/hand ratios and
@@ -33,7 +34,6 @@ sys.path.insert(0, str(SUITE / "gpu"))
 
 import video_shaders
 
-W, H = 1920, 1080
 WHITE = 203.0
 DRAWS = 200
 
@@ -68,8 +68,13 @@ CORPUS = [
     ("popular", "gbrp_srgb_sdr", "gbrp", (0, 0), 0, 2, 13, 1, 0, "sdr"),
     ("popular", "rgba64be_srgb_sdr", "rgba64be", (0, 0), 0, 2, 13, 1, 0, "sdr"),
     ("popular", "gray16be_srgb_sdr", "gray16be", (0, 0), 0, 2, 13, 1, 0, "sdr"),
+    ("scale", "yuv420p_bilinear_1.42", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (1920, 1080), (2731, 1536), "yuv420p_709_sdr"),
+    ("scale", "yuv420p_lanczos3_1.42", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (1920, 1080), (2731, 1536), "yuv420p_709_sdr_lanczos3"),
+    ("scale", "yuv420p_bilinear_1.46", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (1280, 720), (1867, 1050), "yuv420p_709_sdr"),
+    ("scale", "yuv420p_lanczos3_1.46", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (1280, 720), (1867, 1050), "yuv420p_709_sdr_lanczos3"),
 ]
-FIELDS = ("group", "name", "format", "subsampling", "matrix", "range", "transfer", "primaries", "location", "output")
+FIELDS = ("group", "name", "format", "subsampling", "matrix", "range", "transfer", "primaries", "location", "output", "source", "target", "hand")
+SIZES = {"source": (1920, 1080), "target": (3840, 2160)}
 
 MODULE = video_shaders.tables()
 LAYOUTS = video_shaders.layouts(MODULE)
@@ -91,6 +96,7 @@ def frame(case, layout, components):
     rng = random.Random(1)
     sx, sy = case["subsampling"]
     planes = 1 + max(component[0] for component in components)
+    W, H = case["source"]
     grids = [(W, H)] * 4
     if layout["model"] == "yuv":
         grids[1] = grids[2] = (-(-W >> sx), -(-H >> sy))
@@ -196,7 +202,8 @@ def facts(case, layout, components, offsets, lines):
     site = MODULE.locations[case["location"]]
     red = case["format"][6:].index("r") if model == "bayer" else 0
     system = matrix["system"] if yuv else model
-    words = [*offsets, *lines, W, H, -(-W >> sx), -(-H >> sy)]
+    W, H = case["source"]
+    words = [*offsets, *lines, W, H, -(-W >> sx), -(-H >> sy), *case["target"]]
     numbers = [2.0**-sx, 2.0**-sy, site[0] * ((1 << sx) - 1) * 2.0**-sx, site[1] * ((1 << sy) - 1) * 2.0**-sy]
     numbers += [value for row in decode for value in row] + bias + [red % 2, red // 2, kr, kb]
     numbers += curve + table(transfer.get("oetf")) + table(transfer.get("inverse"))
@@ -212,17 +219,24 @@ def prepare(case, directory, compiler):
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "data.bin").write_bytes(data)
     (directory / "template.ubo").write_bytes(bytes(16))
-    (directory / "template.spv").write_bytes(subprocess.run([compiler, *arguments], check=True, capture_output=True).stdout)
+    compiled = subprocess.run([compiler, *arguments], check=True, capture_output=True)
+    (directory / "template.spv").write_bytes(compiled.stdout)
+    (directory / "compile").write_text(re.search(r"compile (\d+) ns", compiled.stderr.decode()).group(1))
+    (directory / "size").write_text("%d %d" % case["target"])
     sx, sy = case["subsampling"]
+    W, H = case["source"]
     (directory / "optimum.ubo").write_bytes(struct.pack("<4I", *offsets) + struct.pack("<4I", *lines) + struct.pack("<4I", W, H, -(-W >> sx), -(-H >> sy)) + struct.pack("<4f", WHITE, 0, 0, 0))
-    (directory / "optimum.frag").write_text((HERE / "hand" / f"{case['name']}.frag").read_text())
+    (directory / "optimum.frag").write_text((HERE / "hand" / f"{case.get('hand', case['name'])}.frag").read_text())
     subprocess.run(["glslangValidator", "--quiet", "--target-env", "vulkan1.1", "-V", "-S", "frag", str(directory / "optimum.frag"), "-o", str(directory / "optimum.spv")], check=True)
     return "_".join((name, *arguments[1:5]))
 
 
 def measure(harness, vertex, directories, rounds):
-    text = subprocess.run([str(harness), str(vertex), str(DRAWS), str(rounds), *map(str, directories)], check=True, capture_output=True, text=True).stdout
-    results = {str(directory): {"times": {}, "stats": {}} for directory in directories}
+    quiet = dict(os.environ, RADV_DEBUG="nocache", MESA_SHADER_CACHE_DISABLE="true")
+    text = subprocess.run([str(harness), str(vertex), str(DRAWS), str(rounds), *map(str, directories)], check=True, capture_output=True, text=True, env=quiet).stdout
+    results = {str(directory): {"times": {}, "stats": {}, "build": {}} for directory in directories}
+    for directory, shader, value in re.findall(r"^build (\S+) (\w+) ([\d.]+)$", text, re.M):
+        results[directory]["build"][shader] = float(value)
     for directory, value in re.findall(r"^difference (\S+) (\S+)$", text, re.M):
         results[directory]["difference"] = float(value)
     for directory, shader, rest in re.findall(r"^(\S+) stats (\w+) (.*)$", text, re.M):
@@ -245,7 +259,7 @@ def main():
     parser.add_argument("cases", nargs="*")
     args = parser.parse_args()
     work = Path(args.work)
-    cases = [dict(zip(FIELDS, entry)) for entry in CORPUS if not args.cases or entry[1] in args.cases]
+    cases = [{**SIZES, **dict(zip(FIELDS, entry))} for entry in CORPUS if not args.cases or entry[1] in args.cases]
     if args.prepare:
         for case in cases:
             (work / case["name"] / "variant").write_text(prepare(case, work / case["name"], args.compiler))
@@ -276,15 +290,21 @@ def main():
         row["r8"] = best[("r8", "template")] / best[("r8", "optimum")]
         row["rgba16f"] = best[("rgba16f", "template")] / best[("rgba16f", "optimum")]
         row["instructions"] = stats["template"]["Instructions"] / stats["optimum"]["Instructions"]
+        row["compile"] = int((directory / "compile").read_text()) / 1e3
+        row["build"] = result["build"]
         rows.append(row)
         print(
             f"{case['name']:22} r8 {row['r8']:.3f}  rgba16f {row['rgba16f']:.3f}  instructions {stats['optimum']['Instructions']}/{stats['template']['Instructions']}"
-            f"  loads {stats['optimum']['VMEM']}/{stats['template']['VMEM']}  difference {row['difference']:.3g}  {row['variant']}"
+            f"  loads {stats['optimum']['VMEM']}/{stats['template']['VMEM']}  difference {row['difference']:.3g}"
+            f"  build {row['compile']:.0f} us + {row['build']['template']:.2f} ms (hand {row['build']['optimum']:.2f} ms)  {row['variant']}"
         )
-    groups = [("all", rows)] + [(group, [row for row in rows if row["group"] == group]) for group in dict.fromkeys(row["group"] for row in rows)]
+    groups = [("all", [row for row in rows if row["group"] != "scale"])] + [(group, [row for row in rows if row["group"] == group]) for group in dict.fromkeys(row["group"] for row in rows)]
     for label, members in groups:
         if members:
-            print(f"{label:22} r8 {geomean([row['r8'] for row in members]):.3f}  rgba16f {geomean([row['rgba16f'] for row in members]):.3f}  instructions {geomean([row['instructions'] for row in members]):.3f}  ({len(members)} cases)")
+            print(
+                f"{label:22} r8 {geomean([row['r8'] for row in members]):.3f}  rgba16f {geomean([row['rgba16f'] for row in members]):.3f}  instructions {geomean([row['instructions'] for row in members]):.3f}"
+                f"  build {geomean([row['compile'] for row in members]):.0f} us + {geomean([row['build']['template'] for row in members]):.2f} ms (hand {geomean([row['build']['optimum'] for row in members]):.2f} ms)  ({len(members)} cases)"
+            )
 
 
 if __name__ == "__main__":

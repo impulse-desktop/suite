@@ -80,6 +80,7 @@ namespace {
         void prepare() override;
         void draw(ImDrawList& list, ImVec2 lo, ImVec2 hi) override;
         void read(int x0, int y0, int x1, int y1, ImagePixels& out) override;
+        void shadeWith(RenderShader& with) override;
         void readShaded(int x0, int y0, int x1, int y1, ImagePixels& out);
     };
 
@@ -269,6 +270,13 @@ void MetalImage::prepare() {
         }
         dirty = true;
     }
+}
+
+void MetalImage::shadeWith(RenderShader& with) {
+    if (!shader) {
+        fail(StringView(u8"only a shaded image takes another shader"));
+    }
+    shader = static_cast<MetalShader*>(&with);
 }
 
 void MetalImage::draw(ImDrawList& list, ImVec2 lo, ImVec2 hi) {

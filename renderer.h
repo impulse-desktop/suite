@@ -43,15 +43,16 @@ void unpackPixels(const void* data, u32 width, u32 height, size_t stride, PixelL
 void checkImageSize(u32 width, u32 height, u32 limit);
 void checkImageRegion(u32 width, u32 height, int x0, int y0, int x1, int y1);
 
+struct RenderShader {};
+
 struct RenderImage {
     // A bound image's producer calls prepare after filling its CPU buffer,
     // before transferring the image to the UI through a Channel.
     virtual void prepare() = 0;
     virtual void draw(ImDrawList& list, ImVec2 lo, ImVec2 hi) = 0;
     virtual void read(int x0, int y0, int x1, int y1, ImagePixels& out) = 0;
+    virtual void shadeWith(RenderShader& shader) = 0;
 };
-
-struct RenderShader {};
 
 struct RendererOptions {
     bool hdr = false;

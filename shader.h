@@ -18,6 +18,7 @@ struct VideoShader {
     u32 planeOffset[4];
     u32 lineSize[4];
     u32 size[4];
+    u32 target[2];
     double chroma[4];
     double decode[3][3];
     double bias[4];
