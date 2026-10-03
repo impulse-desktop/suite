@@ -298,6 +298,16 @@ renderer_test = program(
     deps=im_deps,
 )
 
+# the video shaders against a CPU model of H.273, through the renderer's
+# own calls: every layout, matrix, chroma location, transfer and primaries
+video_test = program(
+    name="video_test",
+    output="$(B)/e2e/video_test",
+    srcs=["$(S)/tst/video.cpp", "$(S)/renderer.cpp", "$(S)/ui.cpp", "$(S)/error.cpp", "$(S)/number.cpp", "$(S)/timing.cpp", *(["$(S)/renderer_metal.mm"] if darwin else ["$(S)/renderer_vulkan.cpp"])],
+    cflags=warning_flags,
+    deps=im_deps,
+)
+
 imgui_frames_test = program(
     name="imgui_frames_test",
     output="$(B)/e2e/imgui_frames_test",
@@ -379,7 +389,7 @@ if not darwin:
         srcs=["$(S)/tst/device_uuid.cpp"],
         deps=[vulkan],
     )
-    helpers = [devices, jxl_dump, device_uuid, renderer_test, imgui_frames_test]
+    helpers = [devices, jxl_dump, device_uuid, renderer_test, video_test, imgui_frames_test]
 
     # -Dshard=K/N splits the scenarios into N slices by a hash of the name, so
     # CI jobs can run them side by side; the slice a scenario falls in does not
