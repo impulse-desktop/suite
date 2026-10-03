@@ -364,6 +364,10 @@ namespace {
     }
 
     static Matrix primariesToXyz(int code) {
+        if (code == AVCOL_PRI_SMPTE428) {
+            return Matrix{{{1., 0., 0.}, {0., 1., 0.}, {0., 0., 1.}}};
+        }
+
         for (const Chromaticity& c : chromaticities) {
             if (c.code == code) {
                 return rgbToXyz(c);
@@ -737,7 +741,7 @@ Variant FormatCheck::describe(const AVFrame* frame, const char* output) {
     int transferCode = xyz && kase.transfer == AVCOL_TRC_UNSPECIFIED ? AVCOL_TRC_SMPTE428 : kase.transfer;
     const VideoTransfer& transfer = entryOf(videoTransfers, transferCode);
     const Matrix identity = {{{1., 0., 0.}, {0., 1., 0.}, {0., 0., 1.}}};
-    Matrix toXyz = xyz ? identity : primariesToXyz(kase.primaries);
+    Matrix toXyz = primariesToXyz(xyz ? AVCOL_PRI_SMPTE428 : kase.primaries);
     Matrix toOutput = multiply(invert(primariesToXyz(sdr ? AVCOL_PRI_BT709 : AVCOL_PRI_BT2020)), toXyz);
     bool same = true;
 
