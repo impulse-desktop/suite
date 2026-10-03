@@ -99,11 +99,16 @@ def tables(shaders):
 FAMILIES = {"bayer": "bayer.frag", "palette": "palette.frag"}
 
 
-def render(shaders, variant):
+def render(shaders, variant, facts=None, intermediate=False):
     layout, system, transfer, conversion, output = variant
     source = layouts(tables(shaders))[layout]
     template = environment(shaders).get_template(FAMILIES.get(source["model"], "grid.frag"))
-    return template.render(layout=layout, source=source, system=system, transfer=transfer, conversion=conversion, output=output)
+    context = dict(layout=layout, source=source, system=system, transfer=transfer, conversion=conversion, output=output)
+    if intermediate:
+        import color
+
+        context["color"] = color.build(source["model"], "alpha" in source["flags"], system, transfer, conversion, output, facts)
+    return template.render(**context)
 
 
 def layouts(module):

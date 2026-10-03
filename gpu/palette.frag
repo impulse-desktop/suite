@@ -19,6 +19,7 @@ vec4 paletteColor(vec2 at) {
     return mix(left, right, f.x).zyxw;
 }
 {%- endblock %}
+{%- block codes %}paletteColor(at){% endblock %}
 {%- block signal %}
     vec4 color = paletteColor(at);
     vec3 signal = color.rgb;

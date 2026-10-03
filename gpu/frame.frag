@@ -44,6 +44,15 @@ uvec2 swap32(uvec2 value) {
 }
 {%- endif %}
 {%- block readers %}{% endblock %}
+{%- if color is defined %}
+
+void main() {
+    vec2 at = vUv * vec2(frame.size.xy) - 0.5;
+    vec4 codes = {{ self.codes() }};
+
+{{ color }}
+}
+{%- else %}
 {%- if transfer == "curve" or system == "cl" and curved %}
 
 vec3 piece(vec3 x, vec4 segments[3]) {
@@ -156,3 +165,4 @@ void main() {
 {%- endif %}
 {%- endif %}
 }
+{%- endif %}
