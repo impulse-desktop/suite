@@ -259,6 +259,7 @@ namespace {
         u64 compiledClock = 0;
         u32 targetWidth = 0;
         u32 targetHeight = 0;
+        u32 phase = 0;
         int shownWidth = 0;
         int shownHeight = 0;
         int shownFormat = AV_PIX_FMT_NONE;
@@ -573,6 +574,7 @@ namespace {
         out.conversion = same ? "same" : "convert";
         out.output = target->name;
         out.filter = "bilinear";
+        out.dither = !strcmp(out.output, "sdr") ? 8 : 0;
         memcpy(out.curve, transfer->eotf, sizeof(out.curve));
         memcpy(out.oetf, transfer->oetf, sizeof(out.oetf));
         memcpy(out.inverse, transfer->inverse, sizeof(out.inverse));
@@ -1930,8 +1932,11 @@ void Screen::draw() {
         targetWidth = (u32)(p1.x - p0.x);
         targetHeight = (u32)(p1.y - p0.y);
 
-        if (image->facts.target[0] != targetWidth || image->facts.target[1] != targetHeight) {
+        phase = image->facts.dither ? (phase + 1) % 4 : 0;
+
+        if (image->facts.target[0] != targetWidth || image->facts.target[1] != targetHeight || image->facts.phase != phase) {
             aim(image->facts, targetWidth, targetHeight);
+            image->facts.phase = phase;
             image->render->shadeWith(shaderFor(image->facts));
         }
 

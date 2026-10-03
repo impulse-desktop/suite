@@ -18,6 +18,7 @@ driver through VK_KHR_pipeline_executable_properties.
 """
 
 import argparse
+import array
 import math
 import os
 import random
@@ -68,6 +69,12 @@ CORPUS = [
     ("popular", "gbrp_srgb_sdr", "gbrp", (0, 0), 0, 2, 13, 1, 0, "sdr"),
     ("popular", "rgba64be_srgb_sdr", "rgba64be", (0, 0), 0, 2, 13, 1, 0, "sdr"),
     ("popular", "gray16be_srgb_sdr", "gray16be", (0, 0), 0, 2, 13, 1, 0, "sdr"),
+    ("sota", "gbrp_roundtrip_bilinear", "gbrp", (0, 0), 0, 2, 13, 1, 0, "sdr", (1280, 720), (2560, 1440), "gbrp_srgb_sdr", "bilinear", "box2"),
+    ("sota", "gbrp_roundtrip_lanczos3", "gbrp", (0, 0), 0, 2, 13, 1, 0, "sdr", (1280, 720), (2560, 1440), "gbrp_srgb_sdr", "lanczos", "box2"),
+    ("sota", "yuv420p_lanczos3_1.42_sota", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (1920, 1080), (2731, 1536), "yuv420p_709_sdr_lanczos3_fast", "lanczos", "chart"),
+    ("sota", "yuv420p_down_0.5_sota", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (3840, 2160), (1920, 1080), "yuv420p_709_sdr_hermite", "bilinear", "chart"),
+    ("dither", "yuv420p_dither8", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (1920, 1080), (3840, 2160), "yuv420p_709_sdr", "bilinear", "chart", 8, 1),
+    ("dither", "yuv420p_lanczos3_dither8", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (1920, 1080), (2731, 1536), "yuv420p_709_sdr_lanczos3_fast", "lanczos", "chart", 8, 2),
     ("scale", "yuv420p_bilinear_1.42", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (1920, 1080), (2731, 1536), "yuv420p_709_sdr"),
     ("scale", "yuv420p_lanczos3_1.42", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (1920, 1080), (2731, 1536), "yuv420p_709_sdr_lanczos3", "lanczos"),
     ("scale", "yuv420p_lanczos3fast_1.42", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (1920, 1080), (2731, 1536), "yuv420p_709_sdr_lanczos3_fast", "lanczos"),
@@ -87,8 +94,8 @@ CORPUS = [
     ("scale", "yuv420p_lanczos3_1.46", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (1280, 720), (1867, 1050), "yuv420p_709_sdr_lanczos3", "lanczos"),
     ("scale", "yuv420p_lanczos3fast_1.46", "yuv420p", (1, 1), 1, 1, 1, 1, 1, "sdr", (1280, 720), (1867, 1050), "yuv420p_709_sdr_lanczos3_fast", "lanczos"),
 ]
-FIELDS = ("group", "name", "format", "subsampling", "matrix", "range", "transfer", "primaries", "location", "output", "source", "target", "hand", "filter", "content")
-SIZES = {"source": (1920, 1080), "target": (3840, 2160), "filter": "bilinear", "content": "noise"}
+FIELDS = ("group", "name", "format", "subsampling", "matrix", "range", "transfer", "primaries", "location", "output", "source", "target", "hand", "filter", "content", "dither", "phase")
+SIZES = {"source": (1920, 1080), "target": (3840, 2160), "filter": "bilinear", "content": "noise", "dither": 0, "phase": 0}
 
 MODULE = video_shaders.tables()
 LAYOUTS = video_shaders.layouts(MODULE)
@@ -155,10 +162,15 @@ def frame(case, layout, components):
         for y in range(height):
             row = offsets[plane] + y * lines[plane]
             for x in range(width):
-                level = chart(c, x * scale[0], y * scale[1], W, H) if case["content"] == "chart" else rng.random()
+                if case["content"] == "box2":
+                    level = sum(chart(c, 2 * x * scale[0] + dx, 2 * y * scale[1] + dy, 2 * W, 2 * H) for dx in (0, 1) for dy in (0, 1)) / 4
+                elif case["content"] == "chart":
+                    level = chart(c, x * scale[0], y * scale[1], W, H)
+                else:
+                    level = rng.random()
                 if "float" in layout["flags"]:
                     value = half(level) if depth == 16 else struct.unpack("<I", struct.pack("<f", level))[0]
-                elif case["content"] == "chart":
+                elif case["content"] != "noise":
                     value = round(level * (2**depth - 1)) << shift
                 else:
                     value = rng.getrandbits(depth) << shift
@@ -237,7 +249,7 @@ def facts(case, layout, components, offsets, lines):
     red = case["format"][6:].index("r") if model == "bayer" else 0
     system = matrix["system"] if yuv else model
     W, H = case["source"]
-    words = [*offsets, *lines, W, H, -(-W >> sx), -(-H >> sy), *case["target"]]
+    words = [*offsets, *lines, W, H, -(-W >> sx), -(-H >> sy), *case["target"], case["dither"], case["phase"]]
     numbers = [2.0**-sx, 2.0**-sy, site[0] * ((1 << sx) - 1) * 2.0**-sx, site[1] * ((1 << sy) - 1) * 2.0**-sy]
     numbers += [value for row in decode for value in row] + bias + [red % 2, red // 2, kr, kb]
     numbers += curve + table(transfer.get("oetf")) + table(transfer.get("inverse"))
@@ -259,6 +271,19 @@ def prepare(case, directory, compiler):
     (directory / "size").write_text("%d %d" % case["target"])
     sx, sy = case["subsampling"]
     W, H = case["source"]
+    TW, TH = case["target"]
+    planar = layout["model"] in ("yuv", "rgb") and all(component[1] == 1 and component[2] == 0 and component[3] == 0 and component[4] == 8 for component in components)
+    planar = planar and sorted(component[0] for component in components) == list(range(len(components)))
+    if planar:
+        rows = [f"{W} {H} {TW} {TH} {len(components)} {int(layout['model'] == 'rgb')} {int(case['range'] == 2 or layout['model'] == 'rgb')} {int(bool(sx or sy))}"]
+        for plane in range(len(components)):
+            c = next(c for c, component in enumerate(components) if component[0] == plane)
+            chroma = layout["model"] == "yuv" and c in (1, 2)
+            rows.append(f"{-(-W >> sx) if chroma else W} {-(-H >> sy) if chroma else H} {offsets[plane]} {lines[plane]} {c} 1")
+        (directory / "placebo.txt").write_text("\n".join(rows) + "\n")
+    if case["content"] == "box2":
+        truth = array.array("f", (chart(c, x, y, TW, TH) for y in range(TH) for x in range(TW) for c in range(3)))
+        (directory / "truth.raw").write_bytes(truth.tobytes())
     (directory / "optimum.ubo").write_bytes(struct.pack("<4I", *offsets) + struct.pack("<4I", *lines) + struct.pack("<4I", W, H, -(-W >> sx), -(-H >> sy)) + struct.pack("<4f", WHITE, *case["target"], 0))
     (directory / "optimum.frag").write_text((HERE / "hand" / f"{case.get('hand', case['name'])}.frag").read_text())
     subprocess.run(["glslangValidator", "--quiet", "--target-env", "vulkan1.1", "-V", "-S", "frag", str(directory / "optimum.frag"), "-o", str(directory / "optimum.spv")], check=True)
@@ -282,6 +307,46 @@ def measure(harness, vertex, directories, rounds):
     return results
 
 
+def error(path, TW, TH, truth):
+    raw = path.read_bytes()
+    data = memoryview(raw).cast("f" if len(raw) == TW * TH * 16 else "e")
+    total = 0.0
+    for y in range(0, TH, 2):
+        for x in range(0, TW, 2):
+            at, known = (y * TW + x) * 4, (y * TW + x) * 3
+            for c in range(3):
+                d = data[at + c] - truth[known + c]
+                total += d * d
+    return math.sqrt(total / (((TH + 1) // 2) * ((TW + 1) // 2) * 3))
+
+
+def compare(placebo, cases, directories, results, rounds):
+    """libplacebo on the same frames: per-frame GPU time of every preset and,
+    where the case knows its truth, each scaler's RMSE against it."""
+    chosen = [(case, directory) for case, directory in zip(cases, directories) if (directory / "placebo.txt").exists()]
+    if not chosen:
+        return
+    times = {}
+    for preset in ("fast", "default", "high_quality"):
+        text = subprocess.run([placebo, preset, str(rounds), *(str(directory) for case, directory in chosen)], check=True, capture_output=True, text=True).stdout
+        for directory, gpu, wall in re.findall(rf"^placebo (\S+) {preset} gpu ([\d.e+]+) wall ([\d.e+]+) format \S+$", text, re.M):
+            times[(directory, preset)] = (float(gpu), float(wall))
+    print("versus libplacebo (GPU us per frame into rgba16f; RMSE against the truth where known)")
+    for case, directory in chosen:
+        ours = results[str(directory)]["times"][("rgba16f", "template")]
+        line = f"{case['name']:28} ours {ours:8.1f}"
+        for preset in ("fast", "default", "high_quality"):
+            gpu, wall = times.get((str(directory), preset), (float("nan"), float("nan")))
+            line += f"  {preset} {gpu:8.1f} ({ours / gpu:.2f}x)"
+        if (directory / "truth.raw").exists():
+            TW, TH = case["target"]
+            truth = memoryview((directory / "truth.raw").read_bytes()).cast("f")
+            line += f"  rmse ours {error(directory / 'template.raw', TW, TH, truth):.4f}"
+            for preset in ("fast", "default", "high_quality"):
+                line += f" {preset} {error(directory / f'placebo_{preset}.raw', TW, TH, truth):.4f}"
+        print(line)
+
+
 def geomean(values):
     return math.exp(sum(math.log(value) for value in values) / len(values))
 
@@ -292,6 +357,7 @@ def main():
     parser.add_argument("--work", default=str(SUITE / ".build" / "video_bench"))
     parser.add_argument("--compiler", required=True)
     parser.add_argument("--prepare", action="store_true")
+    parser.add_argument("--placebo", default="")
     parser.add_argument("cases", nargs="*")
     args = parser.parse_args()
     work = Path(args.work)
@@ -334,7 +400,9 @@ def main():
             f"  loads {stats['optimum']['VMEM']}/{stats['template']['VMEM']}  difference {row['difference']:.3g} rmse {row['rmse']:.2g}"
             f"  build {row['compile']:.0f} us + {row['build']['template']:.2f} ms (hand {row['build']['optimum']:.2f} ms)  {row['variant']}"
         )
-    groups = [("all", [row for row in rows if row["group"] not in ("scale", "approx", "down")])] + [(group, [row for row in rows if row["group"] == group]) for group in dict.fromkeys(row["group"] for row in rows)]
+    if args.placebo:
+        compare(args.placebo, cases, directories, results, args.rounds)
+    groups = [("all", [row for row in rows if row["group"] not in ("scale", "approx", "down", "dither", "sota")])] + [(group, [row for row in rows if row["group"] == group]) for group in dict.fromkeys(row["group"] for row in rows)]
     for label, members in groups:
         if members:
             print(

@@ -476,6 +476,13 @@ int main(int argc, char** argv) {
             d = d < 0 ? -d : d;
             if (d > worst) worst = d;
         }
+        FILE* truth = fopen(joined(c->directory, "truth.raw"), "rb");
+        if (truth) {
+            fclose(truth);
+            FILE* dump = fopen(joined(c->directory, "template.raw"), "wb");
+            fwrite(pixels[1].map, 16, (size_t)check->width * check->height, dump);
+            fclose(dump);
+        }
         printf("case %s\n", c->directory);
         printf("difference %s %g\n", c->directory, worst);
         printf("rmse %s %g\n", c->directory, sqrt(squares / ((double)check->width * check->height * 3)));

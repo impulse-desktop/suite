@@ -6,6 +6,8 @@ layout(set = 0, binding = 0) uniform sampler2D scene;
 
 layout(push_constant) uniform PushConstant {
     float sdrWhiteNits;
+    float levels;
+    float frame;
 } pc;
 
 vec3 pqEncode(vec3 nits) {
@@ -19,10 +21,10 @@ vec3 pqEncode(vec3 nits) {
 }
 
 vec3 dither(vec3 encoded) {
-    float noise = fract(52.9829189 * fract(dot(gl_FragCoord.xy,
-        vec2(0.06711056, 0.00583715)))) - 0.5;
+    vec2 at = gl_FragCoord.xy + vec2(5.588238 * pc.frame);
+    float noise = fract(52.9829189 * fract(dot(at, vec2(0.06711056, 0.00583715)))) - 0.5;
 
-    return clamp(encoded + noise / 1023.0, 0.0, 1.0);
+    return clamp(encoded + noise / pc.levels, 0.0, 1.0);
 }
 
 void main() {

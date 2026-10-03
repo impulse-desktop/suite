@@ -1659,6 +1659,26 @@ namespace {
         }
     };
 
+    static void dither(Graph& g, const VideoShader& s, Node* (&out)[4]) {
+        if (!s.dither) {
+            return;
+        }
+
+        Node* at[2];
+
+        for (int i = 0; i < 2; i++) {
+            at[i] = g.add(g.mul(g.input(i), (double)s.target[i]), 5.588238 * s.phase);
+        }
+
+        Node* inner = g.add(g.mul(at[0], 0.06711056), g.mul(at[1], 0.00583715));
+        Node* outer = g.mul(g.sub(inner, g.floor(inner)), 52.9829189);
+        Node* step = g.mul(g.sub(g.sub(outer, g.floor(outer)), 0.5), 1. / (::exp2(s.dither) - 1.));
+
+        for (int i = 0; i < 3; i++) {
+            out[i] = g.add(out[i], step);
+        }
+    }
+
     static void order(Node* const (&roots)[4], Vector<Node*>& out) {
         Vector<Node*> stack;
 
@@ -2183,6 +2203,7 @@ StringView compile(ObjPool& pool, const VideoShader& shader) {
 
     video.codes(codes);
     video.color(codes, color);
+    dither(g, shader, color);
 
 #if defined(__APPLE__)
     return msl(pool, color);

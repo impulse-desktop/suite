@@ -1009,7 +1009,8 @@ void Gpu::frameRender(ImDrawData* draw) {
         ImGui_ImplVulkan_RenderDrawData(draw, fd.commandBuffer);
         vkCmdEndRenderPass(fd.commandBuffer);
 
-        float white = sdrWhiteNits;
+        bool deep = present.format.format == VK_FORMAT_A2R10G10B10_UNORM_PACK32 || present.format.format == VK_FORMAT_A2B10G10R10_UNORM_PACK32;
+        float output[3] = {sdrWhiteNits, deep ? 1023.f : 255.f, (float)((submitted * 2654435761u) % 4096)};
 
         rp.renderPass = present.renderPass;
         rp.framebuffer = fd.framebuffer;
@@ -1017,7 +1018,7 @@ void Gpu::frameRender(ImDrawData* draw) {
         vkCmdBeginRenderPass(fd.commandBuffer, &rp, VK_SUBPASS_CONTENTS_INLINE);
         vkCmdBindPipeline(fd.commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, outputPipeline);
         vkCmdBindDescriptorSets(fd.commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, outputPipelineLayout, 0, 1, &outputSet, 0, nullptr);
-        vkCmdPushConstants(fd.commandBuffer, outputPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(white), &white);
+        vkCmdPushConstants(fd.commandBuffer, outputPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(output), output);
         VkViewport viewport{0, 0, (float)present.width, (float)present.height, 0, 1};
         VkRect2D scissor{{0, 0}, {(u32)present.width, (u32)present.height}};
 
@@ -1410,7 +1411,7 @@ void Gpu::setupLinearHdr(ObjPool& pool, u32 width, u32 height) {
     dlci.pBindings = &binding;
     vkc(vkCreateDescriptorSetLayout(device, &dlci, alloc, &outputSetLayout));
 
-    VkPushConstantRange outputRange{VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(float)};
+    VkPushConstantRange outputRange{VK_SHADER_STAGE_FRAGMENT_BIT, 0, 3 * sizeof(float)};
     VkPipelineLayoutCreateInfo plci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
 
     plci.setLayoutCount = 1;
