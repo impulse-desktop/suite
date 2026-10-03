@@ -24,6 +24,9 @@ const vec3 evens[3] = vec3[3](vec3(0.0244904064, -0.0226433958, -0.00187803571),
 const vec3 odds[3] = vec3[3](vec3(-0.0319397452, 0.0383419974, -0.00642154827), vec3(0.0905269779, -0.1042344, 0.0137522839), vec3(-0.668230721, 0.191258225, -0.0231172403));
 
 shared vec3 lit[SPAN * SPAN];
+shared vec2 chromas[16 * 16];
+ivec2 chromaCorner;
+int chromaWidth;
 shared vec3 across[SPAN * 16];
 
 vec3 sigmoidize(vec3 x) {
@@ -70,6 +73,19 @@ void main() {
     ivec2 reach = ivec2(floor((vec2(tile + 15) + 0.5) * ratio - 0.5)) - first + 6;
     ivec2 last = ivec2(size) - 1;
     uint local = gl_LocalInvocationIndex;
+    ivec2 chromaLast = ivec2(frame.size.zw) - 1;
+    ivec2 chromaReach = ivec2(ceil(vec2(reach - 1) * 0.5)) + 3;
+
+    chromaCorner = ivec2(floor(vec2(origin) * 0.5 - vec2(0.0, 0.25)));
+    chromaWidth = chromaReach.x;
+
+    for (uint i = local; i < uint(chromaReach.x * chromaReach.y); i += 256u) {
+        ivec2 c = clamp(chromaCorner + ivec2(int(i % uint(chromaReach.x)), int(i / uint(chromaReach.x))), ivec2(0), chromaLast);
+
+        chromas[i] = vec2(byteAt(1u, c), byteAt(2u, c));
+    }
+
+    barrier();
 
     for (uint i = local; i < uint(reach.x * reach.y); i += 256u) {
         ivec2 c = clamp(origin + ivec2(int(i % uint(reach.x)), int(i / uint(reach.x))), ivec2(0), last);
@@ -122,23 +138,18 @@ void main() {
     imageStore(target, p, vec4(srgbEncode(clamp(unsigmoidize(total), 0.0, 1.0)), 1.0));
 }
 
-float chroma(uint plane, vec2 at, ivec2 last) {
-    vec2 base = floor(at);
-    vec2 f = at - base;
-    ivec2 a = clamp(ivec2(base), ivec2(0), last);
-    ivec2 b = clamp(ivec2(base) + 1, ivec2(0), last);
-    float top = mix(float(byteAt(plane, a)), float(byteAt(plane, ivec2(b.x, a.y))), f.x);
-    float bottom = mix(float(byteAt(plane, ivec2(a.x, b.y))), float(byteAt(plane, b)), f.x);
-
-    return mix(top, bottom, f.y);
-}
-
 vec3 source(ivec2 c) {
     ivec2 chromaLast = ivec2(frame.size.zw) - 1;
     vec2 at = vec2(c) * 0.5 - vec2(0.0, 0.25);
+    vec2 base = floor(at);
+    vec2 f = at - base;
+    ivec2 b = ivec2(base) - chromaCorner;
+    vec2 top = mix(chromas[b.y * chromaWidth + b.x], chromas[b.y * chromaWidth + b.x + 1], f.x);
+    vec2 bottom = mix(chromas[(b.y + 1) * chromaWidth + b.x], chromas[(b.y + 1) * chromaWidth + b.x + 1], f.x);
+    vec2 both = mix(top, bottom, f.y);
     float y = float(byteAt(0u, c)) * 0.004566210046;
-    float cb = chroma(1u, at, chromaLast);
-    float cr = chroma(2u, at, chromaLast);
+    float cb = both.x;
+    float cr = both.y;
     vec3 signal = clamp(vec3(
         y + cr * 0.007030357143 - 0.972945075,
         y - cb * 0.0008362690756 - cr * 0.002089840504 + 0.3014826655,

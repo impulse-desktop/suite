@@ -905,9 +905,11 @@ namespace {
         Node* value;
     };
 
+    constexpr int kernelArrays = 3;
+
     struct Kernel {
-        Vector<Store> stores[2];
-        u32 sizes[2];
+        Vector<Store> stores[kernelArrays];
+        u32 sizes[kernelArrays] = {};
         Node* at[2];
         Node* color[4];
     };
@@ -1740,7 +1742,7 @@ namespace {
                 codes[l.alpha && c == l.count - 1 ? 3 : c] = value(c, window(c, row, column));
             }
 
-            if (yuv) {
+            if (yuv && s.chroma[0] == 1. && s.chroma[1] == 1.) {
                 const int chroma[2] = {1, 2};
                 Node* chromaAt[2] = {g.sub(g.mul(g.convert(at[0], Kind::Float), s.chroma[0]), s.chroma[2]), g.sub(g.mul(g.convert(at[1], Kind::Float), s.chroma[1]), s.chroma[3])};
                 Node* chromaExtent[2] = {g.u(s.size[2]), g.u(s.size[3])};
@@ -1754,11 +1756,14 @@ namespace {
 
         void kernel(Kernel& k) {
             bool sdr = !strcmp(s.output, "sdr");
+            bool subsampled = model("yuv") && (s.chroma[0] < 1. || s.chroma[1] < 1.);
             double ratio[2];
             int reach[2];
+            int chromaReach[2] = {0, 0};
             Node* local[2] = {g.invocation(2, tile - 1), g.invocation(3, tile - 1)};
             Node* group[2];
             Node* corner[2];
+            Node* chromaCorner[2] = {nullptr, nullptr};
             Node* last[2];
 
             for (int i = 0; i < 2; i++) {
@@ -1767,9 +1772,37 @@ namespace {
                 group[i] = g.invocation(4 + i, (s.target[i] + tile - 1) / tile - 1);
                 corner[i] = g.add(g.convert(g.floor(g.sub(g.mul(g.add(g.convert(g.mul(group[i], tile), Kind::Float), 0.5), ratio[i]), 0.5)), Kind::Int), -(lanczosRadius - 1));
                 last[i] = g.i(s.size[i] - 1.);
+
+                if (subsampled) {
+                    chromaCorner[i] = g.convert(g.floor(g.sub(g.mul(g.convert(corner[i], Kind::Float), s.chroma[i]), s.chroma[2 + i])), Kind::Int);
+                    chromaReach[i] = (int)::ceil((reach[i] - 1) * s.chroma[i]) + 3;
+                }
             }
 
             Node* lane = g.add(g.mul(local[1], tile), local[0]);
+
+            if (subsampled) {
+                int positions = chromaReach[0] * chromaReach[1];
+
+                for (int pass = 0; pass * tile * tile < positions; pass++) {
+                    Node* index = g.add(lane, pass * tile * tile);
+                    Node* y = g.convert(g.floor(g.mul(g.add(g.convert(index, Kind::Float), 0.5), 1. / chromaReach[0])), Kind::Uint);
+                    Node* x = g.sub(index, g.mul(y, chromaReach[0]));
+                    Node* column = g.convert(g.clamp(g.add(chromaCorner[0], g.convert(x, Kind::Int)), 0, s.size[2] - 1.), Kind::Uint);
+                    Node* line = g.convert(g.clamp(g.add(chromaCorner[1], g.convert(y, Kind::Int)), 0, s.size[3] - 1.), Kind::Uint);
+                    Node* slot = g.select(g.lt(index, positions), g.mul(index, 2), positions * 2);
+
+                    for (int c = 1; c <= 2; c++) {
+                        int plane = l.components[c][0];
+                        Node* row = g.shr(g.add(g.u(s.planeOffset[plane]), g.mul(line, g.u(s.lineSize[plane]))), 2);
+
+                        k.stores[0].pushBack(Store{g.add(slot, c - 1), value(c, window(c, row, column))});
+                    }
+                }
+
+                k.sizes[0] = positions * 2 + 2;
+            }
+
             int positions = reach[0] * reach[1];
 
             for (int pass = 0; pass * tile * tile < positions; pass++) {
@@ -1784,15 +1817,43 @@ namespace {
                 Node* slot = g.select(g.lt(index, positions), g.mul(index, 3), positions * 3);
 
                 decodeAt(at, codes);
+
+                if (subsampled) {
+                    Node* f[2];
+                    Node* base[2];
+
+                    for (int i = 0; i < 2; i++) {
+                        Node* place = g.sub(g.mul(g.convert(at[i], Kind::Float), s.chroma[i]), s.chroma[2 + i]);
+                        Node* floor = g.floor(place);
+
+                        f[i] = g.sub(place, floor);
+                        base[i] = g.convert(g.sub(g.convert(floor, Kind::Int), chromaCorner[i]), Kind::Uint);
+                    }
+
+                    for (int c = 1; c <= 2; c++) {
+                        Node* taps[2][2];
+
+                        for (int r = 0; r < 2; r++) {
+                            for (int q = 0; q < 2; q++) {
+                                Node* index = g.add(g.mul(g.add(g.mul(g.add(base[1], r), chromaReach[0]), g.add(base[0], q)), 2), c - 1);
+
+                                taps[r][q] = g.shared(index, 0);
+                            }
+                        }
+
+                        codes[c] = g.mix(g.mix(taps[0][0], taps[0][1], f[0]), g.mix(taps[1][0], taps[1][1], f[0]), f[1]);
+                    }
+                }
+
                 signalOf(codes, signal, alpha);
                 lightOf(signal, light);
 
                 for (int c = 0; c < 3; c++) {
-                    k.stores[0].pushBack(Store{g.add(slot, c), sdr ? sigmoidize(light[c]) : light[c]});
+                    k.stores[1].pushBack(Store{g.add(slot, c), sdr ? sigmoidize(light[c]) : light[c]});
                 }
             }
 
-            k.sizes[0] = positions * 3 + 3;
+            k.sizes[1] = positions * 3 + 3;
 
             Node* across = g.convert(g.add(g.mul(group[0], tile), local[0]), Kind::Float);
             Axis horizontal = axis(g.sub(g.mul(g.add(across, 0.5), ratio[0]), 0.5), 1. / ratio[0], true);
@@ -1807,14 +1868,14 @@ namespace {
                     Node* sum = g.f(0.);
 
                     for (int t = 0; t < horizontal.taps; t++) {
-                        sum = g.add(sum, g.mul(horizontal.w[t], g.shared(g.add(g.mul(g.add(base, t), 3), c), 0)));
+                        sum = g.add(sum, g.mul(horizontal.w[t], g.shared(g.add(g.mul(g.add(base, t), 3), c), 1)));
                     }
 
-                    k.stores[1].pushBack(Store{g.add(slot, c), sum});
+                    k.stores[2].pushBack(Store{g.add(slot, c), sum});
                 }
             }
 
-            k.sizes[1] = reach[1] * tile * 3 + 3;
+            k.sizes[2] = reach[1] * tile * 3 + 3;
 
             Node* pixel[2];
             Node* light[3];
@@ -1833,7 +1894,7 @@ namespace {
                 Node* total = g.f(0.);
 
                 for (int t = 0; t < vertical.taps; t++) {
-                    total = g.add(total, g.mul(vertical.w[t], g.shared(g.add(g.mul(g.add(g.mul(g.add(top, t), tile), column), 3), c), 1)));
+                    total = g.add(total, g.mul(vertical.w[t], g.shared(g.add(g.mul(g.add(g.mul(g.add(top, t), tile), column), 3), c), 2)));
                 }
 
                 light[c] = sdr ? unsigmoidize(total) : total;
@@ -1931,6 +1992,8 @@ namespace {
             out << StringView(u8"as_type<float>(") << (u64)bits << StringView(u8"u)");
         }
     }
+
+    const char* const sharedNames[kernelArrays] = {"sharedA", "sharedB", "sharedC"};
 
     static void statements(StringBuilder& out, const Vector<Node*>& nodes, u32& next) {
         for (Node* node : nodes) {
@@ -2050,7 +2113,7 @@ namespace {
                 operand(out, node->args[0]);
                 out << StringView(u8").x)");
             } else if (node->op == Op::Shared) {
-                out << StringView(node->value == 0. ? "sharedA[" : "sharedB[");
+                out << StringView(sharedNames[(int)node->value]) << StringView(u8"[");
                 operand(out, node->args[0]);
                 out << StringView(u8"]");
             } else if (node->op == Op::BitsFloat) {
@@ -2103,11 +2166,19 @@ namespace {
         u32 next = 3;
 
         out << StringView(u8"#include <metal_stdlib>\nusing namespace metal;\nkernel void main0(const device uint* words [[buffer(0)]], texture2d<float, access::write> target [[texture(0)]], uint3 local [[thread_position_in_threadgroup]], uint3 group [[threadgroup_position_in_grid]]) {\n");
-        out << StringView(u8"    threadgroup float sharedA[") << (u64)k.sizes[0] << StringView(u8"];\n    threadgroup float sharedB[") << (u64)k.sizes[1] << StringView(u8"];\n");
+        for (int i = 0; i < kernelArrays; i++) {
+            if (k.sizes[i]) {
+                out << StringView(u8"    threadgroup float ") << StringView(sharedNames[i]) << StringView(u8"[") << (u64)k.sizes[i] << StringView(u8"];\n");
+            }
+        }
 
-        for (int phase = 0; phase < 2; phase++) {
+        for (int phase = 0; phase < kernelArrays; phase++) {
             Vector<Node*> roots;
             Vector<Node*> nodes;
+
+            if (k.stores[phase].empty()) {
+                continue;
+            }
 
             for (const Store& store : k.stores[phase]) {
                 roots.pushBack(store.index);
@@ -2118,7 +2189,7 @@ namespace {
             statements(out, nodes, next);
 
             for (const Store& store : k.stores[phase]) {
-                out << StringView(phase ? "    sharedB[" : "    sharedA[");
+                out << StringView(u8"    ") << StringView(sharedNames[phase]) << StringView(u8"[");
                 operand(out, store.index);
                 out << StringView(u8"] = ");
                 operand(out, store.value);
@@ -2214,7 +2285,7 @@ namespace {
         u32 main = s.fresh();
         u32 label = s.fresh();
         u32 sharedFloat = s.fresh();
-        u32 arrays[2] = {s.fresh(), s.fresh()};
+        u32 arrays[kernelArrays] = {s.fresh(), s.fresh(), s.fresh()};
         u32 inputs[6] = {s.fresh(), s.fresh(), s.fresh(), s.fresh(), s.fresh(), s.fresh()};
         u32 zero = 0;
         u32 one = 0;
@@ -2493,9 +2564,9 @@ namespace {
         u32 image = s.fresh();
         u32 local = s.fresh();
         u32 group = s.fresh();
-        u32 lengths[2] = {s.fresh(), s.fresh()};
-        u32 arrayTypes[2] = {s.fresh(), s.fresh()};
-        u32 arrayPointers[2] = {s.fresh(), s.fresh()};
+        u32 lengths[kernelArrays] = {s.fresh(), s.fresh(), s.fresh()};
+        u32 arrayTypes[kernelArrays] = {s.fresh(), s.fresh(), s.fresh()};
+        u32 arrayPointers[kernelArrays] = {s.fresh(), s.fresh(), s.fresh()};
         u32 scope = s.fresh();
         u32 semantics = s.fresh();
         u32 ids[2] = {s.fresh(), s.fresh()};
@@ -2509,9 +2580,13 @@ namespace {
         Spirv::op(s.body, 81, e.typeUint, e.inputs[4], ids[1], 0);
         Spirv::op(s.body, 81, e.typeUint, e.inputs[5], ids[1], 1);
 
-        for (int phase = 0; phase < 2; phase++) {
+        for (int phase = 0; phase < kernelArrays; phase++) {
             Vector<Node*> roots;
             Vector<Node*> nodes;
+
+            if (k.stores[phase].empty()) {
+                continue;
+            }
 
             for (const Store& store : k.stores[phase]) {
                 roots.pushBack(store.index);
@@ -2570,10 +2645,12 @@ namespace {
         Spirv::op(module, 25, typeImage, e.typeFloat, 1, 0, 0, 0, 2, 0);
         Spirv::op(module, 32, imagePointer, 0, typeImage);
 
-        for (int i = 0; i < 2; i++) {
-            Spirv::op(module, 43, e.typeUint, lengths[i], k.sizes[i]);
-            Spirv::op(module, 28, arrayTypes[i], e.typeFloat, lengths[i]);
-            Spirv::op(module, 32, arrayPointers[i], 4, arrayTypes[i]);
+        for (int i = 0; i < kernelArrays; i++) {
+            if (k.sizes[i]) {
+                Spirv::op(module, 43, e.typeUint, lengths[i], k.sizes[i]);
+                Spirv::op(module, 28, arrayTypes[i], e.typeFloat, lengths[i]);
+                Spirv::op(module, 32, arrayPointers[i], 4, arrayTypes[i]);
+            }
         }
 
         Spirv::op(module, 32, e.sharedFloat, 4, e.typeFloat);
@@ -2584,8 +2661,10 @@ namespace {
         Spirv::op(module, 59, e.storageBytes, e.bytes, 12);
         Spirv::op(module, 59, imagePointer, image, 0);
 
-        for (int i = 0; i < 2; i++) {
-            Spirv::op(module, 59, arrayPointers[i], e.arrays[i], 4);
+        for (int i = 0; i < kernelArrays; i++) {
+            if (k.sizes[i]) {
+                Spirv::op(module, 59, arrayPointers[i], e.arrays[i], 4);
+            }
         }
 
         return e.finish(pool, module);
