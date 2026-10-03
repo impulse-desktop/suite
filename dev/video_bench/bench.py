@@ -70,8 +70,7 @@ CORPUS = [
 ]
 FIELDS = ("group", "name", "format", "subsampling", "matrix", "range", "transfer", "primaries", "location", "output")
 
-SHADERS = SUITE / "gpu"
-MODULE = video_shaders.tables(SHADERS)
+MODULE = video_shaders.tables()
 LAYOUTS = video_shaders.layouts(MODULE)
 
 
@@ -165,14 +164,12 @@ def template(case, layout, components, offsets, lines):
     curve = piece(eotf, unbounded)
     power = eotf[0] == eotf[1] and eotf[0][2] == 1 and eotf[0][3] == 0 and eotf[0][4] == 0 and eotf[2] < 0
     if shape == "curve" and same and case["transfer"] == (13 if sdr else 8):
-        shape, output = "identity", "any"
-        curve[11] = 1.0 if sdr else unbounded
+        shape = "identity"
     elif shape == "curve" and same and not sdr:
-        output = "any"
+        pass
     elif shape == "curve" and same and power and eotf[0][1] in (1, 2.4):
         scale, gamma = eotf[0][0], eotf[0][1]
         curve = piece([[1.055 * scale ** (1 / 2.4), gamma / 2.4, 1, 0, 0.055], [12.92 * scale, gamma, 1, 0, 0], (0.0031308 / scale) ** (1 / gamma)], 1.0)
-        output = "any"
     elif shape == "curve" or sdr or shape == "log":
         conversion = "convert"
     levels, scales = [0.0] * 4, [1.0] * 4
@@ -220,6 +217,11 @@ def template(case, layout, components, offsets, lines):
 
 
 FACTS = {
+    **{f"frame.planeOffset[{i}]": (4 * i, "I") for i in range(4)},
+    **{f"frame.lineSize[{i}]": (16 + 4 * i, "I") for i in range(4)},
+    **{f"frame.size[{i}]": (32 + 4 * i, "I") for i in range(4)},
+    **{f"frame.chroma[{i}]": 48 + 4 * i for i in range(4)},
+    **{f"frame.sites[{i}]": 128 + 4 * i for i in range(2)},
     **{f"frame.decode[{c}][{r}]": 64 + 16 * c + 4 * r for c in range(3) for r in range(3)},
     **{f"frame.bias[{i}]": 112 + 4 * i for i in range(4)},
     **{f"frame.weights[{i}]": 144 + 4 * i for i in range(2)},
@@ -242,18 +244,16 @@ def structure(values):
     return facts
 
 
-def prepare(case, directory, intermediate=False, hot=False, structural=False):
+def prepare(case, directory, hot=False, structural=False):
     name, layout, components = layout_of(case["format"])
     data, offsets, lines = frame(case, layout, components)
     (system, shape, conversion, output), uniform = template(case, layout, components, offsets, lines)
-    if intermediate and output == "any":
-        output = case["output"]
-    values = {path: struct.unpack_from("<f", uniform, offset)[0] for path, offset in FACTS.items()}
+    values = {path: struct.unpack_from("<" + (place[1] if isinstance(place, tuple) else "f"), uniform, place[0] if isinstance(place, tuple) else place)[0] for path, place in FACTS.items()}
     facts = values if hot else structure(values) if structural else None
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "data.bin").write_bytes(data)
     (directory / "template.ubo").write_bytes(uniform)
-    (directory / "template.frag").write_text(video_shaders.render(SHADERS, (name, system, shape, conversion, output), facts, intermediate))
+    (directory / "template.frag").write_text(video_shaders.render((name, system, shape, conversion, output), facts))
     sx, sy = case["subsampling"]
     (directory / "optimum.ubo").write_bytes(struct.pack("<4I", *offsets) + struct.pack("<4I", *lines) + struct.pack("<4I", W, H, -(-W >> sx), -(-H >> sy)) + struct.pack("<4f", WHITE, 0, 0, 0))
     (directory / "optimum.frag").write_text((HERE / "hand" / f"{case['name']}.frag").read_text())
@@ -283,7 +283,6 @@ def main():
     parser.add_argument("--rounds", type=int, default=5)
     parser.add_argument("--work", default=str(SUITE / ".build" / "video_bench"))
     parser.add_argument("--prepare", action="store_true")
-    parser.add_argument("--ir", action="store_true")
     parser.add_argument("--hot", action="store_true")
     parser.add_argument("--structure", action="store_true")
     parser.add_argument("cases", nargs="*")
@@ -292,7 +291,7 @@ def main():
     cases = [dict(zip(FIELDS, entry)) for entry in CORPUS if not args.cases or entry[1] in args.cases]
     if args.prepare:
         for case in cases:
-            (work / case["name"] / "variant").write_text(prepare(case, work / case["name"], args.ir, args.hot, args.structure))
+            (work / case["name"] / "variant").write_text(prepare(case, work / case["name"], args.hot, args.structure))
         return
     work.mkdir(parents=True, exist_ok=True)
     harness = work / "harness"
@@ -305,7 +304,7 @@ def main():
     while pending or running:
         while pending and len(running) < (os.cpu_count() or 1):
             case = pending.pop(0)
-            running.append(subprocess.Popen([sys.executable, __file__, "--prepare", "--work", str(work), *(["--ir"] if args.ir else []), *(["--hot"] if args.hot else []), *(["--structure"] if args.structure else []), case["name"]]))
+            running.append(subprocess.Popen([sys.executable, __file__, "--prepare", "--work", str(work), *(["--hot"] if args.hot else []), *(["--structure"] if args.structure else []), case["name"]]))
         running[0].wait()
         if running[0].returncode:
             raise SystemExit(f"preparing a case failed: {running[0].args}")

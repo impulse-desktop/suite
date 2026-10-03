@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 
-"""Renders the player's video shaders, Jinja templates in gpu/, into their variants.
+"""Renders the player's video shaders into their variants and the tables
+the player matches frames against.
 
-frame.frag is the frame every variant shares: the uniforms, the color
-chain and main. grid.frag, bayer.frag and palette.frag extend it with the
-reader of their family of layouts. layouts.jinja and colors.jinja hold the
-tables: the storage layouts, and the matrices, transfers, primaries and
-chroma locations the player matches frames against.
+video.py builds a variant's shader as simplified scalar expressions
+(ir.py) and prints it as GLSL; tables.py holds the storage layouts and
+the codes of H.273.
 
-  video_shaders.py parts SHADERS
-  video_shaders.py codes SHADERS HEADER
-  video_shaders.py compile SHADERS LAYOUT HEADER GLSLANG
-  video_shaders.py spirv SHADERS PART SOURCE LAYOUT_HEADER...
-  video_shaders.py msl SHADERS LAYOUT HEADER GLSLANG SPIRV_CROSS
-  video_shaders.py metal SHADERS PART SOURCE LAYOUT_HEADER...
+  video_shaders.py parts
+  video_shaders.py codes HEADER
+  video_shaders.py compile LAYOUT HEADER GLSLANG
+  video_shaders.py spirv PART SOURCE LAYOUT_HEADER...
+  video_shaders.py msl LAYOUT HEADER GLSLANG SPIRV_CROSS
+  video_shaders.py metal PART SOURCE LAYOUT_HEADER...
 """
 
 import subprocess
@@ -23,9 +22,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 sys.dont_write_bytecode = True
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "ext"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import jinja2
+import video
 
 
 def chromaticity(x, y):
@@ -74,41 +73,16 @@ def to_xyz(primaries):
     return matrix
 
 
-def mat3(matrix):
-    columns = [matrix[i][j] for j in range(3) for i in range(3)]
-    return "mat3(" + ", ".join(f"{value:.10f}" for value in columns) + ")"
+def tables():
+    import tables as source
+
+    names = ("layouts", "systems", "shapes", "chains", "matrices", "transfers", "primaries", "outputs", "ranges", "locations")
+    return SimpleNamespace(**{name: getattr(source, name.upper()) for name in names})
 
 
-def environment(shaders):
-    env = jinja2.Environment(
-        loader=jinja2.FileSystemLoader(str(shaders)),
-        undefined=jinja2.StrictUndefined,
-        keep_trailing_newline=True,
-    )
-    env.globals["rgb_to_xyz"] = lambda primaries: mat3(to_xyz(primaries))
-    env.globals["xyz_to_rgb"] = lambda primaries: mat3(inverse(to_xyz(primaries)))
-    env.globals["inverse_matrix"] = lambda rows, scale: mat3(inverse([[value / scale for value in row] for row in rows]))
-    return env
-
-
-def tables(shaders):
-    env = environment(shaders)
-    return SimpleNamespace(**{**vars(env.get_template("layouts.jinja").module), **vars(env.get_template("colors.jinja").module)})
-
-
-FAMILIES = {"bayer": "bayer.frag", "palette": "palette.frag"}
-
-
-def render(shaders, variant, facts=None, intermediate=False):
+def render(variant, facts=None):
     layout, system, transfer, conversion, output = variant
-    source = layouts(tables(shaders))[layout]
-    template = environment(shaders).get_template(FAMILIES.get(source["model"], "grid.frag"))
-    context = dict(layout=layout, source=source, system=system, transfer=transfer, conversion=conversion, output=output)
-    if intermediate:
-        import color
-
-        context["color"] = color.build(source["model"], "alpha" in source["flags"], system, transfer, conversion, output, facts)
-    return template.render(**context)
+    return video.shader(layouts(tables())[layout], system, transfer, conversion, output, facts)
 
 
 def layouts(module):
@@ -153,8 +127,8 @@ def check(name, layout):
             raise ValueError(f"component {c} of {name} straddles a word")
 
 
-def variants(shaders):
-    module = tables(shaders)
+def variants():
+    module = tables()
     every = []
     for name, layout in layouts(module).items():
         check(name, layout)
@@ -168,23 +142,23 @@ def variants(shaders):
 PARTS = 16
 
 
-def parts(shaders):
-    names = list(layouts(tables(shaders)))
+def parts():
+    names = list(layouts(tables()))
     return [names[part::PARTS] for part in range(PARTS)]
 
 
-def part_variants(shaders, part):
-    names = parts(shaders)[part]
-    return [variant for variant in variants(shaders) if variant[0] in names]
+def part_variants(part):
+    names = parts()[part]
+    return [variant for variant in variants() if variant[0] in names]
 
 
 def symbol(variant):
     return "video_" + "_".join(variant)
 
 
-def spirv(shaders, variant, glslang, directory, variable=None):
+def spirv(variant, glslang, directory, variable=None):
     source = Path(directory) / f"{symbol(variant)}.frag"
-    source.write_text(render(shaders, variant), encoding="utf-8")
+    source.write_text(render(variant), encoding="utf-8")
     command = [glslang, "--quiet", "--target-env", "vulkan1.1", "-V", "-S", "frag"]
     if variable:
         command += ["--variable-name", variable, "-o", str(source.with_suffix(".h"))]
@@ -201,23 +175,23 @@ def unpragma(text):
     return [line for line in text.splitlines() if line.strip() != "#pragma once"]
 
 
-def compile_layout(shaders, layout, header, glslang):
+def compile_layout(layout, header, glslang):
     lines = []
     with tempfile.TemporaryDirectory(prefix="video-shader-") as directory:
-        for variant in variants(shaders):
+        for variant in variants():
             if variant[0] == layout:
-                part = spirv(shaders, variant, glslang, directory, f"{symbol(variant)}_spv")
+                part = spirv(variant, glslang, directory, f"{symbol(variant)}_spv")
                 lines += unpragma(part.read_text(encoding="utf-8")) + [""]
     Path(header).write_text("\n".join(lines), encoding="utf-8")
 
 
-def msl_layout(shaders, layout, header, glslang, spirv_cross):
+def msl_layout(layout, header, glslang, spirv_cross):
     lines = []
     with tempfile.TemporaryDirectory(prefix="video-shader-") as directory:
-        for variant in variants(shaders):
+        for variant in variants():
             if variant[0] != layout:
                 continue
-            module = spirv(shaders, variant, glslang, directory)
+            module = spirv(variant, glslang, directory)
             source = module.with_suffix(".metal")
             subprocess.run(
                 [spirv_cross, str(module), "--msl", "--msl-version", "20100", "--msl-decoration-binding", "--output", str(source)],
@@ -230,12 +204,12 @@ def msl_layout(shaders, layout, header, glslang, spirv_cross):
     Path(header).write_text("\n".join(lines), encoding="utf-8")
 
 
-def part_source(shaders, part, source, headers, suffix, size):
+def part_source(part, source, headers, suffix, size):
     found = {Path(header).name: Path(header) for header in headers}
     lines = ["#include <video_codes.h>", ""]
-    for layout in parts(shaders)[part]:
+    for layout in parts()[part]:
         lines += unpragma(found[f"video_{layout}.{suffix}.h"].read_text(encoding="utf-8")) + [""]
-    every = part_variants(shaders, int(part))
+    every = part_variants(int(part))
     lines.append(f"const VideoShaderCode videoShaders{part}[{len(every)}] = {{")
     for variant in every:
         layout, system, transfer, conversion, output = variant
@@ -252,8 +226,8 @@ def numbers(values):
     return "{" + ", ".join(f"{value:.12g}" for value in values) + "}"
 
 
-def codes(shaders, header):
-    module = tables(shaders)
+def codes(header):
+    module = tables()
     lines = list(HEADER)
     lines += [
         "struct VideoLayout {",
@@ -350,7 +324,7 @@ def codes(shaders, header):
         "};",
         "",
     ]
-    counts = [len(part_variants(shaders, part)) for part in range(PARTS)]
+    counts = [len(part_variants(part)) for part in range(PARTS)]
     lines += [f"extern const VideoShaderCode videoShaders{part}[{count}];" for part, count in enumerate(counts)]
     lines += ["", "static constexpr VideoShaderPart videoShaderParts[] = {"]
     lines += [f"    {{videoShaders{part}, {count}}}," for part, count in enumerate(counts)]
@@ -360,18 +334,18 @@ def codes(shaders, header):
 
 def main():
     args = sys.argv[1:]
-    if len(args) == 2 and args[0] == "parts":
-        print("\n".join(" ".join(layouts) for layouts in parts(args[1])))
-    elif len(args) == 3 and args[0] == "codes":
-        codes(args[1], args[2])
-    elif len(args) == 5 and args[0] == "compile":
-        compile_layout(args[1], args[2], args[3], args[4])
-    elif len(args) >= 4 and args[0] == "spirv":
-        part_source(args[1], int(args[2]), args[3], args[4:], "spv", lambda name: f"sizeof({name})")
-    elif len(args) == 6 and args[0] == "msl":
-        msl_layout(args[1], args[2], args[3], args[4], args[5])
-    elif len(args) >= 4 and args[0] == "metal":
-        part_source(args[1], int(args[2]), args[3], args[4:], "msl", lambda name: f"sizeof({name}) - 1")
+    if len(args) == 1 and args[0] == "parts":
+        print("\n".join(" ".join(layouts) for layouts in parts()))
+    elif len(args) == 2 and args[0] == "codes":
+        codes(args[1])
+    elif len(args) == 4 and args[0] == "compile":
+        compile_layout(args[1], args[2], args[3])
+    elif len(args) >= 3 and args[0] == "spirv":
+        part_source(int(args[1]), args[2], args[3:], "spv", lambda name: f"sizeof({name})")
+    elif len(args) == 5 and args[0] == "msl":
+        msl_layout(args[1], args[2], args[3], args[4])
+    elif len(args) >= 3 and args[0] == "metal":
+        part_source(int(args[1]), args[2], args[3:], "msl", lambda name: f"sizeof({name}) - 1")
     else:
         raise SystemExit(__doc__)
 

@@ -461,7 +461,7 @@ namespace {
         }
     }
 
-    static void putPiece(float (&out)[3][4], const double (&piece)[11], double top) {
+    static void putPiece(float (&out)[3][4], const double (&piece)[11]) {
         bool knee = piece[10] >= 0. && piece[1] == 1.;
         const double* curved = knee ? piece + 5 : piece;
         const double* straight = knee ? piece : piece + 5;
@@ -477,7 +477,7 @@ namespace {
         out[2][0] = (float)curved[4];
         out[2][1] = 0.f;
         out[2][2] = (float)piece[10];
-        out[2][3] = (float)top;
+        out[2][3] = 0.f;
     }
 
     static void yccMatrix(double kr, double kb, double (&rows)[3][3]) {
@@ -598,7 +598,6 @@ namespace {
             }
         }
 
-        const double unbounded = 3.4e38;
         StringView shape(transfer->shape);
         bool sdr = !strcmp(target->name, "sdr");
         const double* eotf = transfer->eotf;
@@ -609,24 +608,19 @@ namespace {
         out.transfer = transfer->shape;
         out.conversion = same ? "same" : "convert";
         out.output = target->name;
-        putPiece(u.curve, transfer->eotf, unbounded);
-        putPiece(u.oetf, transfer->oetf, unbounded);
-        putPiece(u.inverse, transfer->inverse, unbounded);
+        putPiece(u.curve, transfer->eotf);
+        putPiece(u.oetf, transfer->oetf);
+        putPiece(u.inverse, transfer->inverse);
 
         if (shape == StringView(u8"curve") && same && (sdr ? transferCode == AVCOL_TRC_IEC61966_2_1 : transferCode == AVCOL_TRC_LINEAR)) {
             out.transfer = "identity";
-            out.output = "any";
-            u.curve[2][3] = (float)(sdr ? 1. : unbounded);
-        } else if (shape == StringView(u8"curve") && same && !sdr) {
-            out.output = "any";
-        } else if (shape == StringView(u8"curve") && same && power && (eotf[1] == 1. || eotf[1] == 2.4)) {
+        } else if (shape == StringView(u8"curve") && same && sdr && power && (eotf[1] == 1. || eotf[1] == 2.4)) {
             double scale = eotf[0];
             double gamma = eotf[1];
             const double fused[11] = {1.055 * pow(scale, 1. / 2.4), gamma / 2.4, 1., 0., 0.055, 12.92 * scale, gamma, 1., 0., 0., pow(0.0031308 / scale, 1. / gamma)};
 
-            out.output = "any";
-            putPiece(u.curve, fused, 1.);
-        } else if (shape == StringView(u8"curve") || sdr || shape == StringView(u8"log")) {
+            putPiece(u.curve, fused);
+        } else if (sdr || shape == StringView(u8"log")) {
             out.conversion = "convert";
         }
 

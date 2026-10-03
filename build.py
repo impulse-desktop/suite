@@ -109,27 +109,20 @@ for shader, stage in [] if darwin else [
     ))
 
 
-# the player's color conversion: the Jinja templates in gpu/ render every
-# variant (storage layout x color system x transfer x output); frame.frag is
-# the frame grid.frag, bayer.frag and palette.frag extend with their readers,
-# layouts.jinja and colors.jinja the tables; video_shaders.py renders and
-# compiles a layout's variants in one node, glues the layouts into 16 sources
-# whose arrays of variants video_codes.h gathers into one array of arrays, and
-# lists the layouts and codes the templates know for the player to match
-video_templates = ["frame.frag", "grid.frag", "bayer.frag", "palette.frag", "layouts.jinja", "colors.jinja"]
-video_inputs = [
-    *(f"$(S)/gpu/{name}" for name in video_templates),
-    "$(S)/gpu/video_shaders.py",
-    *build.glob("$(S)/ext/jinja2/*.py"),
-    *build.glob("$(S)/ext/markupsafe/*.py"),
-]
-video_parts = [line.split() for line in subprocess.check_output(["python3", "gpu/video_shaders.py", "parts", "gpu"], text=True).splitlines()]
+# the player's color conversion: gpu/video.py builds each variant (storage
+# layout x color system x transfer x output) as simplified scalar
+# expressions (gpu/ir.py) and prints it as GLSL; video_shaders.py compiles a
+# layout's variants in one node, glues the layouts into 16 sources whose
+# arrays of variants video_codes.h gathers into one array of arrays, and
+# lists the layouts and codes of gpu/tables.py for the player to match
+video_inputs = [f"$(S)/gpu/{name}" for name in ("video_shaders.py", "video.py", "ir.py", "tables.py")]
+video_parts = [line.split() for line in subprocess.check_output(["python3", "gpu/video_shaders.py", "parts"], text=True).splitlines()]
 video_codes = command(
     name="video_codes",
     inputs=video_inputs,
     outputs=["$(B)/shaders/video_codes.h"],
     descr="SH",
-    cmd=["python3", "$(S)/gpu/video_shaders.py", "codes", "$(S)/gpu", "$(B)/shaders/video_codes.h"],
+    cmd=["python3", "$(S)/gpu/video_shaders.py", "codes", "$(B)/shaders/video_codes.h"],
 )
 video_language = "msl" if darwin else "spv"
 video_layout_rules = {layout: command(
@@ -138,7 +131,7 @@ video_layout_rules = {layout: command(
     outputs=["$(B)/shaders/video_" + layout + "." + video_language + ".h"],
     descr="SH",
     cmd=[
-        "python3", "$(S)/gpu/video_shaders.py", "msl" if darwin else "compile", "$(S)/gpu", layout,
+        "python3", "$(S)/gpu/video_shaders.py", "msl" if darwin else "compile", layout,
         "$(B)/shaders/video_" + layout + "." + video_language + ".h", "glslangValidator",
         *(["spirv-cross"] if darwin else []),
     ],
@@ -150,7 +143,7 @@ video_part_rules = [command(
     deps=[video_layout_rules[layout] for layout in layouts],
     descr="SH",
     cmd=[
-        "python3", "$(S)/gpu/video_shaders.py", "metal" if darwin else "spirv", "$(S)/gpu", str(part),
+        "python3", "$(S)/gpu/video_shaders.py", "metal" if darwin else "spirv", str(part),
         f"$(B)/shaders/video_{video_language}_{part}.cpp", *(video_layout_rules[layout].outputs[0] for layout in layouts),
     ],
 ) for part, layouts in enumerate(video_parts)]

@@ -1,10 +1,100 @@
-{%- set layouts = {
+"""The tables the video shaders and the player share.
+
+layouts: one entry per storage shape. Its components are FFmpeg's
+[plane, step, offset, shift, depth]; "formats" names the formats stored
+exactly so ("endians" makes one entry of a little- and big-endian pair,
+the names without their suffix); "fields" names narrower formats stored
+in the same words, with their own shift and depth. The rest are the codes
+of H.273: matrices, transfers (each curve a power segment and a linear
+one, or a single power), primaries, chroma locations, and the chains a
+color system goes through to an output.
+"""
+
+SYSTEMS = {"yuv": ["linear", "cl", "ictcp"]}
+SHAPES = {"ictcp": ["pq", "hlg"]}
+CHAINS = {
+    "curve": [["same", "sdr"], ["same", "hdr"], ["convert", "sdr"], ["convert", "hdr"]],
+    "identity": [["same", "sdr"], ["same", "hdr"]],
+    "log": [["convert", "sdr"], ["convert", "hdr"]],
+    "pq": [["convert", "sdr"], ["same", "hdr"], ["convert", "hdr"]],
+    "hlg": [["convert", "sdr"], ["same", "hdr"], ["convert", "hdr"]],
+}
+
+MATRICES = {
+    0: {"system": "linear", "toSignal": [[0, 0, 1], [1, 0, 0], [0, 1, 0]]},
+    1: {"system": "linear", "weights": [0.2126, 0.0722]},
+    2: {"system": "linear", "weights": "unspecified"},
+    4: {"system": "linear", "weights": [0.30, 0.11]},
+    5: {"system": "linear", "weights": [0.299, 0.114]},
+    6: {"system": "linear", "weights": [0.299, 0.114]},
+    7: {"system": "linear", "weights": [0.212, 0.087]},
+    8: {"system": "linear", "toSignal": [[1, -1, 1], [1, 1, 0], [1, -1, -1]]},
+    9: {"system": "linear", "weights": [0.2627, 0.0593]},
+    10: {"system": "cl", "weights": [0.2627, 0.0593]},
+    11: {"system": "linear", "toSignal": [[0.991902, 0, 2], [1, 0, 0], [1 / 0.986566, 2 / 0.986566, 0]]},
+    12: {"system": "linear", "weights": "primaries"},
+    13: {"system": "cl", "weights": "primaries"},
+    14: {"system": "ictcp"},
+    16: {"system": "linear", "toSignal": [[1, -0.5, 0.5], [1, 0.5, 0], [1, -0.5, -0.5]], "lumaBits": 2},
+    17: {"system": "linear", "toSignal": [[1, -0.5, 0.5], [1, 0.5, 0], [1, -0.5, -0.5]], "lumaBits": 1},
+}
+
+BT709 = 1.099296826809442
+BT709_TOE = 0.018053968510807
+POWER = {gamma: [[1, gamma, 1, 0, 0]] for gamma in (2.2, 2.4, 2.8)}
+CURVES = {
+    "bt709": [[BT709, 0.45, 1, 0, BT709 - 1], [4.5, 1, 1, 0, 0], BT709_TOE],
+    "bt709Inverse": [[1, 1 / 0.45, 1 / BT709, (BT709 - 1) / BT709, 0], [1, 1, 1 / 4.5, 0, 0], 4.5 * BT709_TOE],
+    "smpte240": [[1.1115, 0.45, 1, 0, 0.1115], [4, 1, 1, 0, 0], 0.0228],
+    "smpte240Inverse": [[1, 1 / 0.45, 1 / 1.1115, 0.1115 / 1.1115, 0], [1, 1, 0.25, 0, 0], 4 * 0.0228],
+    "srgb": [[1.055, 1 / 2.4, 1, 0, 0.055], [12.92, 1, 1, 0, 0], 0.0031308],
+    "srgbInverse": [[1, 2.4, 1 / 1.055, 0.055 / 1.055, 0], [1, 1, 1 / 12.92, 0, 0], 0.04045],
+    "dci": [[1, 1 / 2.6, 48 / 52.37, 0, 0]],
+    "dciInverse": [[52.37 / 48, 2.6, 1, 0, 0]],
+    "linear": [[1, 1, 1, 0, 0]],
+    "root22": [[1, 1 / 2.2, 1, 0, 0]],
+    "root28": [[1, 1 / 2.8, 1, 0, 0]],
+}
+BT1886 = {"shape": "curve", "eotf": POWER[2.4], "oetf": CURVES["bt709"], "inverse": CURVES["bt709Inverse"]}
+TRANSFERS = {
+    1: BT1886, 2: BT1886, 6: BT1886, 11: BT1886, 12: BT1886, 14: BT1886, 15: BT1886,
+    4: {"shape": "curve", "eotf": POWER[2.2], "oetf": CURVES["root22"], "inverse": POWER[2.2]},
+    5: {"shape": "curve", "eotf": POWER[2.8], "oetf": CURVES["root28"], "inverse": POWER[2.8]},
+    7: {"shape": "curve", "eotf": POWER[2.4], "oetf": CURVES["smpte240"], "inverse": CURVES["smpte240Inverse"]},
+    8: {"shape": "curve", "eotf": CURVES["linear"], "oetf": CURVES["linear"], "inverse": CURVES["linear"]},
+    9: {"shape": "log", "decades": 2},
+    10: {"shape": "log", "decades": 2.5},
+    13: {"shape": "curve", "eotf": CURVES["srgbInverse"], "oetf": CURVES["srgb"], "inverse": CURVES["srgbInverse"]},
+    16: {"shape": "pq"},
+    17: {"shape": "curve", "eotf": CURVES["dciInverse"], "oetf": CURVES["dci"], "inverse": CURVES["dciInverse"]},
+    18: {"shape": "hlg"},
+}
+
+PRIMARIES = {
+    1: [0.640, 0.330, 0.300, 0.600, 0.150, 0.060, 0.3127, 0.3290],
+    2: [0.640, 0.330, 0.300, 0.600, 0.150, 0.060, 0.3127, 0.3290],
+    4: [0.670, 0.330, 0.210, 0.710, 0.140, 0.080, 0.3100, 0.3160],
+    5: [0.640, 0.330, 0.290, 0.600, 0.150, 0.060, 0.3127, 0.3290],
+    6: [0.630, 0.340, 0.310, 0.595, 0.155, 0.070, 0.3127, 0.3290],
+    7: [0.630, 0.340, 0.310, 0.595, 0.155, 0.070, 0.3127, 0.3290],
+    8: [0.681, 0.319, 0.243, 0.692, 0.145, 0.049, 0.3100, 0.3160],
+    9: [0.708, 0.292, 0.170, 0.797, 0.131, 0.046, 0.3127, 0.3290],
+    10: "xyz",
+    11: [0.680, 0.320, 0.265, 0.690, 0.150, 0.060, 0.3140, 0.3510],
+    12: [0.680, 0.320, 0.265, 0.690, 0.150, 0.060, 0.3127, 0.3290],
+    22: [0.630, 0.340, 0.295, 0.605, 0.155, 0.077, 0.3127, 0.3290],
+}
+OUTPUTS = {"sdr": 1, "hdr": 9}
+RANGES = [0, 1, 2]
+LOCATIONS = {0: [0, 0.5], 1: [0, 0.5], 2: [0.5, 0.5], 3: [0, 0], 4: [0.5, 0], 5: [0, 1], 6: [0.5, 1]}
+
+LAYOUTS = {
     "yuv420p":      {"model": "yuv", "components": [[0, 1, 0, 0, 8], [1, 1, 0, 0, 8], [2, 1, 0, 0, 8]], "formats": "yuv420p yuv422p yuv444p yuv410p yuv411p yuvj420p yuvj422p yuvj444p yuv440p yuvj440p yuvj411p"},
     "yuyv422":      {"model": "yuv", "components": [[0, 2, 0, 0, 8], [0, 4, 1, 0, 8], [0, 4, 3, 0, 8]], "formats": "yuyv422"},
     "rgb24":        {"model": "rgb", "components": [[0, 3, 0, 0, 8], [0, 3, 1, 0, 8], [0, 3, 2, 0, 8]], "formats": "rgb24"},
     "bgr24":        {"model": "rgb", "components": [[0, 3, 2, 0, 8], [0, 3, 1, 0, 8], [0, 3, 0, 0, 8]], "formats": "bgr24"},
     "gray":         {"model": "gray", "components": [[0, 1, 0, 0, 8]], "formats": "gray"},
-    "monow":        {"model": "gray", "flags": ["bits"], "inverted": true, "components": [[0, 1, 0, 0, 1]], "formats": "monow"},
+    "monow":        {"model": "gray", "flags": ["bits"], "inverted": True, "components": [[0, 1, 0, 0, 1]], "formats": "monow"},
     "monob":        {"model": "gray", "flags": ["bits"], "components": [[0, 1, 0, 7, 1]], "formats": "monob"},
     "pal8":         {"model": "palette", "flags": ["alpha"], "components": [[0, 1, 0, 0, 8]], "formats": "pal8"},
     "uyvy422":      {"model": "yuv", "components": [[0, 2, 1, 0, 8], [0, 4, 0, 0, 8], [0, 4, 2, 0, 8]], "formats": "uyvy422"},
@@ -88,4 +178,4 @@
     "v30xbe":       {"model": "yuv", "flags": ["be", "bits"], "components": [[0, 32, 12, 0, 10], [0, 32, 2, 0, 10], [0, 32, 22, 0, 10]], "formats": "v30xbe"},
     "rgb96":        {"model": "rgb", "endians": ["le", "be"], "components": [[0, 12, 0, 0, 32], [0, 12, 4, 0, 32], [0, 12, 8, 0, 32]], "formats": "rgb96"},
     "rgba128":      {"model": "rgb", "endians": ["le", "be"], "flags": ["alpha"], "components": [[0, 16, 0, 0, 32], [0, 16, 4, 0, 32], [0, 16, 8, 0, 32], [0, 16, 12, 0, 32]], "formats": "rgba128"}
-} %}
+}
