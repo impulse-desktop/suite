@@ -566,8 +566,6 @@ namespace {
 
         StringView shape(transfer->shape);
         bool sdr = !strcmp(target->name, "sdr");
-        const double* eotf = transfer->eotf;
-        bool power = eotf[0] == eotf[5] && eotf[1] == eotf[6] && eotf[2] == 1. && eotf[3] == 0. && eotf[4] == 0. && eotf[10] < 0.;
 
         out.system = yuv ? matrix->system : layout->model;
         out.transfer = transfer->shape;
@@ -581,14 +579,6 @@ namespace {
 
         if (shape == StringView(u8"curve") && same && (sdr ? transferCode == AVCOL_TRC_IEC61966_2_1 : transferCode == AVCOL_TRC_LINEAR)) {
             out.transfer = "identity";
-        } else if (shape == StringView(u8"curve") && same && sdr && power && (eotf[1] == 1. || eotf[1] == 2.4)) {
-            double scale = eotf[0];
-            double gamma = eotf[1];
-            const double fused[11] = {1.055 * pow(scale, 1. / 2.4), gamma / 2.4, 1., 0., 0.055, 12.92 * scale, gamma, 1., 0., 0., pow(0.0031308 / scale, 1. / gamma)};
-
-            memcpy(out.curve, fused, sizeof(out.curve));
-        } else if (sdr || shape == StringView(u8"log")) {
-            out.conversion = "convert";
         }
 
         int lumaBits = yuv ? matrix->lumaBits : 0;

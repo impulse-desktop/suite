@@ -214,16 +214,9 @@ def facts(case, layout, components, offsets, lines):
     same = all(abs(to_output[i][j] - (i == j)) < 1e-6 for i in range(3) for j in range(3))
     sdr = case["output"] == "sdr"
     shape, conversion, output = transfer["shape"], "same" if same else "convert", case["output"]
-    eotf = video_shaders.segments(transfer.get("eotf", [[0] * 5]))
     curve = table(transfer.get("eotf"))
-    power = eotf[0] == eotf[1] and eotf[0][2] == 1 and eotf[0][3] == 0 and eotf[0][4] == 0 and eotf[2] < 0
     if shape == "curve" and same and case["transfer"] == (13 if sdr else 8):
         shape = "identity"
-    elif shape == "curve" and same and sdr and power and eotf[0][1] in (1, 2.4):
-        scale, gamma = eotf[0][0], eotf[0][1]
-        curve = [1.055 * scale ** (1 / 2.4), gamma / 2.4, 1, 0, 0.055, 12.92 * scale, gamma, 1, 0, 0, (0.0031308 / scale) ** (1 / gamma)]
-    elif sdr or shape == "log":
-        conversion = "convert"
     levels, scales = [0.0] * 4, [1.0] * 4
     for c, component in enumerate(components if model != "palette" and "float" not in layout["flags"] else []):
         depth = 8 * component[1] if model == "bayer" else component[4]

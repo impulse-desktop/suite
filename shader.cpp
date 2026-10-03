@@ -1582,9 +1582,14 @@ namespace {
                 return;
             }
 
-            if (!strcmp(s.transfer, "curve") && !strcmp(s.conversion, "same")) {
+            const double* e = s.curve;
+            bool power = e[0] == e[5] && e[1] == e[6] && e[2] == 1. && e[3] == 0. && e[4] == 0. && e[10] < 0.;
+
+            if (!strcmp(s.transfer, "curve") && !strcmp(s.conversion, "same") && (!sdr || (power && (e[1] == 1. || e[1] == 2.4)))) {
+                const double fused[11] = {1.055 * ::pow(e[0], 1. / 2.4), e[1] / 2.4, 1., 0., 0.055, 12.92 * e[0], e[1], 1., 0., 0., ::pow(0.0031308 / e[0], 1. / e[1])};
+
                 for (int i = 0; i < 3; i++) {
-                    out[i] = piece(sdr ? g.clamp(signal[i], 0., 1.) : g.max(signal[i], 0.), s.curve);
+                    out[i] = piece(sdr ? g.clamp(signal[i], 0., 1.) : g.max(signal[i], 0.), sdr ? fused : s.curve);
                 }
 
                 return;

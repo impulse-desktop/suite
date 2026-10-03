@@ -697,8 +697,6 @@ VideoShader FormatCheck::describe(const AVFrame* frame, const char* output) {
     memset(&out, 0, sizeof(out));
 
     StringView shape(transfer.shape);
-    const double* eotf = transfer.eotf;
-    bool power = eotf[0] == eotf[5] && eotf[1] == eotf[6] && eotf[2] == 1. && eotf[3] == 0. && eotf[4] == 0. && eotf[10] < 0.;
 
     out.layout = &layout;
     out.system = model == Model::Yuv ? entryOf(videoMatrices, kase.matrix).system : layout.model;
@@ -712,12 +710,6 @@ VideoShader FormatCheck::describe(const AVFrame* frame, const char* output) {
 
     if (shape == StringView(u8"curve") && same && transferCode == (sdr ? AVCOL_TRC_IEC61966_2_1 : AVCOL_TRC_LINEAR)) {
         out.transfer = "identity";
-    } else if (shape == StringView(u8"curve") && same && sdr && power && (eotf[1] == 1. || eotf[1] == 2.4)) {
-        const double fused[11] = {1.055 * pow(eotf[0], 1. / 2.4), eotf[1] / 2.4, 1., 0., 0.055, 12.92 * eotf[0], eotf[1], 1., 0., 0., pow(0.0031308 / eotf[0], 1. / eotf[1])};
-
-        memcpy(out.curve, fused, sizeof(out.curve));
-    } else if (sdr || shape == StringView(u8"log")) {
-        out.conversion = "convert";
     }
 
     double offsets[4] = {};
