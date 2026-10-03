@@ -1,22 +1,29 @@
 #!/usr/bin/env python3
 
-"""Renders video.frag, a Jinja template, into its shader variants.
+"""Renders the player's video shaders, Jinja templates in gpu/, into their variants.
 
-  video_shaders.py parts TEMPLATE
-  video_shaders.py codes TEMPLATE HEADER
-  video_shaders.py compile TEMPLATE LAYOUT HEADER GLSLANG
-  video_shaders.py spirv TEMPLATE PART SOURCE LAYOUT_HEADER...
-  video_shaders.py msl TEMPLATE LAYOUT HEADER GLSLANG SPIRV_CROSS
-  video_shaders.py metal TEMPLATE PART SOURCE LAYOUT_HEADER...
+frame.frag is the frame every variant shares: the uniforms, the color
+chain and main. grid.frag, bayer.frag and palette.frag extend it with the
+reader of their family of layouts. layouts.jinja and colors.jinja hold the
+tables: the storage layouts, and the matrices, transfers, primaries and
+chroma locations the player matches frames against.
+
+  video_shaders.py parts SHADERS
+  video_shaders.py codes SHADERS HEADER
+  video_shaders.py compile SHADERS LAYOUT HEADER GLSLANG
+  video_shaders.py spirv SHADERS PART SOURCE LAYOUT_HEADER...
+  video_shaders.py msl SHADERS LAYOUT HEADER GLSLANG SPIRV_CROSS
+  video_shaders.py metal SHADERS PART SOURCE LAYOUT_HEADER...
 """
 
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.dont_write_bytecode = True
-sys.path.insert(0, str(Path(__file__).resolve().parent / "ext"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "ext"))
 
 import jinja2
 
@@ -72,21 +79,31 @@ def mat3(matrix):
     return "mat3(" + ", ".join(f"{value:.10f}" for value in columns) + ")"
 
 
-def environment(template):
+def environment(shaders):
     env = jinja2.Environment(
-        loader=jinja2.FileSystemLoader(str(Path(template).resolve().parent)),
+        loader=jinja2.FileSystemLoader(str(shaders)),
         undefined=jinja2.StrictUndefined,
         keep_trailing_newline=True,
     )
     env.globals["rgb_to_xyz"] = lambda primaries: mat3(to_xyz(primaries))
     env.globals["xyz_to_rgb"] = lambda primaries: mat3(inverse(to_xyz(primaries)))
     env.globals["inverse_matrix"] = lambda rows, scale: mat3(inverse([[value / scale for value in row] for row in rows]))
-    return env.get_template(Path(template).name)
+    return env
 
 
-def tables(template):
-    source = {"model": "gray", "flags": [], "components": [[0, 1, 0, 0, 8]]}
-    return environment(template).make_module({"layout": "gray", "source": source, "system": "gray", "transfer": "curve", "conversion": "same", "output": "any"})
+def tables(shaders):
+    env = environment(shaders)
+    return SimpleNamespace(**{**vars(env.get_template("layouts.jinja").module), **vars(env.get_template("colors.jinja").module)})
+
+
+FAMILIES = {"bayer": "bayer.frag", "palette": "palette.frag"}
+
+
+def render(shaders, variant):
+    layout, system, transfer, conversion, output = variant
+    source = layouts(tables(shaders))[layout]
+    template = environment(shaders).get_template(FAMILIES.get(source["model"], "grid.frag"))
+    return template.render(layout=layout, source=source, system=system, transfer=transfer, conversion=conversion, output=output)
 
 
 def layouts(module):
@@ -131,8 +148,8 @@ def check(name, layout):
             raise ValueError(f"component {c} of {name} straddles a word")
 
 
-def variants(template):
-    module = tables(template)
+def variants(shaders):
+    module = tables(shaders)
     every = []
     for name, layout in layouts(module).items():
         check(name, layout)
@@ -146,25 +163,23 @@ def variants(template):
 PARTS = 16
 
 
-def parts(template):
-    names = list(layouts(tables(template)))
+def parts(shaders):
+    names = list(layouts(tables(shaders)))
     return [names[part::PARTS] for part in range(PARTS)]
 
 
-def part_variants(template, part):
-    names = parts(template)[part]
-    return [variant for variant in variants(template) if variant[0] in names]
+def part_variants(shaders, part):
+    names = parts(shaders)[part]
+    return [variant for variant in variants(shaders) if variant[0] in names]
 
 
 def symbol(variant):
     return "video_" + "_".join(variant)
 
 
-def spirv(template, variant, glslang, directory, variable=None):
-    layout, system, transfer, conversion, output = variant
-    shape = layouts(tables(template))[layout]
+def spirv(shaders, variant, glslang, directory, variable=None):
     source = Path(directory) / f"{symbol(variant)}.frag"
-    source.write_text(environment(template).render(layout=layout, source=shape, system=system, transfer=transfer, conversion=conversion, output=output), encoding="utf-8")
+    source.write_text(render(shaders, variant), encoding="utf-8")
     command = [glslang, "--quiet", "--target-env", "vulkan1.1", "-V", "-S", "frag"]
     if variable:
         command += ["--variable-name", variable, "-o", str(source.with_suffix(".h"))]
@@ -181,23 +196,23 @@ def unpragma(text):
     return [line for line in text.splitlines() if line.strip() != "#pragma once"]
 
 
-def compile_layout(template, layout, header, glslang):
+def compile_layout(shaders, layout, header, glslang):
     lines = []
     with tempfile.TemporaryDirectory(prefix="video-shader-") as directory:
-        for variant in variants(template):
+        for variant in variants(shaders):
             if variant[0] == layout:
-                part = spirv(template, variant, glslang, directory, f"{symbol(variant)}_spv")
+                part = spirv(shaders, variant, glslang, directory, f"{symbol(variant)}_spv")
                 lines += unpragma(part.read_text(encoding="utf-8")) + [""]
     Path(header).write_text("\n".join(lines), encoding="utf-8")
 
 
-def msl_layout(template, layout, header, glslang, spirv_cross):
+def msl_layout(shaders, layout, header, glslang, spirv_cross):
     lines = []
     with tempfile.TemporaryDirectory(prefix="video-shader-") as directory:
-        for variant in variants(template):
+        for variant in variants(shaders):
             if variant[0] != layout:
                 continue
-            module = spirv(template, variant, glslang, directory)
+            module = spirv(shaders, variant, glslang, directory)
             source = module.with_suffix(".metal")
             subprocess.run(
                 [spirv_cross, str(module), "--msl", "--msl-version", "20100", "--msl-decoration-binding", "--output", str(source)],
@@ -210,12 +225,12 @@ def msl_layout(template, layout, header, glslang, spirv_cross):
     Path(header).write_text("\n".join(lines), encoding="utf-8")
 
 
-def part_source(template, part, source, headers, suffix, size):
+def part_source(shaders, part, source, headers, suffix, size):
     found = {Path(header).name: Path(header) for header in headers}
     lines = ["#include <video_codes.h>", ""]
-    for layout in parts(template)[part]:
+    for layout in parts(shaders)[part]:
         lines += unpragma(found[f"video_{layout}.{suffix}.h"].read_text(encoding="utf-8")) + [""]
-    every = part_variants(template, int(part))
+    every = part_variants(shaders, int(part))
     lines.append(f"const VideoShaderCode videoShaders{part}[{len(every)}] = {{")
     for variant in every:
         layout, system, transfer, conversion, output = variant
@@ -232,8 +247,8 @@ def numbers(values):
     return "{" + ", ".join(f"{value:.12g}" for value in values) + "}"
 
 
-def codes(template, header):
-    module = tables(template)
+def codes(shaders, header):
+    module = tables(shaders)
     lines = list(HEADER)
     lines += [
         "struct VideoLayout {",
@@ -330,7 +345,7 @@ def codes(template, header):
         "};",
         "",
     ]
-    counts = [len(part_variants(template, part)) for part in range(PARTS)]
+    counts = [len(part_variants(shaders, part)) for part in range(PARTS)]
     lines += [f"extern const VideoShaderCode videoShaders{part}[{count}];" for part, count in enumerate(counts)]
     lines += ["", "static constexpr VideoShaderPart videoShaderParts[] = {"]
     lines += [f"    {{videoShaders{part}, {count}}}," for part, count in enumerate(counts)]
