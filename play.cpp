@@ -1907,17 +1907,20 @@ void Screen::draw() {
     ImGui::SetNextWindowPos(vp->Pos);
     ImGui::SetNextWindowSize(vp->Size);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.f);
     ImGui::Begin("##play", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBackground);
-    ImGui::PopStyleVar();
+    ImGui::PopStyleVar(2);
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    ImVec2 lo = vp->Pos;
-    ImVec2 hi(vp->Pos.x + vp->Size.x, vp->Pos.y + vp->Size.y - bar);
+    ImVec2 corner = ImGui::GetCursorScreenPos();
+    ImVec2 room = ImGui::GetContentRegionAvail();
+    ImVec2 lo = corner;
+    ImVec2 hi(corner.x + room.x, corner.y + room.y - bar);
     float width = hi.x - lo.x;
     float height = hi.y - lo.y;
     ImU32 black = IM_COL32(0, 0, 0, 255);
 
-    dl->AddRectFilled(ImVec2(lo.x, hi.y), ImVec2(hi.x, vp->Pos.y + vp->Size.y), ImGui::GetColorU32(ImGuiCol_WindowBg));
+    dl->AddRectFilled(ImVec2(lo.x, hi.y), ImVec2(hi.x, corner.y + room.y), ImGui::GetColorU32(ImGuiCol_WindowBg));
 
     if (shown && width >= 1.f && height >= 1.f) {
         float aspect = (float)shown->aspect;
