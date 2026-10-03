@@ -1,14 +1,23 @@
+# the runner's trees
 /.build*/
 /.b-*/
+build-*/
+out/
+
+# the links the runner publishes into the source root, one per requested target
 /im
 /im_test
 /imscreenshot
-build-*/
-out/
+/links
+/test
+/test_*
+/devices
+/jxl_dump
+/device_uuid
+/video_test
+/renderer_test
+/imgui_frames_test
+
 __pycache__/
 .claude/settings.local.json
 .#*
-/links
-/devices
-/renderer_test
-/imgui_frames_test
