@@ -1570,7 +1570,6 @@ RenderShader* MetalRenderer::compileShader(ObjPool& pool, const void* code, size
         MetalShader* shader = pool.make<MetalShader>();
         shader->renderer = this;
         shader->library = library([NSString stringWithFormat:@"#define GROUP %u\n#define LAYER 1\n%@\n%s", composeTile, layerSource, composeSource]);
-        shader->pipeline(wide ? OutputWideLinear : OutputSrgb);
         return shader;
     }
 }

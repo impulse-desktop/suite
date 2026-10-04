@@ -579,7 +579,7 @@ namespace {
 
     struct VulkanShader final: RenderShader {
         Gpu* gpu = nullptr;
-        stl::Buffer code;
+        Vector<u32> merged;
         VkPipeline pipelines[Outputs] = {};
         u64 lastUse = 0;
 
@@ -1821,9 +1821,6 @@ VkPipeline Gpu::pipeline(const u32* code, size_t bytes, u32 output) {
 
 VkPipeline VulkanShader::pipeline(u32 output) {
     if (!pipelines[output]) {
-        Vector<u32> merged;
-
-        mergeLayer(compose_layer_comp_spv, sizeof(compose_layer_comp_spv) / 4, (const u32*)code.data(), code.length() / 4, merged);
         pipelines[output] = gpu->pipeline(merged.data(), merged.length() * 4, output);
     }
 
@@ -2973,8 +2970,7 @@ RenderShader* VulkanRenderer::compileShader(ObjPool& pool, const void* code, siz
     }
     VulkanShader* shader = pool.make<VulkanShader>();
     shader->gpu = gpu;
-    shader->code.append(code, size);
-    shader->pipeline(gpu->present.wide ? OutputPq : OutputSrgb);
+    mergeLayer(compose_layer_comp_spv, sizeof(compose_layer_comp_spv) / 4, (const u32*)code, size / 4, shader->merged);
     return shader;
 }
 
