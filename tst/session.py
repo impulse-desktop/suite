@@ -232,6 +232,8 @@ class Session:
                 process.kill()
                 process.wait()
                 raise
+        if process.returncode < 0:
+            self.crash(f"client{self.clients}", [str(command or self.link), *args], cwd, self.environment(unset, environment), timeout)
         return process.returncode, log.read_text(errors="replace")
 
     def finished(self, timeout=10):
@@ -502,6 +504,22 @@ class Session:
         except (OSError, subprocess.TimeoutExpired) as error:
             text = f"gdb failed: {error}\n"
         (self.artifacts / f"{label}.stack").write_text(text)
+
+    def crash(self, label, command, cwd, environment, timeout):
+        """A tool that died of a signal, run again under gdb: the stacks of
+        its threads where it died, kept as <label>.crash."""
+        gdb = shutil.which("gdb")
+        if gdb is None:
+            return
+        try:
+            result = subprocess.run(
+                [gdb, "-batch", "-nx", "-ex", "set pagination off", "-ex", "run", "-ex", "thread apply all bt", "--args", *command],
+                env=environment, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout,
+            )
+            text = result.stdout.decode(errors="replace")
+        except (OSError, subprocess.TimeoutExpired) as error:
+            text = f"gdb failed: {error}\n"
+        (self.artifacts / f"{label}.crash").write_text(text)
 
     def __exit__(self, kind, value, traceback):
         if kind is Skip:
