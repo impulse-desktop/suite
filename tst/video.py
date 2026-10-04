@@ -1,9 +1,9 @@
 """Every pixel format FFmpeg describes, with bilinear filtering, with
 lanczos against a CPU model of the filter and through the compute kernel,
-and every matrix, chroma location, color system, transfer and set of
-primaries the video shaders know, from a picture through its shader back
-to that picture. A test node runs one bucket of these checks, by a hash of
-their names."""
+the layer scaled against that model in linear light, and every matrix,
+chroma location, color system, transfer and set of primaries the video
+shaders know, from a picture through its shader back to that picture. A
+test node runs one bucket of these checks, by a hash of their names."""
 import os
 from pathlib import Path
 from session import Session

@@ -29,6 +29,8 @@ namespace {
     constexpr int sampleWidth = 63;
     constexpr int sampleHeight = 47;
     constexpr size_t samplePixels = (size_t)sampleWidth * sampleHeight;
+    constexpr int scaledWidth = 80;
+    constexpr int scaledHeight = 60;
     constexpr double readback = 1. / 512.;
 
     struct Chromaticity {
@@ -109,6 +111,7 @@ namespace {
         void writePalette(AVFrame* frame);
         void linearize(const Case& kase);
         void shade(AVFrame* frame, const char* output, Vector<double>& out);
+        void shade(AVFrame* frame, const VideoShader& facts, bool hdr, Vector<double>& out);
         void compare(StringView what, StringView output, const Vector<double>& got, double tolerance, bool relative);
         void verify(AVFrame* frame, StringView what, double tolerance);
         void verifyLinear(AVFrame* frame, StringView what, double tolerance);
@@ -116,6 +119,7 @@ namespace {
         void check(const Case& kase, StringView what);
         void examine(const Case& kase, StringView what);
         void underlay();
+        void scaled();
         void formats();
         void matrices();
         void locations();
@@ -1095,9 +1099,12 @@ void FormatCheck::linearize(const Case& kase) {
 }
 
 void FormatCheck::shade(AVFrame* frame, const char* output, Vector<double>& out) {
-    VideoShader facts = describe(frame, output);
+    shade(frame, describe(frame, output), !strcmp(output, "hdr"), out);
+}
+
+void FormatCheck::shade(AVFrame* frame, const VideoShader& facts, bool hdr, Vector<double>& out) {
     ScopedPtr<ObjPool> owner{ObjPool::fromMemoryRaw()};
-    RenderImage* image = ui->shadeImage(*owner.ptr, shaderFor(facts), (u32)frame->width, (u32)frame->height, frame->buf[0]->data, frame->buf[0]->size, !strcmp(output, "hdr"), retired);
+    RenderImage* image = ui->shadeImage(*owner.ptr, shaderFor(facts), (u32)frame->width, (u32)frame->height, frame->buf[0]->data, frame->buf[0]->size, hdr, retired);
     ImagePixels pixels;
 
     image->prepare();
@@ -1349,6 +1356,75 @@ void FormatCheck::underlay() {
     }
 }
 
+void FormatCheck::scaled() {
+    if (!mine(StringView(u8"layer scaled"))) {
+        return;
+    }
+
+    Case kase;
+
+    kase.format = AV_PIX_FMT_YUV420P;
+
+    AVFrame* frame = this->frame(kase);
+    STD_DEFER {
+        av_frame_free(&frame);
+    };
+
+    write(frame, kase);
+    linearize(kase);
+
+    VideoShader facts = describe(frame, "hdr");
+    Vector<double> source = expected;
+    Vector<double> got;
+    auto taps = [](double at, int size, int (&index)[6], double (&weight)[6]) {
+        double base = floor(at);
+        double total = 0.;
+
+        for (int k = 0; k < 6; k++) {
+            index[k] = (int)fmin(fmax(base - 2. + k, 0.), size - 1.);
+            weight[k] = lanczos3(k - 2. - (at - base));
+            total += weight[k];
+        }
+
+        for (double& w : weight) {
+            w /= total;
+        }
+    };
+
+    facts.target[0] = scaledWidth;
+    facts.target[1] = scaledHeight;
+    expected.clear();
+
+    for (int y = 0; y < sampleHeight; y++) {
+        int rows[6];
+        double down[6];
+
+        taps((y + 0.5) * sampleHeight / scaledHeight - 0.5, sampleHeight, rows, down);
+
+        for (int x = 0; x < sampleWidth; x++) {
+            int columns[6];
+            double across[6];
+
+            taps((x + 0.5) * sampleWidth / scaledWidth - 0.5, sampleWidth, columns, across);
+
+            for (int c = 0; c < 4; c++) {
+                double total = 0.;
+
+                for (int j = 0; j < 6; j++) {
+                    for (int k = 0; k < 6; k++) {
+                        total += down[j] * across[k] * source[((size_t)rows[j] * sampleWidth + (size_t)columns[k]) * 4 + (size_t)c];
+                    }
+                }
+
+                expected.pushBack(total);
+            }
+        }
+    }
+
+    shade(frame, facts, true, got);
+    compare(StringView(u8"layer scaled"), StringView(u8"hdr"), got, 2. * readback, true);
+}
+
 void FormatCheck::matrices() {
     const AVPixelFormat formats[] = {AV_PIX_FMT_YUV444P, AV_PIX_FMT_YUV444P10LE, AV_PIX_FMT_YUV444P16LE, AV_PIX_FMT_YUV420P, AV_PIX_FMT_NV12, AV_PIX_FMT_P010LE, AV_PIX_FMT_YUYV422, AV_PIX_FMT_Y210LE};
     const AVColorRange ranges[] = {AVCOL_RANGE_UNSPECIFIED, AVCOL_RANGE_MPEG, AVCOL_RANGE_JPEG};
@@ -1544,6 +1620,7 @@ int main(int argc, char** argv) {
             check.filter = "lanczos";
             check.formats();
             check.underlay();
+            check.scaled();
             check.filter = "bilinear";
             check.matrices();
             check.locations();
