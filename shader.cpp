@@ -1845,6 +1845,7 @@ namespace {
             const int tile = (int)s.tile;
             bool sdr = !strcmp(s.output, "sdr");
             bool subsampled = model("yuv") && (s.chroma[0] < 1. || s.chroma[1] < 1.);
+            bool identity = s.size[0] == s.target[0] && s.size[1] == s.target[1];
             double ratio[2];
             int reach[2];
             int chromaReach[2] = {0, 0};
@@ -1856,9 +1857,9 @@ namespace {
 
             for (int i = 0; i < 2; i++) {
                 ratio[i] = (double)s.size[i] / s.target[i];
-                reach[i] = (int)::ceil((tile - 1) * ratio[i]) + 7;
+                reach[i] = identity ? tile : (int)::ceil((tile - 1) * ratio[i]) + 7;
                 first[i] = linear ? g.sub(g.origin(6 + i), (double)s.origin[i]) : g.mul(g.invocation(4 + i, (s.target[i] + tile - 1) / tile - 1), tile);
-                corner[i] = g.add(g.convert(g.floor(g.sub(g.mul(g.add(g.convert(first[i], Kind::Float), 0.5), ratio[i]), 0.5)), Kind::Int), -(lanczosRadius - 1));
+                corner[i] = identity ? g.convert(first[i], Kind::Int) : g.add(g.convert(g.floor(g.sub(g.mul(g.add(g.convert(first[i], Kind::Float), 0.5), ratio[i]), 0.5)), Kind::Int), -(lanczosRadius - 1));
                 last[i] = g.i(s.size[i] - 1.);
 
                 if (subsampled) {
@@ -1918,19 +1919,11 @@ namespace {
                 k.sizes[1] = positions * 2;
             }
 
-            int positions = reach[0] * reach[1];
-
-            for (int pass = 0; pass * tile * tile < positions; pass++) {
-                Node* index = g.add(lane, pass * tile * tile);
-                Node* y = g.convert(g.floor(g.mul(g.add(g.convert(index, Kind::Float), 0.5), 1. / reach[0])), Kind::Uint);
-                Node* x = g.sub(index, g.mul(y, reach[0]));
+            auto lightAt = [&](Node* x, Node* y, Node*(&light)[3]) {
                 Node* at[2] = {g.clamp(g.add(corner[0], g.convert(x, Kind::Int)), 0, last[0]), g.clamp(g.add(corner[1], g.convert(y, Kind::Int)), 0, last[1])};
                 Node* codes[4];
                 Node* signal[3];
-                Node* light[3];
                 Node* alpha;
-                Node* slot = g.mul(index, 3);
-                Node* guard = partial(index, pass, positions, tile * tile);
 
                 decodeAt(at, codes);
 
@@ -1951,39 +1944,56 @@ namespace {
 
                 signalOf(codes, signal, alpha);
                 lightOf(signal, light);
+            };
+            Node* light[3];
 
-                for (int c = 0; c < 3; c++) {
-                    k.stores[2].pushBack(Store{g.add(slot, c), sdr ? sigmoidize(light[c]) : light[c], guard});
-                }
-            }
+            if (identity) {
+                lightAt(local[0], local[1], light);
+            } else {
+                int positions = reach[0] * reach[1];
 
-            k.sizes[2] = positions * 3;
+                for (int pass = 0; pass * tile * tile < positions; pass++) {
+                    Node* index = g.add(lane, pass * tile * tile);
+                    Node* y = g.convert(g.floor(g.mul(g.add(g.convert(index, Kind::Float), 0.5), 1. / reach[0])), Kind::Uint);
+                    Node* x = g.sub(index, g.mul(y, reach[0]));
+                    Node* slot = g.mul(index, 3);
+                    Node* guard = partial(index, pass, positions, tile * tile);
+                    Node* decoded[3];
 
-            Node* across = g.convert(g.add(first[0], linear ? g.convert(local[0], Kind::Int) : local[0]), Kind::Float);
-            Axis horizontal = axis(g.sub(g.mul(g.add(across, 0.5), ratio[0]), 0.5), 1. / ratio[0], true);
-            Node* start = g.convert(g.sub(horizontal.origin, corner[0]), Kind::Uint);
+                    lightAt(x, y, decoded);
 
-            for (int pass = 0; pass * tile < reach[1]; pass++) {
-                Node* row = g.add(local[1], pass * tile);
-                Node* base = g.add(g.mul(row, reach[0]), start);
-                Node* slot = g.mul(g.add(g.mul(row, tile), local[0]), 3);
-                Node* guard = partial(row, pass, reach[1], tile);
-
-                for (int c = 0; c < 3; c++) {
-                    Node* sum = g.f(0.);
-
-                    for (int t = 0; t < horizontal.taps; t++) {
-                        sum = g.add(sum, g.mul(horizontal.w[t], g.shared(g.add(g.mul(g.add(base, t), 3), c), 2)));
+                    for (int c = 0; c < 3; c++) {
+                        k.stores[2].pushBack(Store{g.add(slot, c), sdr ? sigmoidize(decoded[c]) : decoded[c], guard});
                     }
-
-                    k.stores[3].pushBack(Store{g.add(slot, c), sum, guard});
                 }
-            }
 
-            k.sizes[3] = reach[1] * tile * 3;
+                k.sizes[2] = positions * 3;
+
+                Node* across = g.convert(g.add(first[0], linear ? g.convert(local[0], Kind::Int) : local[0]), Kind::Float);
+                Axis horizontal = axis(g.sub(g.mul(g.add(across, 0.5), ratio[0]), 0.5), 1. / ratio[0], true);
+                Node* start = g.convert(g.sub(horizontal.origin, corner[0]), Kind::Uint);
+
+                for (int pass = 0; pass * tile < reach[1]; pass++) {
+                    Node* row = g.add(local[1], pass * tile);
+                    Node* base = g.add(g.mul(row, reach[0]), start);
+                    Node* slot = g.mul(g.add(g.mul(row, tile), local[0]), 3);
+                    Node* guard = partial(row, pass, reach[1], tile);
+
+                    for (int c = 0; c < 3; c++) {
+                        Node* sum = g.f(0.);
+
+                        for (int t = 0; t < horizontal.taps; t++) {
+                            sum = g.add(sum, g.mul(horizontal.w[t], g.shared(g.add(g.mul(g.add(base, t), 3), c), 2)));
+                        }
+
+                        k.stores[3].pushBack(Store{g.add(slot, c), sum, guard});
+                    }
+                }
+
+                k.sizes[3] = reach[1] * tile * 3;
+            }
 
             Node* pixel[2];
-            Node* light[3];
             Node* centre[2];
 
             for (int i = 0; i < 2; i++) {
@@ -1991,18 +2001,20 @@ namespace {
                 centre[i] = g.add(g.convert(pixel[i], Kind::Float), 0.5);
             }
 
-            Node* column = linear ? g.convert(g.clamp(g.sub(pixel[0], first[0]), 0., tile - 1.), Kind::Uint) : g.sub(pixel[0], first[0]);
-            Axis vertical = axis(g.sub(g.mul(centre[1], ratio[1]), 0.5), 1. / ratio[1], true);
-            Node* top = g.convert(g.sub(vertical.origin, corner[1]), Kind::Uint);
+            if (!identity) {
+                Node* column = linear ? g.convert(g.clamp(g.sub(pixel[0], first[0]), 0., tile - 1.), Kind::Uint) : g.sub(pixel[0], first[0]);
+                Axis vertical = axis(g.sub(g.mul(centre[1], ratio[1]), 0.5), 1. / ratio[1], true);
+                Node* top = g.convert(g.sub(vertical.origin, corner[1]), Kind::Uint);
 
-            for (int c = 0; c < 3; c++) {
-                Node* total = g.f(0.);
+                for (int c = 0; c < 3; c++) {
+                    Node* total = g.f(0.);
 
-                for (int t = 0; t < vertical.taps; t++) {
-                    total = g.add(total, g.mul(vertical.w[t], g.shared(g.add(g.mul(g.add(g.mul(g.add(top, t), tile), column), 3), c), 3)));
+                    for (int t = 0; t < vertical.taps; t++) {
+                        total = g.add(total, g.mul(vertical.w[t], g.shared(g.add(g.mul(g.add(g.mul(g.add(top, t), tile), column), 3), c), 3)));
+                    }
+
+                    light[c] = sdr ? unsigmoidize(total) : total;
                 }
-
-                light[c] = sdr ? unsigmoidize(total) : total;
             }
 
             outputOf(light, k.color);
