@@ -1122,6 +1122,10 @@ void FormatCheck::compare(StringView what, StringView output, const Vector<doubl
             continue;
         }
 
+        if (i % 4 != 3 && expected[i - i % 4 + 3] < 1. / 255.) {
+            continue;
+        }
+
         double error = fabs(got[i] - expected[i]) / (relative ? fmax(1., fabs(expected[i])) : 1.);
 
         if (!(error <= worst) && !isnan(worst)) {
@@ -1391,27 +1395,36 @@ void FormatCheck::scaled(StringView what, AVPixelFormat format, int width, int h
     Vector<double> source = expected;
     Vector<double> got;
     double spread = 0.;
-    auto taps = [](int pixel, int size, int target, int (&index)[64], double (&weight)[64]) {
-        double ratio = (double)size / target;
+    auto taps = [](int pixel, int size, int target, int (&index)[256], double (&weight)[256]) {
+        double full = (double)size / target;
+        int box = full > 32. ? (int)ceil(full / 32. - 1e-9) : 1;
+        int boxes = (size + box - 1) / box;
+        double ratio = full / box;
         double at = (pixel + 0.5) * ratio - 0.5;
         double base = floor(at);
         double reach = ratio;
         int half = ratio > 1. ? (int)ceil(reach - 1e-9) : 3;
         double total = 0.;
+        int count = 0;
 
         for (int k = 0; k < 2 * half; k++) {
             double x = fmin(fabs(at - base - (k + 1 - half)) / reach, 1.);
+            int coarse = (int)fmin(fmax(base + 1 - half + k, 0.), boxes - 1.);
+            double w = ratio > 1. ? (2. * x - 3.) * x * x + 1. : lanczos3(k - 2. - (at - base));
 
-            index[k] = (int)fmin(fmax(base + 1 - half + k, 0.), size - 1.);
-            weight[k] = ratio > 1. ? (2. * x - 3.) * x * x + 1. : lanczos3(k - 2. - (at - base));
-            total += weight[k];
+            for (int j = 0; j < box; j++) {
+                index[count] = (int)fmin(coarse * box + j, size - 1.);
+                weight[count++] = w / box;
+            }
+
+            total += w;
         }
 
-        for (int k = 0; k < 2 * half; k++) {
+        for (int k = 0; k < count; k++) {
             weight[k] /= total;
         }
 
-        return 2 * half;
+        return count;
     };
 
     facts.target[0] = (u32)width;
@@ -1419,13 +1432,13 @@ void FormatCheck::scaled(StringView what, AVPixelFormat format, int width, int h
     expected.clear();
 
     for (int y = 0; y < sampleHeight; y++) {
-        int rows[64];
-        double down[64];
+        int rows[256];
+        double down[256];
         int tall = taps(y < height ? y : height - 1, sampleHeight, height, rows, down);
 
         for (int x = 0; x < sampleWidth; x++) {
-            int columns[64];
-            double across[64];
+            int columns[256];
+            double across[256];
             int wide = taps(x < width ? x : width - 1, sampleWidth, width, columns, across);
             double reach = 0.;
 
@@ -1451,7 +1464,7 @@ void FormatCheck::scaled(StringView what, AVPixelFormat format, int width, int h
             }
 
             for (int c = 0; c < 4; c++) {
-                expected.pushBack(c < 3 && layout.alpha ? (totals[3] > 0. ? totals[c] / totals[3] : 0.) : totals[c]);
+                expected.pushBack(c < 3 && layout.alpha ? (totals[3] > 0. ? totals[c] / totals[3] : 0.) : c == 3 && layout.alpha ? fmin(fmax(totals[3], 0.), 1.) : totals[c]);
             }
         }
     }
@@ -1661,6 +1674,8 @@ int main(int argc, char** argv) {
             check.scaled(StringView(u8"layer scaled bgra"), AV_PIX_FMT_BGRA, scaledWidth, scaledHeight);
             check.scaled(StringView(u8"layer shrunk bgra"), AV_PIX_FMT_BGRA, shrunkWidth, shrunkHeight);
             check.scaled(StringView(u8"layer shrunk far bgra"), AV_PIX_FMT_BGRA, farWidth, farHeight);
+            check.scaled(StringView(u8"layer shrunk to a pixel"), AV_PIX_FMT_BGRA, 1, 1);
+            check.scaled(StringView(u8"layer shrunk to a pixel yuv444p"), AV_PIX_FMT_YUV444P, 1, 1);
             check.scaled(StringView(u8"layer scaled pal8"), AV_PIX_FMT_PAL8, scaledWidth, scaledHeight);
             check.scaled(StringView(u8"layer shrunk pal8"), AV_PIX_FMT_PAL8, shrunkWidth, shrunkHeight);
             check.scaled(StringView(u8"layer scaled bayer"), AV_PIX_FMT_BAYER_RGGB8, scaledWidth, scaledHeight);

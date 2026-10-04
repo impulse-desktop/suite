@@ -1192,6 +1192,7 @@ namespace {
             case 250:
                 return i <= 2;
             case 62:
+            case 246:
                 return i <= 1;
             case 12:
                 return i != 3;
@@ -1221,6 +1222,7 @@ namespace {
             case 81:
             case 124:
             case 224:
+            case 246:
             case 247:
             case 248:
             case 249:

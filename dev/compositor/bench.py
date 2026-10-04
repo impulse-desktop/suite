@@ -74,6 +74,8 @@ def ids(ins):
         return [0]
     if op == 250:
         return [0, 1, 2]
+    if op == 246:
+        return [0, 1]
     if op in (253, 56):
         return []
     if op in (248, 254, 55, 61, 62, 65, 80, 124, 224) or 109 <= op <= 200:
@@ -136,7 +138,7 @@ def merge(host_bytes, layer_bytes, name=b"layer("):
         if op in ANNOTATIONS:
             notes.append(ins)
             continue
-        if op in TYPES or op in CONSTANTS or op == 59:
+        if op in TYPES or op in CONSTANTS or (op == 59 and ins[3] != 7):
             result = 1 if op in TYPES else 2
             if op in TYPES and op not in AGGREGATES:
                 k = key(ins, mapping)
