@@ -1038,7 +1038,7 @@ void FormatCheck::write(AVFrame* frame, const Case& kase) {
                 double chromaY = fmin(fmax((y - siteY) / stepY, 0.), chromaHeight - 1.) * stepY + siteY;
                 double ycc[3] = {source(0, x, y), source(1, chromaX, chromaY), source(2, chromaX, chromaY)};
 
-                if (!strcmp(filter, "lanczos") && !strcmp(stage, "fragment")) {
+                if (!strcmp(filter, "lanczos")) {
                     ycc[1] = filtered(1, (x - siteX) / stepX, (y - siteY) / stepY);
                     ycc[2] = filtered(2, (x - siteX) / stepX, (y - siteY) / stepY);
                 }

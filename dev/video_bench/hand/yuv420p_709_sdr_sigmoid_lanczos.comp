@@ -23,10 +23,14 @@ const int SPAN = 24;
 const vec3 evens[3] = vec3[3](vec3(0.0244904064, -0.0226433958, -0.00187803571), vec3(-0.135862093, 0.142553048, -0.00669409677), vec3(0.611371687, -0.119909652, 0.00857213248));
 const vec3 odds[3] = vec3[3](vec3(-0.0319397452, 0.0383419974, -0.00642154827), vec3(0.0905269779, -0.1042344, 0.0137522839), vec3(-0.668230721, 0.191258225, -0.0231172403));
 
+const float halfway[3] = float[3](0.6114130435, -0.1358695652, 0.0244565217);
+const float quarter[6] = float[6](0.0301122854, -0.1332746355, 0.8927707741, 0.2710105683, -0.0679972630, 0.0073782709);
+const float threeQuarters[6] = float[6](0.0073782709, -0.0679972630, 0.2710105683, 0.8927707741, -0.1332746355, 0.0301122854);
+
 shared vec3 lit[SPAN * SPAN];
-shared vec2 chromas[16 * 16];
+shared vec2 chromas[20 * 20];
+shared vec2 rows[20 * SPAN];
 ivec2 chromaCorner;
-int chromaWidth;
 shared vec3 across[SPAN * 16];
 
 vec3 sigmoidize(vec3 x) {
@@ -61,7 +65,7 @@ void weights(float f, out float w[6]) {
     }
 }
 
-vec3 source(ivec2 c);
+vec3 source(ivec2 c, int column);
 
 void main() {
     vec2 size = vec2(frame.size.xy);
@@ -74,10 +78,9 @@ void main() {
     ivec2 last = ivec2(size) - 1;
     uint local = gl_LocalInvocationIndex;
     ivec2 chromaLast = ivec2(frame.size.zw) - 1;
-    ivec2 chromaReach = ivec2(ceil(vec2(reach - 1) * 0.5)) + 3;
+    ivec2 chromaReach = ivec2(ceil(vec2(reach - 1) * 0.5)) + 7;
 
-    chromaCorner = ivec2(floor(vec2(origin) * 0.5 - vec2(0.0, 0.25)));
-    chromaWidth = chromaReach.x;
+    chromaCorner = ivec2(floor(vec2(origin) * 0.5 - vec2(0.0, 0.25))) - 2;
 
     for (uint i = local; i < uint(chromaReach.x * chromaReach.y); i += 256u) {
         ivec2 c = clamp(chromaCorner + ivec2(int(i % uint(chromaReach.x)), int(i / uint(chromaReach.x))), ivec2(0), chromaLast);
@@ -87,10 +90,22 @@ void main() {
 
     barrier();
 
+    for (uint i = local; i < uint(reach.x * chromaReach.y); i += 256u) {
+        int row = int(i) / reach.x;
+        int column = int(i) % reach.x;
+        int x = clamp(origin.x + column, 0, last.x);
+        int at = row * chromaReach.x + (x >> 1) - chromaCorner.x;
+        vec2 between = halfway[0] * (chromas[at] + chromas[at + 1]) + halfway[1] * (chromas[at - 1] + chromas[at + 2]) + halfway[2] * (chromas[at - 2] + chromas[at + 3]);
+
+        rows[row * SPAN + column] = (x & 1) != 0 ? between : chromas[at];
+    }
+
+    barrier();
+
     for (uint i = local; i < uint(reach.x * reach.y); i += 256u) {
         ivec2 c = clamp(origin + ivec2(int(i % uint(reach.x)), int(i / uint(reach.x))), ivec2(0), last);
 
-        lit[(int(i) / reach.x) * SPAN + int(i) % reach.x] = sigmoidize(source(c));
+        lit[(int(i) / reach.x) * SPAN + int(i) % reach.x] = sigmoidize(source(c, int(i) % reach.x));
     }
 
     barrier();
@@ -138,15 +153,15 @@ void main() {
     imageStore(target, p, vec4(srgbEncode(clamp(unsigmoidize(total), 0.0, 1.0)), 1.0));
 }
 
-vec3 source(ivec2 c) {
-    ivec2 chromaLast = ivec2(frame.size.zw) - 1;
-    vec2 at = vec2(c) * 0.5 - vec2(0.0, 0.25);
-    vec2 base = floor(at);
-    vec2 f = at - base;
-    ivec2 b = ivec2(base) - chromaCorner;
-    vec2 top = mix(chromas[b.y * chromaWidth + b.x], chromas[b.y * chromaWidth + b.x + 1], f.x);
-    vec2 bottom = mix(chromas[(b.y + 1) * chromaWidth + b.x], chromas[(b.y + 1) * chromaWidth + b.x + 1], f.x);
-    vec2 both = mix(top, bottom, f.y);
+vec3 source(ivec2 c, int column) {
+    bool odd = (c.y & 1) != 0;
+    int first = (c.y >> 1) - (odd ? 0 : 1) - 2 - chromaCorner.y;
+    vec2 both = vec2(0.0);
+
+    for (int k = 0; k < 6; k++) {
+        both += (odd ? quarter[k] : threeQuarters[k]) * rows[(first + k) * SPAN + column];
+    }
+
     float y = float(byteAt(0u, c)) * 0.004566210046;
     float cb = both.x;
     float cr = both.y;

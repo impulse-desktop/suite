@@ -8,7 +8,8 @@ so both sides decode the same curve), and scaled back to the crop's size by
 our shaders (fragment bilinear, fragment lanczos, the lanczos kernel) and by
 libplacebo's fast, default and high-quality presets. Each result is
 compared with the crop: PSNR and RMSE in linear light over RGB, the mean
-OKLab difference and its chroma part, and SSIM of luma.
+OKLab difference and its chroma part, SSIM of luma and SSIMULACRA 2 (higher
+is better: 100 is identical, 90 is visually lossless).
 
   ix run set/pg/libs bin/jxl lib/placebo/7 --vulkan=amd/radv lib/vulkan/drivers --vulkan=amd/radv -- \\
       python3 dev/video_bench/quality.py --compiler BUILD/dev/video_shader [--work DIR] [--ratios 1.333,2] [NAME...]
@@ -33,7 +34,7 @@ TARGET = (960, 540)
 OURS = [("bilinear", "bilinear", "fragment"), ("lanczos", "lanczos", "fragment"), ("kernel", "lanczos", "kernel")]
 PRESETS = ("fast", "default", "high_quality")
 VARIANTS = [name for name, _, _ in OURS] + [f"placebo_{preset}" for preset in PRESETS]
-METRICS = ("psnr", "linear", "delta", "chroma", "ssim")
+METRICS = ("psnr", "linear", "delta", "chroma", "ssim", "ssimulacra2")
 BATCH = 48
 
 
@@ -138,11 +139,11 @@ def report(results, ratios):
         rows = [row for row in results if row[1] == ratio]
         names = sorted({row[0] for row in rows})
         table = {(row[0], row[2]): row[3] for row in rows}
-        print(f"x{ratio:g} ({len(names)} pictures)          psnr   linear    delta   chroma     ssim  psnr>default")
+        print(f"x{ratio:g} ({len(names)} pictures)          psnr   linear    delta   chroma     ssim  ssimulacra2  psnr>default  ssimulacra2>default")
         for variant in VARIANTS:
             means = [sum(table[(name, variant)][metric] for name in names) / len(names) for metric in METRICS]
-            wins = sum(table[(name, variant)]["psnr"] > table[(name, "placebo_default")]["psnr"] for name in names)
-            print(f"  {variant:22} {means[0]:7.3f} {means[1]:8.5f} {means[2]:8.5f} {means[3]:8.5f} {means[4]:8.5f}  {wins:3d}/{len(names)}")
+            wins = [sum(table[(name, variant)][metric] > table[(name, "placebo_default")][metric] for name in names) for metric in ("psnr", "ssimulacra2")]
+            print(f"  {variant:22} {means[0]:7.3f} {means[1]:8.5f} {means[2]:8.5f} {means[3]:8.5f} {means[4]:8.5f}  {means[5]:11.3f}  {wins[0]:3d}/{len(names)}       {wins[1]:3d}/{len(names)}")
 
 
 def main():

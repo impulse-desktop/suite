@@ -905,7 +905,7 @@ namespace {
         Node* value;
     };
 
-    constexpr int kernelArrays = 3;
+    constexpr int kernelArrays = 4;
 
     struct Kernel {
         Vector<Store> stores[kernelArrays];
@@ -1754,6 +1754,48 @@ namespace {
             }
         }
 
+        struct Taps {
+            int count;
+            int radius;
+            Node* base;
+            Node* w[lanczosTaps];
+        };
+
+        Taps chromaTaps(Node* at, int i) {
+            Taps t;
+            int factor = (int)::lround(1. / s.chroma[i]);
+            int shift = factor == 4 ? 2 : factor == 2 ? 1 : 0;
+            Node* index = g.convert(at, Kind::Uint);
+            Node* residue = g.band(index, (double)(factor - 1));
+
+            t.count = factor > 1 ? lanczosTaps : 1;
+            t.radius = factor > 1 ? lanczosRadius - 1 : 0;
+            t.base = nullptr;
+
+            for (int r = factor - 1; r >= 0; r--) {
+                double place = r * s.chroma[i] - s.chroma[2 + i];
+                double whole = ::floor(place);
+                double w[lanczosTaps] = {1.};
+                Node* first = g.i(whole - t.radius);
+
+                if (factor > 1) {
+                    lanczosWeights(place - whole, w);
+                }
+
+                Node* match = g.eq(residue, (double)r);
+
+                t.base = t.base ? g.select(match, first, t.base) : first;
+
+                for (int k = 0; k < t.count; k++) {
+                    t.w[k] = r == factor - 1 ? g.f(w[k]) : g.select(match, g.f(w[k]), t.w[k]);
+                }
+            }
+
+            t.base = g.add(g.convert(g.shr(index, (double)shift), Kind::Int), t.base);
+
+            return t;
+        }
+
         void kernel(Kernel& k) {
             bool sdr = !strcmp(s.output, "sdr");
             bool subsampled = model("yuv") && (s.chroma[0] < 1. || s.chroma[1] < 1.);
@@ -1774,8 +1816,10 @@ namespace {
                 last[i] = g.i(s.size[i] - 1.);
 
                 if (subsampled) {
-                    chromaCorner[i] = g.convert(g.floor(g.sub(g.mul(g.convert(corner[i], Kind::Float), s.chroma[i]), s.chroma[2 + i])), Kind::Int);
-                    chromaReach[i] = (int)::ceil((reach[i] - 1) * s.chroma[i]) + 3;
+                    int radius = s.chroma[i] < 1. ? lanczosRadius - 1 : 0;
+
+                    chromaCorner[i] = g.add(g.convert(g.floor(g.sub(g.mul(g.convert(corner[i], Kind::Float), s.chroma[i]), s.chroma[2 + i])), Kind::Int), -radius);
+                    chromaReach[i] = (int)::ceil((reach[i] - 1) * s.chroma[i]) + 3 + 2 * radius;
                 }
             }
 
@@ -1801,6 +1845,29 @@ namespace {
                 }
 
                 k.sizes[0] = positions * 2 + 2;
+                positions = reach[0] * chromaReach[1];
+
+                for (int pass = 0; pass * tile * tile < positions; pass++) {
+                    Node* index = g.add(lane, pass * tile * tile);
+                    Node* y = g.convert(g.floor(g.mul(g.add(g.convert(index, Kind::Float), 0.5), 1. / reach[0])), Kind::Uint);
+                    Node* x = g.sub(index, g.mul(y, reach[0]));
+                    Node* row = g.min(y, chromaReach[1] - 1.);
+                    Taps across = chromaTaps(g.clamp(g.add(corner[0], g.convert(x, Kind::Int)), 0, last[0]), 0);
+                    Node* start = g.convert(g.sub(across.base, chromaCorner[0]), Kind::Uint);
+                    Node* slot = g.select(g.lt(index, positions), g.mul(index, 2), positions * 2);
+
+                    for (int c = 1; c <= 2; c++) {
+                        Node* sum = g.f(0.);
+
+                        for (int t = 0; t < across.count; t++) {
+                            sum = g.add(sum, g.mul(across.w[t], g.shared(g.add(g.mul(g.add(g.mul(row, chromaReach[0]), g.add(start, t)), 2), c - 1), 0)));
+                        }
+
+                        k.stores[1].pushBack(Store{g.add(slot, c - 1), sum});
+                    }
+                }
+
+                k.sizes[1] = positions * 2 + 2;
             }
 
             int positions = reach[0] * reach[1];
@@ -1809,7 +1876,7 @@ namespace {
                 Node* index = g.add(lane, pass * tile * tile);
                 Node* y = g.convert(g.floor(g.mul(g.add(g.convert(index, Kind::Float), 0.5), 1. / reach[0])), Kind::Uint);
                 Node* x = g.sub(index, g.mul(y, reach[0]));
-                Node* at[2] = {g.clamp(g.add(corner[0], g.convert(x, Kind::Int)), 0, last[0]), g.clamp(g.add(corner[1], g.convert(y, Kind::Int)), 0, last[1])};
+                Node* at[2] = {g.clamp(g.add(corner[0], g.convert(x, Kind::Int)), 0, last[0]), g.clamp(g.add(corner[1], g.convert(g.min(y, reach[1] - 1.), Kind::Int)), 0, last[1])};
                 Node* codes[4];
                 Node* signal[3];
                 Node* light[3];
@@ -1819,29 +1886,17 @@ namespace {
                 decodeAt(at, codes);
 
                 if (subsampled) {
-                    Node* f[2];
-                    Node* base[2];
-
-                    for (int i = 0; i < 2; i++) {
-                        Node* place = g.sub(g.mul(g.convert(at[i], Kind::Float), s.chroma[i]), s.chroma[2 + i]);
-                        Node* floor = g.floor(place);
-
-                        f[i] = g.sub(place, floor);
-                        base[i] = g.convert(g.sub(g.convert(floor, Kind::Int), chromaCorner[i]), Kind::Uint);
-                    }
+                    Taps down = chromaTaps(at[1], 1);
+                    Node* start = g.convert(g.sub(down.base, chromaCorner[1]), Kind::Uint);
 
                     for (int c = 1; c <= 2; c++) {
-                        Node* taps[2][2];
+                        Node* sum = g.f(0.);
 
-                        for (int r = 0; r < 2; r++) {
-                            for (int q = 0; q < 2; q++) {
-                                Node* index = g.add(g.mul(g.add(g.mul(g.add(base[1], r), chromaReach[0]), g.add(base[0], q)), 2), c - 1);
-
-                                taps[r][q] = g.shared(index, 0);
-                            }
+                        for (int t = 0; t < down.count; t++) {
+                            sum = g.add(sum, g.mul(down.w[t], g.shared(g.add(g.mul(g.add(g.mul(g.add(start, t), reach[0]), x), 2), c - 1), 1)));
                         }
 
-                        codes[c] = g.mix(g.mix(taps[0][0], taps[0][1], f[0]), g.mix(taps[1][0], taps[1][1], f[0]), f[1]);
+                        codes[c] = sum;
                     }
                 }
 
@@ -1849,11 +1904,11 @@ namespace {
                 lightOf(signal, light);
 
                 for (int c = 0; c < 3; c++) {
-                    k.stores[1].pushBack(Store{g.add(slot, c), sdr ? sigmoidize(light[c]) : light[c]});
+                    k.stores[2].pushBack(Store{g.add(slot, c), sdr ? sigmoidize(light[c]) : light[c]});
                 }
             }
 
-            k.sizes[1] = positions * 3 + 3;
+            k.sizes[2] = positions * 3 + 3;
 
             Node* across = g.convert(g.add(g.mul(group[0], tile), local[0]), Kind::Float);
             Axis horizontal = axis(g.sub(g.mul(g.add(across, 0.5), ratio[0]), 0.5), 1. / ratio[0], true);
@@ -1868,14 +1923,14 @@ namespace {
                     Node* sum = g.f(0.);
 
                     for (int t = 0; t < horizontal.taps; t++) {
-                        sum = g.add(sum, g.mul(horizontal.w[t], g.shared(g.add(g.mul(g.add(base, t), 3), c), 1)));
+                        sum = g.add(sum, g.mul(horizontal.w[t], g.shared(g.add(g.mul(g.add(base, t), 3), c), 2)));
                     }
 
-                    k.stores[2].pushBack(Store{g.add(slot, c), sum});
+                    k.stores[3].pushBack(Store{g.add(slot, c), sum});
                 }
             }
 
-            k.sizes[2] = reach[1] * tile * 3 + 3;
+            k.sizes[3] = reach[1] * tile * 3 + 3;
 
             Node* pixel[2];
             Node* light[3];
@@ -1894,7 +1949,7 @@ namespace {
                 Node* total = g.f(0.);
 
                 for (int t = 0; t < vertical.taps; t++) {
-                    total = g.add(total, g.mul(vertical.w[t], g.shared(g.add(g.mul(g.add(g.mul(g.add(top, t), tile), column), 3), c), 2)));
+                    total = g.add(total, g.mul(vertical.w[t], g.shared(g.add(g.mul(g.add(g.mul(g.add(top, t), tile), column), 3), c), 3)));
                 }
 
                 light[c] = sdr ? unsigmoidize(total) : total;
@@ -1993,7 +2048,7 @@ namespace {
         }
     }
 
-    const char* const sharedNames[kernelArrays] = {"sharedA", "sharedB", "sharedC"};
+    const char* const sharedNames[kernelArrays] = {"sharedA", "sharedB", "sharedC", "sharedD"};
 
     static void statements(StringBuilder& out, const Vector<Node*>& nodes, u32& next) {
         for (Node* node : nodes) {
@@ -2285,7 +2340,7 @@ namespace {
         u32 main = s.fresh();
         u32 label = s.fresh();
         u32 sharedFloat = s.fresh();
-        u32 arrays[kernelArrays] = {s.fresh(), s.fresh(), s.fresh()};
+        u32 arrays[kernelArrays] = {s.fresh(), s.fresh(), s.fresh(), s.fresh()};
         u32 inputs[6] = {s.fresh(), s.fresh(), s.fresh(), s.fresh(), s.fresh(), s.fresh()};
         u32 zero = 0;
         u32 one = 0;
@@ -2564,9 +2619,9 @@ namespace {
         u32 image = s.fresh();
         u32 local = s.fresh();
         u32 group = s.fresh();
-        u32 lengths[kernelArrays] = {s.fresh(), s.fresh(), s.fresh()};
-        u32 arrayTypes[kernelArrays] = {s.fresh(), s.fresh(), s.fresh()};
-        u32 arrayPointers[kernelArrays] = {s.fresh(), s.fresh(), s.fresh()};
+        u32 lengths[kernelArrays] = {s.fresh(), s.fresh(), s.fresh(), s.fresh()};
+        u32 arrayTypes[kernelArrays] = {s.fresh(), s.fresh(), s.fresh(), s.fresh()};
+        u32 arrayPointers[kernelArrays] = {s.fresh(), s.fresh(), s.fresh(), s.fresh()};
         u32 scope = s.fresh();
         u32 semantics = s.fresh();
         u32 ids[2] = {s.fresh(), s.fresh()};
