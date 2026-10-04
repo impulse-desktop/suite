@@ -114,7 +114,7 @@ namespace {
         void linearize(const Case& kase);
         void shade(AVFrame* frame, const char* output, Vector<double>& out);
         void shade(AVFrame* frame, const VideoShader& facts, bool hdr, Vector<double>& out);
-        void compare(StringView what, StringView output, const Vector<double>& got, double tolerance, bool relative);
+        void compare(StringView what, StringView output, const Vector<double>& got, double tolerance, bool relative, int width = sampleWidth, int height = sampleHeight);
         void verify(AVFrame* frame, StringView what, double tolerance);
         void verifyLinear(AVFrame* frame, StringView what, double tolerance);
         double tolerance(const Case& kase, const VideoLayout& layout);
@@ -1122,11 +1122,15 @@ void FormatCheck::shade(AVFrame* frame, const VideoShader& facts, bool hdr, Vect
     }
 }
 
-void FormatCheck::compare(StringView what, StringView output, const Vector<double>& got, double tolerance, bool relative) {
+void FormatCheck::compare(StringView what, StringView output, const Vector<double>& got, double tolerance, bool relative, int width, int height) {
     double worst = 0.;
     size_t at = 0;
 
     for (size_t i = 0; i < samplePixels * 4; i++) {
+        if ((int)(i / 4 % sampleWidth) >= width || (int)(i / 4 / sampleWidth) >= height) {
+            continue;
+        }
+
         double error = fabs(got[i] - expected[i]) / (relative ? fmax(1., fabs(expected[i])) : 1.);
 
         if (!(error <= worst) && !isnan(worst)) {
@@ -1447,7 +1451,7 @@ void FormatCheck::scaled(StringView what, int width, int height) {
     }
 
     shade(frame, facts, true, got);
-    compare(what, StringView(u8"hdr"), got, 2.4 * tolerance(kase, *layoutOf("yuv420p")) * spread, true);
+    compare(what, StringView(u8"hdr"), got, 2.4 * tolerance(kase, *layoutOf("yuv420p")) * spread, true, width, height);
 }
 
 void FormatCheck::matrices() {
