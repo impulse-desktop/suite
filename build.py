@@ -379,7 +379,7 @@ if not darwin:
 
     # a scenario with buckets becomes that many test nodes, each running the
     # checks whose names hash into its bucket
-    buckets = {"video": 32}
+    buckets = {"video": 64}
 
     runs = []
     for scenario in sorted(set(build.glob("$(S)/tst/*.py")) - set(harness)):
