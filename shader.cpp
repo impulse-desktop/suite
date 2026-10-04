@@ -991,7 +991,6 @@ namespace {
         int count = 0;
         u32 sizes[kernelBuffers] = {};
         u32 tile = 0;
-        Node* at[2];
         Node* color[4];
 
         int open(u32 size) {
@@ -1062,7 +1061,6 @@ namespace {
         Graph& g;
         const VideoShader& s;
         const VideoLayout& l;
-        bool linear = false;
 
         bool model(const char* name) const {
             return !strcmp(l.model, name);
@@ -1210,13 +1208,21 @@ namespace {
             Node* w[maxTaps];
         };
 
-        Axis axis(Node* at, double ratio, bool sharp) {
+        Axis axis(Node* at, double ratio) {
             Axis a;
             Node* floor = g.floor(at);
             Node* base = g.convert(floor, Kind::Int);
             Node* f = g.sub(at, floor);
 
-            if (ratio >= 1. && sharp) {
+            if (ratio == 1.) {
+                a.taps = 1;
+                a.w[0] = g.f(1.);
+                a.origin = g.convert(g.floor(g.add(at, 0.5)), Kind::Int);
+
+                return a;
+            }
+
+            if (ratio > 1.) {
                 const LanczosFit& fit = lanczosFitted();
                 Node* t = g.sub(g.mul(f, 2.), 1.);
                 Node* square = g.mul(t, t);
@@ -1239,10 +1245,6 @@ namespace {
                     a.w[k] = g.add(even, odd);
                     a.w[lanczosTaps - 1 - k] = g.sub(even, odd);
                 }
-            } else if (ratio >= 1.) {
-                a.taps = 2;
-                a.w[0] = g.sub(1., f);
-                a.w[1] = f;
             } else {
                 double reach = ::fmin(1. / ratio, maxTaps / 2.);
                 int half = (int)::ceil(reach - 1e-9);
@@ -1354,8 +1356,8 @@ namespace {
             }
         }
 
-        void filtered(Node* const (&at)[2], Node* const (&extent)[2], const double (&ratio)[2], bool sharp, const int* members, int count, Node* (&slots)[4]) {
-            Axis a[2] = {axis(at[0], ratio[0], sharp), axis(at[1], ratio[1], sharp)};
+        void filtered(Node* const (&at)[2], Node* const (&extent)[2], const double (&ratio)[2], const int* members, int count, Node* (&slots)[4]) {
+            Axis a[2] = {axis(at[0], ratio[0]), axis(at[1], ratio[1])};
             int taps = a[0].taps;
             bool whole = extent[0]->value >= taps;
 
@@ -1563,24 +1565,12 @@ namespace {
             }
 
             Node* extent[2] = {g.u(s.size[0]), g.u(s.size[1])};
-
-            bool sharp = !strcmp(s.filter, "lanczos");
-
-            if (!sharp && strcmp(s.filter, "bilinear")) {
-                fail(StringView(u8"a video shader has an unknown filter"));
-            }
-
             double ratio[2] = {(double)s.target[0] / s.size[0], (double)s.target[1] / s.size[1]};
-            bool shaped = sharp || ratio[0] < 1. || ratio[1] < 1.;
 
             if (!model("yuv")) {
                 const int members[4] = {0, 1, 2, 3};
 
-                if (shaped) {
-                    filtered(at, extent, ratio, sharp, members, l.count, out);
-                } else {
-                    grid(at, extent, members, l.count, out);
-                }
+                filtered(at, extent, ratio, members, l.count, out);
 
                 return;
             }
@@ -1593,13 +1583,8 @@ namespace {
 
             double chromaRatio[2] = {(double)s.target[0] / s.size[2], (double)s.target[1] / s.size[3]};
 
-            if (shaped) {
-                filtered(at, extent, ratio, sharp, luma, l.alpha ? 2 : 1, out);
-                filtered(chromaAt, chromaExtent, chromaRatio, sharp, chroma, 2, sampled);
-            } else {
-                grid(at, extent, luma, l.alpha ? 2 : 1, out);
-                grid(chromaAt, chromaExtent, chroma, 2, sampled);
-            }
+            filtered(at, extent, ratio, luma, l.alpha ? 2 : 1, out);
+            filtered(chromaAt, chromaExtent, chromaRatio, chroma, 2, sampled);
 
             for (int i = 0; i < 4; i++) {
                 out[i] = g.add(out[i], sampled[i]);
@@ -1812,52 +1797,15 @@ namespace {
                     continue;
                 }
 
-                Node* display = g.clamp(light[i], 0., 1.);
-
-                if (linear) {
-                    out[i] = display;
-                    continue;
-                }
-
-                out[i] = g.select(g.le(display, 0.0031308), g.mul(display, 12.92), g.sub(g.mul(g.pow(display, 1. / 2.4), 1.055), 0.055));
+                out[i] = g.clamp(light[i], 0., 1.);
             }
         }
 
         void color(Node* const (&codes)[4], Node* (&out)[4]) {
             Node* signal[3];
             Node* light[3];
-            bool sdr = !strcmp(s.output, "sdr");
 
             signalOf(codes, signal, out[3]);
-
-            if (linear) {
-                lightOf(signal, light);
-                outputOf(light, out);
-
-                return;
-            }
-
-            if (!strcmp(s.transfer, "identity")) {
-                for (int i = 0; i < 3; i++) {
-                    out[i] = sdr ? g.clamp(signal[i], 0., 1.) : g.max(signal[i], 0.);
-                }
-
-                return;
-            }
-
-            const double* e = s.curve;
-            bool power = e[0] == e[5] && e[1] == e[6] && e[2] == 1. && e[3] == 0. && e[4] == 0. && e[10] < 0.;
-
-            if (!strcmp(s.transfer, "curve") && !strcmp(s.conversion, "same") && (!sdr || (power && (e[1] == 1. || e[1] == 2.4)))) {
-                const double fused[11] = {1.055 * ::pow(e[0], 1. / 2.4), e[1] / 2.4, 1., 0., 0.055, 12.92 * e[0], e[1], 1., 0., 0., ::pow(0.0031308 / e[0], 1. / e[1])};
-
-                for (int i = 0; i < 3; i++) {
-                    out[i] = piece(sdr ? g.clamp(signal[i], 0., 1.) : g.max(signal[i], 0.), sdr ? fused : s.curve);
-                }
-
-                return;
-            }
-
             lightOf(signal, light);
             outputOf(light, out);
         }
@@ -1963,21 +1911,19 @@ namespace {
             Node* last[2];
             Node* light[3];
             Node* pixel[2];
-            Node* centre[2];
             Vector<Node*> pending;
 
             for (int i = 0; i < 2; i++) {
                 ratio[i] = (double)s.size[i] / s.target[i];
-                first[i] = linear ? g.sub(g.origin(6 + i), (double)s.origin[i]) : g.mul(g.invocation(4 + i, (s.target[i] + tile - 1) / tile - 1), tile);
+                first[i] = g.sub(g.origin(6 + i), (double)s.origin[i]);
                 last[i] = g.i(s.size[i] - 1.);
-                pixel[i] = linear ? g.clamp(g.add(first[i], g.convert(local[i], Kind::Int)), 0., s.target[i] - 1.) : g.min(g.add(first[i], local[i]), s.target[i] - 1.);
-                centre[i] = g.add(g.convert(pixel[i], Kind::Float), 0.5);
+                pixel[i] = g.clamp(g.add(first[i], g.convert(local[i], Kind::Int)), 0., s.target[i] - 1.);
             }
 
             Node* lane = g.add(g.mul(local[1], tile), local[0]);
 
             for (int top = 0; top < tile; top += rows) {
-                Node* opening = linear ? g.clamp(g.add(first[1], top), 0., s.target[1] - 1.) : g.min(g.add(first[1], top), s.target[1] - 1.);
+                Node* opening = g.clamp(g.add(first[1], top), 0., s.target[1] - 1.);
                 Node* head[2] = {first[0], rows == tile ? first[1] : opening};
                 int reach[2] = {reachOf(ratio[0], tile, identity), reachOf(ratio[1], rows, identity)};
                 int chromaReach[2] = {0, 0};
@@ -2101,8 +2047,8 @@ namespace {
                     }
                 }
 
-                Node* across = g.convert(g.add(head[0], linear ? g.convert(local[0], Kind::Int) : local[0]), Kind::Float);
-                Axis horizontal = axis(g.sub(g.mul(g.add(across, 0.5), ratio[0]), 0.5), 1. / ratio[0], true);
+                Node* across = g.convert(g.add(head[0], g.convert(local[0], Kind::Int)), Kind::Float);
+                Axis horizontal = axis(g.sub(g.mul(g.add(across, 0.5), ratio[0]), 0.5), 1. / ratio[0]);
                 Node* start = g.convert(g.sub(horizontal.origin, corner[0]), Kind::Uint);
                 int filterPhase = k.open(reach[1] * tile * 3);
 
@@ -2124,8 +2070,8 @@ namespace {
                 }
 
                 Node* row = rows == tile ? pixel[1] : g.clamp(pixel[1], head[1], g.min(g.add(head[1], rows - 1), s.target[1] - 1.));
-                Node* column = linear ? g.convert(g.clamp(g.sub(pixel[0], first[0]), 0., tile - 1.), Kind::Uint) : g.sub(pixel[0], first[0]);
-                Axis vertical = axis(g.sub(g.mul(g.add(g.convert(row, Kind::Float), 0.5), ratio[1]), 0.5), 1. / ratio[1], true);
+                Node* column = g.convert(g.clamp(g.sub(pixel[0], first[0]), 0., tile - 1.), Kind::Uint);
+                Axis vertical = axis(g.sub(g.mul(g.add(g.convert(row, Kind::Float), 0.5), ratio[1]), 0.5), 1. / ratio[1]);
                 Node* down = g.convert(g.sub(vertical.origin, corner[1]), Kind::Uint);
                 Node* strip = rows == tile ? nullptr : g.lt(g.sub(local[1], top), rows);
 
@@ -2144,16 +2090,6 @@ namespace {
 
             outputOf(light, k.color);
             k.color[3] = g.f(1.);
-
-            if (linear) {
-                return;
-            }
-
-            dither(centre, k.color);
-
-            for (int i = 0; i < 2; i++) {
-                k.at[i] = g.convert(g.add(pixel[i], s.origin[i]), Kind::Int);
-            }
         }
 
         void pixelLayer(Kernel& k) {
@@ -2161,26 +2097,6 @@ namespace {
 
             codes(values);
             color(values, k.color);
-        }
-
-        void dither(Node* const (&pixel)[2], Node* (&out)[4]) {
-            if (!s.dither) {
-                return;
-            }
-
-            Node* at[2];
-
-            for (int i = 0; i < 2; i++) {
-                at[i] = g.add(pixel[i], 5.588238 * s.phase);
-            }
-
-            Node* inner = g.add(g.mul(at[0], 0.06711056), g.mul(at[1], 0.00583715));
-            Node* outer = g.mul(g.sub(inner, g.floor(inner)), 52.9829189);
-            Node* step = g.mul(g.sub(g.sub(outer, g.floor(outer)), 0.5), 1. / (::exp2(s.dither) - 1.));
-
-            for (int i = 0; i < 3; i++) {
-                out[i] = g.add(out[i], step);
-            }
         }
     };
 
@@ -2419,20 +2335,6 @@ namespace {
         return StringView(bytes, out.used());
     }
 
-    static StringView msl(ObjPool& pool, Node* const (&color)[4]) {
-        Vector<Node*> nodes;
-        StringBuilder out;
-        u32 next = 3;
-
-        order(color, 4, nodes);
-        out << StringView(u8"#include <metal_stdlib>\nusing namespace metal;\nstruct In {\n    float2 uv [[user(locn0)]];\n};\nfragment float4 main0(In in [[stage_in]], const device uint* words [[buffer(0)]]) {\n    float2 uv = in.uv;\n");
-        statements(out, nodes, next);
-        out << StringView(u8"    return ");
-        finish(out, color, ";\n}\n");
-
-        return copied(pool, out);
-    }
-
     static void phases(StringBuilder& out, const Kernel& k, u32& next) {
         for (int phase = 0; phase < k.count; phase++) {
             const Vector<Store>& stores = k.stores[phase];
@@ -2534,34 +2436,6 @@ namespace {
         statements(out, nodes, next);
         out << StringView(u8"    return ");
         finish(out, k.color, ";\n}\n");
-
-        return copied(pool, out);
-    }
-
-    static StringView mslKernel(ObjPool& pool, const Kernel& k) {
-        StringBuilder out;
-        u32 next = 3;
-
-        out << StringView(u8"#include <metal_stdlib>\nusing namespace metal;\nkernel void main0(const device uint* words [[buffer(0)]], texture2d<float, access::write> target [[texture(0)]], uint3 local [[thread_position_in_threadgroup]], uint3 group [[threadgroup_position_in_grid]]) {\n");
-        for (int i = 0; i < kernelBuffers; i++) {
-            if (k.buffer(i)) {
-                out << StringView(u8"    threadgroup float ") << StringView(sharedNames[i]) << StringView(u8"[") << (u64)k.buffer(i) << StringView(u8"];\n");
-            }
-        }
-
-        phases(out, k, next);
-
-        Node* roots[6] = {k.at[0], k.at[1], k.color[0], k.color[1], k.color[2], k.color[3]};
-        Vector<Node*> nodes;
-
-        order(roots, 6, nodes);
-        statements(out, nodes, next);
-        out << StringView(u8"    target.write(");
-        finish(out, k.color, ", uint2(");
-        operand(out, k.at[0]);
-        out << StringView(u8", ");
-        operand(out, k.at[1]);
-        out << StringView(u8"));\n}\n");
 
         return copied(pool, out);
     }
@@ -2871,12 +2745,12 @@ namespace {
             }
         }
 
-        void common(Vector<u32>& module, u32 set) {
+        void common(Vector<u32>& module) {
             Spirv::op(module, 71, typeWords, 6, 4);
             Spirv::op(module, 72, typeBytes, 0, 24);
             Spirv::op(module, 72, typeBytes, 0, 35, 0);
             Spirv::op(module, 71, typeBytes, 2);
-            Spirv::op(module, 71, bytes, 34, set);
+            Spirv::op(module, 71, bytes, 34, 1);
             Spirv::op(module, 71, bytes, 33, 0);
         }
 
@@ -2908,7 +2782,7 @@ namespace {
             return StringView(out, size);
         }
 
-        void head(Vector<u32>& module, bool kernel) {
+        void head(Vector<u32>& module) {
             Vector<u32> entry;
 
             module.pushBack(0x07230203u);
@@ -2918,63 +2792,12 @@ namespace {
             module.pushBack(0);
             Spirv::op(module, 17, 1);
 
-            if (kernel) {
-                Spirv::op(module, 17, 56);
-            }
-
             entry.pushBack(glsl);
             Spirv::string(entry, "GLSL.std.450");
             Spirv::put(module, 11, entry.data(), (u32)entry.length());
             Spirv::op(module, 14, 0, 1);
         }
     };
-
-    static StringView spirv(ObjPool& pool, Graph& g, Node* const (&color)[4]) {
-        Emitter e(g);
-        Spirv& s = e.s;
-        Vector<Node*> nodes;
-        u32 inputVec2 = s.fresh();
-        u32 outputVec4 = s.fresh();
-        u32 uv = s.fresh();
-        u32 fColor = s.fresh();
-        u32 coordinates = s.fresh();
-        u32 pixel = s.fresh();
-
-        Spirv::op(s.body, 54, e.typeVoid, e.main, 0, e.typeFunction);
-        Spirv::op(s.body, 248, e.label);
-        Spirv::op(s.body, 61, e.typeVec2, coordinates, uv);
-        Spirv::op(s.body, 81, e.typeFloat, e.inputs[0], coordinates, 0);
-        Spirv::op(s.body, 81, e.typeFloat, e.inputs[1], coordinates, 1);
-        order(color, 4, nodes);
-        e.emit(nodes);
-        Spirv::op(s.body, 80, e.typeVec4, pixel, color[0]->id, color[1]->id, color[2]->id, color[3]->id);
-        Spirv::op(s.body, 62, fColor, pixel);
-        Spirv::op(s.body, 253);
-        Spirv::op(s.body, 56);
-
-        Vector<u32> module;
-        Vector<u32> entry;
-
-        e.head(module, false);
-        entry.pushBack(4);
-        entry.pushBack(e.main);
-        Spirv::string(entry, "main");
-        entry.pushBack(uv);
-        entry.pushBack(fColor);
-        Spirv::put(module, 15, entry.data(), (u32)entry.length());
-        Spirv::op(module, 16, e.main, 7);
-        Spirv::op(module, 71, uv, 30, 0);
-        Spirv::op(module, 71, fColor, 30, 0);
-        e.common(module, 0);
-        e.types(module);
-        Spirv::op(module, 32, inputVec2, 1, e.typeVec2);
-        Spirv::op(module, 32, outputVec4, 3, e.typeVec4);
-        Spirv::op(module, 59, inputVec2, uv, 1);
-        Spirv::op(module, 59, outputVec4, fColor, 3);
-        Spirv::op(module, 59, e.storageBytes, e.bytes, 12);
-
-        return e.finish(pool, module);
-    }
 
     static StringView spirvLayer(ObjPool& pool, Graph& g, const Kernel& k, Node* const* uv) {
         Emitter e(g);
@@ -3026,8 +2849,8 @@ namespace {
 
         Vector<u32> module;
 
-        e.head(module, false);
-        e.common(module, 1);
+        e.head(module);
+        e.common(module);
         e.types(module);
         Spirv::op(module, 23, typeUvec2, e.typeUint, 2);
         Spirv::op(module, 23, typeIvec2, e.typeInt, 2);
@@ -3056,180 +2879,45 @@ namespace {
 
         return e.finish(pool, module);
     }
-
-    static StringView spirvKernel(ObjPool& pool, Graph& g, const Kernel& k) {
-        Emitter e(g);
-        Spirv& s = e.s;
-        u32 typeUvec3 = s.fresh();
-        u32 typeIvec2 = s.fresh();
-        u32 inputUvec3 = s.fresh();
-        u32 typeImage = s.fresh();
-        u32 imagePointer = s.fresh();
-        u32 image = s.fresh();
-        u32 local = s.fresh();
-        u32 group = s.fresh();
-        u32 lengths[kernelBuffers] = {s.fresh(), s.fresh()};
-        u32 arrayTypes[kernelBuffers] = {s.fresh(), s.fresh()};
-        u32 arrayPointers[kernelBuffers] = {s.fresh(), s.fresh()};
-        u32 scope = s.fresh();
-        u32 semantics = s.fresh();
-        u32 ids[2] = {s.fresh(), s.fresh()};
-
-        Spirv::op(s.body, 54, e.typeVoid, e.main, 0, e.typeFunction);
-        Spirv::op(s.body, 248, e.label);
-        Spirv::op(s.body, 61, typeUvec3, ids[0], local);
-        Spirv::op(s.body, 81, e.typeUint, e.inputs[2], ids[0], 0);
-        Spirv::op(s.body, 81, e.typeUint, e.inputs[3], ids[0], 1);
-        Spirv::op(s.body, 61, typeUvec3, ids[1], group);
-        Spirv::op(s.body, 81, e.typeUint, e.inputs[4], ids[1], 0);
-        Spirv::op(s.body, 81, e.typeUint, e.inputs[5], ids[1], 1);
-
-        e.phases(k, scope, semantics);
-
-        Node* roots[6] = {k.at[0], k.at[1], k.color[0], k.color[1], k.color[2], k.color[3]};
-        Vector<Node*> nodes;
-        u32 coordinate = s.fresh();
-        u32 loaded = s.fresh();
-        u32 texel = s.fresh();
-
-        order(roots, 6, nodes);
-        e.emit(nodes);
-        Spirv::op(s.body, 80, typeIvec2, coordinate, k.at[0]->id, k.at[1]->id);
-        Spirv::op(s.body, 61, typeImage, loaded, image);
-        Spirv::op(s.body, 80, e.typeVec4, texel, k.color[0]->id, k.color[1]->id, k.color[2]->id, k.color[3]->id);
-        Spirv::op(s.body, 99, loaded, coordinate, texel);
-        Spirv::op(s.body, 253);
-        Spirv::op(s.body, 56);
-
-        Vector<u32> module;
-        Vector<u32> entry;
-
-        e.head(module, true);
-        entry.pushBack(5);
-        entry.pushBack(e.main);
-        Spirv::string(entry, "main");
-        entry.pushBack(local);
-        entry.pushBack(group);
-        Spirv::put(module, 15, entry.data(), (u32)entry.length());
-        Spirv::op(module, 16, e.main, 17, k.tile, k.tile, 1);
-        Spirv::op(module, 71, local, 11, 27);
-        Spirv::op(module, 71, group, 11, 26);
-        e.common(module, 0);
-        Spirv::op(module, 71, image, 34, 0);
-        Spirv::op(module, 71, image, 33, 1);
-        Spirv::op(module, 71, image, 25);
-        e.types(module);
-        Spirv::op(module, 23, typeUvec3, e.typeUint, 3);
-        Spirv::op(module, 23, typeIvec2, e.typeInt, 2);
-        Spirv::op(module, 32, inputUvec3, 1, typeUvec3);
-        Spirv::op(module, 25, typeImage, e.typeFloat, 1, 0, 0, 0, 2, 0);
-        Spirv::op(module, 32, imagePointer, 0, typeImage);
-
-        for (int i = 0; i < kernelBuffers; i++) {
-            if (k.buffer(i)) {
-                Spirv::op(module, 43, e.typeUint, lengths[i], k.buffer(i));
-                Spirv::op(module, 28, arrayTypes[i], e.typeFloat, lengths[i]);
-                Spirv::op(module, 32, arrayPointers[i], 4, arrayTypes[i]);
-            }
-        }
-
-        Spirv::op(module, 32, e.sharedFloat, 4, e.typeFloat);
-        Spirv::op(module, 43, e.typeUint, scope, 2);
-        Spirv::op(module, 43, e.typeUint, semantics, 264);
-        Spirv::op(module, 59, inputUvec3, local, 1);
-        Spirv::op(module, 59, inputUvec3, group, 1);
-        Spirv::op(module, 59, e.storageBytes, e.bytes, 12);
-        Spirv::op(module, 59, imagePointer, image, 0);
-
-        for (int i = 0; i < kernelBuffers; i++) {
-            if (k.buffer(i)) {
-                Spirv::op(module, 59, arrayPointers[i], e.arrays[i], 4);
-            }
-        }
-
-        return e.finish(pool, module);
-    }
 }
 #endif
 
-bool kernelable(const VideoShader& shader) {
-    const VideoLayout& layout = *shader.layout;
+namespace {
+    static bool kernelable(const VideoShader& shader) {
+        const VideoLayout& layout = *shader.layout;
 
-    return strcmp(layout.model, "palette") && strcmp(layout.model, "bayer") && !layout.alpha && stripRows(shader) > 0;
+        return strcmp(layout.model, "palette") && strcmp(layout.model, "bayer") && !layout.alpha && stripRows(shader) > 0;
+    }
 }
 
 StringView compile(ObjPool& pool, const VideoShader& shader) {
     Graph g(pool);
     Video video{g, shader, *shader.layout};
+    Kernel layer;
+    Node* uv[2];
+    bool lds = kernelable(shader);
 
-    if (!strcmp(shader.stage, "layer")) {
-        Kernel layer;
-        Node* uv[2];
-        bool lds = !strcmp(shader.filter, "lanczos") && kernelable(shader);
-
-        if (!shader.tile || shader.tile > 32) {
-            fail(StringView(u8"a video layer has an invalid tile"));
-        }
-
-        layer.tile = shader.tile;
-        video.linear = true;
-
-        if (lds) {
-            video.kernel(layer);
-        } else {
-            for (int i = 0; i < 2; i++) {
-                Node* pixel = g.add(g.sub(g.origin(6 + i), (double)shader.origin[i]), g.convert(g.invocation(2 + i, shader.tile - 1.), Kind::Int));
-
-                uv[i] = g.clamp(g.div(g.add(g.convert(pixel, Kind::Float), 0.5), (double)shader.target[i]), 0., 1.);
-            }
-
-            video.pixelLayer(layer);
-        }
-
-#if defined(__APPLE__)
-        return mslLayer(pool, layer, lds ? nullptr : uv);
-#else
-        return spirvLayer(pool, g, layer, lds ? nullptr : uv);
-#endif
+    if (!shader.tile || shader.tile > 32) {
+        fail(StringView(u8"a video layer has an invalid tile"));
     }
 
-    if (!strcmp(shader.stage, "kernel")) {
-        Kernel kernel;
+    layer.tile = shader.tile;
 
-        if (!kernelable(shader)) {
-            fail(StringView(u8"a video kernel cannot draw this frame"));
+    if (lds) {
+        video.kernel(layer);
+    } else {
+        for (int i = 0; i < 2; i++) {
+            Node* pixel = g.add(g.sub(g.origin(6 + i), (double)shader.origin[i]), g.convert(g.invocation(2 + i, shader.tile - 1.), Kind::Int));
+
+            uv[i] = g.clamp(g.div(g.add(g.convert(pixel, Kind::Float), 0.5), (double)shader.target[i]), 0., 1.);
         }
 
-        if (!shader.tile || shader.tile > 32) {
-            fail(StringView(u8"a video kernel has an invalid tile"));
-        }
-
-        kernel.tile = shader.tile;
-
-        video.kernel(kernel);
-
-#if defined(__APPLE__)
-        return mslKernel(pool, kernel);
-#else
-        return spirvKernel(pool, g, kernel);
-#endif
+        video.pixelLayer(layer);
     }
 
-    if (strcmp(shader.stage, "fragment")) {
-        fail(StringView(u8"a video shader has an unknown stage"));
-    }
-
-    Node* codes[4];
-    Node* color[4];
-    Node* pixel[2] = {g.mul(g.input(0), (double)shader.target[0]), g.mul(g.input(1), (double)shader.target[1])};
-
-    video.codes(codes);
-    video.color(codes, color);
-    video.dither(pixel, color);
-
 #if defined(__APPLE__)
-    return msl(pool, color);
+    return mslLayer(pool, layer, lds ? nullptr : uv);
 #else
-    return spirv(pool, g, color);
+    return spirvLayer(pool, g, layer, lds ? nullptr : uv);
 #endif
 }

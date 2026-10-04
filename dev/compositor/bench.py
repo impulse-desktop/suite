@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
 
-"""Composes headless ImGui frames (compositor_dump) three ways and compares
-them: the player's pipeline now (the video kernel at its tile of 16 into a
-cleared target, then the hardware ImGui pass in sRGB-coded blending), the
-same blending in linear light (sRGB views of the target and textures), and
-the tiled compute compositor of gpu/compose.comp with the video layer that
-compile() makes merged into it. Prints the GPU and CPU time of each, the
-compositor's tile programs and how far its pixels are from both.
+"""Composes headless ImGui frames (compositor_dump) through the tiled
+compute compositor of gpu/compose.comp, with the video layer that compile()
+makes merged into it, and prints its GPU time, the CPU time of its tile
+programs and, for a scene with video, the layer's tiles alone; composed.ppm
+is what it drew.
 
-The video is a yuv420p BT.709 frame of the video bench's chart, scaled into
-the scene's video rectangle by the shaders the video_shader program makes.
-The scene native is play with a video of its rectangle's own size, and
-each scene with video also times the video kernel and the layer tiles alone.
+The video is a yuv420p BT.709 frame of a chart, drawn into the scene's
+video rectangle the way the player draws it. The scene native is play with
+a video of its rectangle's own size, shrunk play with a 4K video.
 
   ix run set/pg/libs bin/glslang lib/vulkan/drivers --vulkan=amd/radv -- \\
       python3 dev/compositor/bench.py --dump BUILD/dev/compositor_dump --compiler BUILD/dev/video_shader [--work DIR] [--size 1920x1080] [--source 1280x720] [SCENE...]
@@ -203,7 +200,7 @@ def merge(host_bytes, layer_bytes, name=b"layer("):
     return struct.pack("<%dI" % len(words), *words)
 
 
-NATIVE = {"native": "play"}
+VIDEO = {"native": "play", "shrunk": "play"}
 
 
 def rectangle(frame):
@@ -216,7 +213,7 @@ def rectangle(frame):
 def programs(compiler, work, rect, source, host):
     name, layout, components = video.layout_of("yuv420p")
     case = dict(video.SIZES, format="yuv420p", subsampling=(1, 1), matrix=1, range=1, transfer=1, primaries=1, location=1, output="sdr")
-    case.update(source=source, target=(rect[2] - rect[0], rect[3] - rect[1]), filter="lanczos", content="chart", origin=(rect[0], rect[1]))
+    case.update(source=source, target=(rect[2] - rect[0], rect[3] - rect[1]), content="chart", origin=(rect[0], rect[1]))
     data = work / ("video_%dx%d.bin" % source)
     planes = data.with_suffix(".json")
     if not planes.exists():
@@ -229,11 +226,9 @@ def programs(compiler, work, rect, source, host):
         arguments = video.facts(dict(case, **facts), layout, components, offsets, lines)
         return subprocess.run([compiler, *arguments], check=True, capture_output=True).stdout
 
-    legacy = work / ("legacy_%d_%d_%d_%d.spv" % tuple(rect))
-    legacy.write_bytes(compiled(stage="kernel", tile=16, dither=8))
-    layer = work / ("layer_%d_%d_%d_%d.spv" % tuple(rect))
-    layer.write_bytes(merge(host.read_bytes(), compiled(stage="layer", tile=24, dither=0)))
-    return [layer, legacy, data]
+    layer = work / ("layer_%d_%d_%d_%d_%dx%d.spv" % (*rect, *source))
+    layer.write_bytes(merge(host.read_bytes(), compiled(tile=24)))
+    return [layer, data]
 
 
 def main():
@@ -244,7 +239,7 @@ def main():
     parser.add_argument("--size", default="1920x1080")
     parser.add_argument("--source", default="1280x720")
     parser.add_argument("--rounds", type=int, default=20)
-    parser.add_argument("scenes", nargs="*", default=["demo", "play", "native", "menu", "view"])
+    parser.add_argument("scenes", nargs="*", default=["demo", "play", "native", "shrunk", "menu", "view"])
     args = parser.parse_args()
     work = Path(args.work)
     work.mkdir(parents=True, exist_ok=True)
@@ -252,9 +247,6 @@ def main():
     libraries = " ".join(os.environ.get(name, "") for name in ("CTRFLAGS", "LDFLAGS"))
     harness = work / "harness"
     subprocess.run(f"cc -O2 {flags} -o {harness} {HERE / 'harness.c'} $(pkg-config --cflags --libs vulkan) {libraries} -lm", shell=True, check=True)
-    for name in ("imgui.vert", "imgui.frag"):
-        subprocess.run(["glslangValidator", "--quiet", "-V", str(HERE / name), "-o", str(work / (name + ".spv"))], check=True)
-    subprocess.run(["glslangValidator", "--quiet", "-V", "-DLINEAR", str(HERE / "imgui.frag"), "-o", str(work / "linear.frag.spv")], check=True)
     plain, host = work / "compose_plain.spv", work / "compose_layer.spv"
     subprocess.run(["glslangValidator", "--quiet", "--target-env", "vulkan1.1", "-V", str(SUITE / "gpu" / "compose.comp"), "-o", str(plain)], check=True)
     subprocess.run(["glslangValidator", "--quiet", "--target-env", "vulkan1.1", "-V", "-DGROUP=24", "-DLAYER", str(SUITE / "gpu" / "compose.comp"), "-o", str(host)], check=True)
@@ -265,12 +257,12 @@ def main():
         out.mkdir(exist_ok=True)
         frame = out / "frame.bin"
         with frame.open("wb") as handle:
-            subprocess.run([args.dump, NATIVE.get(scene, scene), width, height], check=True, stdout=handle)
+            subprocess.run([args.dump, VIDEO.get(scene, scene), width, height], check=True, stdout=handle)
         rect = rectangle(frame)
-        shown = source if rect is None or scene not in NATIVE else (rect[2] - rect[0], rect[3] - rect[1])
+        shown = {"native": None if rect is None else (rect[2] - rect[0], rect[3] - rect[1]), "shrunk": (3840, 2160)}.get(scene, source)
         extra = [] if rect is None else [str(path) for path in programs(args.compiler, work, rect, shown, host)]
         print(f"== {scene} {args.size}" + ("" if rect is None else f", video {rect[2] - rect[0]}x{rect[3] - rect[1]} from {shown[0]}x{shown[1]}"), flush=True)
-        subprocess.run([str(harness), str(work / "imgui.vert.spv"), str(work / "imgui.frag.spv"), str(work / "linear.frag.spv"), str(plain), str(args.rounds), str(frame), str(out), *extra], check=True)
+        subprocess.run([str(harness), str(plain), str(args.rounds), str(frame), str(out), *extra], check=True)
 
 
 if __name__ == "__main__":

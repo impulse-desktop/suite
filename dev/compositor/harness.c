@@ -720,229 +720,6 @@ static void readback(Image* img, uint32_t w, uint32_t h, VkImageLayout layout, u
     vkFreeMemory(device, b.memory, NULL);
 }
 
-static void compare(const char* label, const uint8_t* a, const uint8_t* b, uint32_t w, uint32_t h) {
-    size_t differing = 0, histogram[5] = {0};
-    int worst = 0;
-    for (size_t i = 0; i < (size_t)w * h; i++) {
-        int d = 0;
-        for (int c = 0; c < 3; c++) {
-            int x = abs((int)a[i * 4 + c] - (int)b[i * 4 + c]);
-            d = x > d ? x : d;
-        }
-        if (d) differing++;
-        histogram[d > 4 ? 4 : d]++;
-        worst = d > worst ? d : worst;
-    }
-    printf("%s differing %zu of %u pixels, worst %d, by 1: %zu, 2: %zu, 3: %zu, 4+: %zu\n", label, differing, w * h, worst, histogram[1], histogram[2], histogram[3], histogram[4]);
-}
-
-typedef struct {
-    VkDescriptorSetLayout setLayout;
-    VkPipelineLayout layout;
-    VkPipeline pipeline;
-    Buffer words;
-} Video;
-
-static VkDescriptorSet videoSet(const Video* v, VkDescriptorPool pool, VkImageView target) {
-    VkDescriptorSetAllocateInfo ai = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-    ai.descriptorPool = pool;
-    ai.descriptorSetCount = 1;
-    ai.pSetLayouts = &v->setLayout;
-    VkDescriptorSet set;
-    CHECK(vkAllocateDescriptorSets(device, &ai, &set));
-    VkDescriptorBufferInfo words = {v->words.buffer, 0, VK_WHOLE_SIZE};
-    VkDescriptorImageInfo image = {VK_NULL_HANDLE, target, VK_IMAGE_LAYOUT_GENERAL};
-    VkWriteDescriptorSet writes[2] = {{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}, {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}};
-    writes[0].dstSet = set;
-    writes[0].dstBinding = 0;
-    writes[0].descriptorCount = 1;
-    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    writes[0].pBufferInfo = &words;
-    writes[1].dstSet = set;
-    writes[1].dstBinding = 1;
-    writes[1].descriptorCount = 1;
-    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    writes[1].pImageInfo = &image;
-    vkUpdateDescriptorSets(device, 2, writes, 0, NULL);
-    return set;
-}
-
-typedef struct {
-    VkRenderPass pass;
-    VkFramebuffer framebuffer;
-    VkPipeline pipeline;
-    VkPipelineLayout layout;
-    VkDescriptorSet sets[MAX_TEXTURES];
-} Reference;
-
-static Reference reference(const Frame* f, Image* target, Image* textures, VkSampler sampler, VkDescriptorPool pool, const char* vert, const char* frag, int linear) {
-    Reference r;
-    VkDescriptorSetLayoutBinding binding = {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL};
-    VkDescriptorSetLayoutCreateInfo li = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    li.bindingCount = 1;
-    li.pBindings = &binding;
-    VkDescriptorSetLayout setLayout;
-    CHECK(vkCreateDescriptorSetLayout(device, &li, NULL, &setLayout));
-    for (uint32_t i = 0; i < f->textureCount; i++) {
-        VkDescriptorSetAllocateInfo ai = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-        ai.descriptorPool = pool;
-        ai.descriptorSetCount = 1;
-        ai.pSetLayouts = &setLayout;
-        CHECK(vkAllocateDescriptorSets(device, &ai, &r.sets[i]));
-        VkDescriptorImageInfo ii = {sampler, linear ? textures[i].srgb : textures[i].view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-        VkWriteDescriptorSet w = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-        w.dstSet = r.sets[i];
-        w.descriptorCount = 1;
-        w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        w.pImageInfo = &ii;
-        vkUpdateDescriptorSets(device, 1, &w, 0, NULL);
-    }
-    VkPushConstantRange range = {VK_SHADER_STAGE_VERTEX_BIT, 0, 16};
-    VkPipelineLayoutCreateInfo pl = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-    pl.setLayoutCount = 1;
-    pl.pSetLayouts = &setLayout;
-    pl.pushConstantRangeCount = 1;
-    pl.pPushConstantRanges = &range;
-    CHECK(vkCreatePipelineLayout(device, &pl, NULL, &r.layout));
-    VkAttachmentDescription att = {0};
-    att.format = linear ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
-    att.samples = VK_SAMPLE_COUNT_1_BIT;
-    att.loadOp = f->hasVideo ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR;
-    att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    att.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    att.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    att.initialLayout = f->hasVideo ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED;
-    att.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    VkAttachmentReference ref = {0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
-    VkSubpassDescription sub = {0};
-    sub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-    sub.colorAttachmentCount = 1;
-    sub.pColorAttachments = &ref;
-    VkRenderPassCreateInfo rp = {VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
-    rp.attachmentCount = 1;
-    rp.pAttachments = &att;
-    rp.subpassCount = 1;
-    rp.pSubpasses = &sub;
-    CHECK(vkCreateRenderPass(device, &rp, NULL, &r.pass));
-    VkFramebufferCreateInfo fb = {VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
-    fb.renderPass = r.pass;
-    fb.attachmentCount = 1;
-    fb.pAttachments = linear ? &target->srgb : &target->view;
-    fb.width = f->width;
-    fb.height = f->height;
-    fb.layers = 1;
-    CHECK(vkCreateFramebuffer(device, &fb, NULL, &r.framebuffer));
-    VkPipelineShaderStageCreateInfo stages[2] = {
-        {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_VERTEX_BIT, module(vert), "main", NULL},
-        {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_FRAGMENT_BIT, module(frag), "main", NULL},
-    };
-    VkVertexInputBindingDescription vb = {0, sizeof(Vertex), VK_VERTEX_INPUT_RATE_VERTEX};
-    VkVertexInputAttributeDescription va[3] = {
-        {0, 0, VK_FORMAT_R32G32_SFLOAT, 0},
-        {1, 0, VK_FORMAT_R32G32_SFLOAT, 8},
-        {2, 0, VK_FORMAT_R8G8B8A8_UNORM, 16},
-    };
-    VkPipelineVertexInputStateCreateInfo vi = {VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
-    vi.vertexBindingDescriptionCount = 1;
-    vi.pVertexBindingDescriptions = &vb;
-    vi.vertexAttributeDescriptionCount = 3;
-    vi.pVertexAttributeDescriptions = va;
-    VkPipelineInputAssemblyStateCreateInfo ia = {VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
-    ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-    VkPipelineViewportStateCreateInfo vs = {VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
-    vs.viewportCount = vs.scissorCount = 1;
-    VkPipelineRasterizationStateCreateInfo rs = {VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
-    rs.polygonMode = VK_POLYGON_MODE_FILL;
-    rs.cullMode = VK_CULL_MODE_NONE;
-    rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-    rs.lineWidth = 1.0f;
-    VkPipelineMultisampleStateCreateInfo ms = {VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
-    ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
-    VkPipelineColorBlendAttachmentState blend = {0};
-    blend.blendEnable = VK_TRUE;
-    blend.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
-    blend.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-    blend.colorBlendOp = VK_BLEND_OP_ADD;
-    blend.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-    blend.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-    blend.alphaBlendOp = VK_BLEND_OP_ADD;
-    blend.colorWriteMask = 0xf;
-    VkPipelineColorBlendStateCreateInfo cb = {VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
-    cb.attachmentCount = 1;
-    cb.pAttachments = &blend;
-    VkDynamicState dyn[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
-    VkPipelineDynamicStateCreateInfo ds = {VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
-    ds.dynamicStateCount = 2;
-    ds.pDynamicStates = dyn;
-    VkGraphicsPipelineCreateInfo gp = {VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
-    gp.stageCount = 2;
-    gp.pStages = stages;
-    gp.pVertexInputState = &vi;
-    gp.pInputAssemblyState = &ia;
-    gp.pViewportState = &vs;
-    gp.pRasterizationState = &rs;
-    gp.pMultisampleState = &ms;
-    gp.pColorBlendState = &cb;
-    gp.pDynamicState = &ds;
-    gp.layout = r.layout;
-    gp.renderPass = r.pass;
-    CHECK(vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &gp, NULL, &r.pipeline));
-    return r;
-}
-
-static double drawReference(const Frame* f, const Reference* r, Image* target, const Video* video, VkDescriptorSet videoTarget, Buffer* vertices, Buffer* indices, int linear, double* recording) {
-    double c0 = seconds();
-    memcpy(vertices->map, f->vertices, f->vertexCount * sizeof(Vertex));
-    memcpy(indices->map, f->indices, f->indexCount * sizeof(uint32_t));
-    VkCommandBuffer cmd = begin();
-    vkCmdResetQueryPool(cmd, queries, 0, 2);
-    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, queries, 0);
-    float grey = linear ? srgbLinear[25] : 25.0f / 255.0f;
-    VkClearValue clear = {{{grey, grey, grey, 1.0f}}};
-    if (f->hasVideo) {
-        VkClearColorValue code = {{25.0f / 255.0f, 25.0f / 255.0f, 25.0f / 255.0f, 1.0f}};
-        VkImageSubresourceRange whole = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-        barrier(cmd, target->image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
-        vkCmdClearColorImage(cmd, target->image, VK_IMAGE_LAYOUT_GENERAL, &code, 1, &whole);
-        barrier(cmd, target->image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-        uint32_t w = (uint32_t)(f->video[2] - f->video[0]), h = (uint32_t)(f->video[3] - f->video[1]);
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, video->pipeline);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, video->layout, 0, 1, &videoTarget, 0, NULL);
-        vkCmdDispatch(cmd, (w + 15) / 16, (h + 15) / 16, 1);
-        barrier(cmd, target->image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
-    }
-    VkRenderPassBeginInfo rb = {VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
-    rb.renderPass = r->pass;
-    rb.framebuffer = r->framebuffer;
-    rb.renderArea.extent = (VkExtent2D){f->width, f->height};
-    rb.clearValueCount = 1;
-    rb.pClearValues = &clear;
-    vkCmdBeginRenderPass(cmd, &rb, VK_SUBPASS_CONTENTS_INLINE);
-    VkViewport viewport = {0, 0, (float)f->width, (float)f->height, 0, 1};
-    vkCmdSetViewport(cmd, 0, 1, &viewport);
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, r->pipeline);
-    VkDeviceSize zero = 0;
-    vkCmdBindVertexBuffers(cmd, 0, 1, &vertices->buffer, &zero);
-    vkCmdBindIndexBuffer(cmd, indices->buffer, 0, VK_INDEX_TYPE_UINT32);
-    float push[4] = {2.0f / (float)f->width, 2.0f / (float)f->height, -1.0f, -1.0f};
-    vkCmdPushConstants(cmd, r->layout, VK_SHADER_STAGE_VERTEX_BIT, 0, 16, push);
-    for (uint32_t c = 0; c < f->commandCount; c++) {
-        const Command* command = &f->commands[c];
-        int32_t clip[4];
-        if (!scissorOf(f, command, clip)) continue;
-        VkRect2D scissor = {{clip[0], clip[1]}, {(uint32_t)(clip[2] - clip[0]), (uint32_t)(clip[3] - clip[1])}};
-        vkCmdSetScissor(cmd, 0, 1, &scissor);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, r->layout, 0, 1, &r->sets[textureSlot(f, command->texture)], 0, NULL);
-        vkCmdDrawIndexed(cmd, command->elemCount, 1, command->indexBase + command->idxOffset, (int32_t)(command->vertexBase + command->vtxOffset), 0);
-    }
-    vkCmdEndRenderPass(cmd);
-    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queries, 1);
-    double cpu = (seconds() - c0) * 1e6;
-    *recording = cpu < *recording ? cpu : *recording;
-    finish(cmd);
-    return elapsed();
-}
-
 typedef struct {
     int32_t size[2];
     uint32_t tilesX;
@@ -964,25 +741,21 @@ static VkPipeline composePipeline(VkPipelineLayout layout, const char* path) {
 }
 
 int main(int argc, char** argv) {
-    if (argc != 8 && argc != 11) {
-        fprintf(stderr, "usage: harness VERT.spv FRAG.spv LINEARFRAG.spv PLAIN.spv ROUNDS FRAME.bin OUTDIR [LAYER.spv LEGACY.spv VIDEO.bin]\n");
+    if (argc != 5 && argc != 7) {
+        fprintf(stderr, "usage: harness PLAIN.spv ROUNDS FRAME.bin OUTDIR [LAYER.spv VIDEO.bin]\n");
         return 2;
     }
-    const char* vert = argv[1];
-    const char* frag = argv[2];
-    const char* linearFrag = argv[3];
-    const char* plain = argv[4];
-    int rounds = atoi(argv[5]);
-    Frame f = loadFrame(argv[6]);
-    const char* outdir = argv[7];
-    const char* layerProgram = argc == 11 ? argv[8] : NULL;
-    const char* legacy = argc == 11 ? argv[9] : NULL;
-    const char* frameWords = argc == 11 ? argv[10] : NULL;
+    const char* plain = argv[1];
+    int rounds = atoi(argv[2]);
+    Frame f = loadFrame(argv[3]);
+    const char* outdir = argv[4];
+    const char* layerProgram = argc == 7 ? argv[5] : NULL;
+    const char* frameWords = argc == 7 ? argv[6] : NULL;
     for (int i = 0; i < 256; i++) {
         double c = i / 255.0;
         srgbLinear[i] = (float)(c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4));
     }
-    if (f.hasVideo != (argc == 11)) {
+    if (f.hasVideo != (argc == 7)) {
         fprintf(stderr, "a frame with video needs its programs, and only it\n");
         return 2;
     }
@@ -1015,7 +788,7 @@ int main(int argc, char** argv) {
         finish(cmd);
     }
 
-    VkDescriptorPoolSize sizes[3] = {{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2 * MAX_TEXTURES + TEXTURES}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 16}, {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 8}};
+    VkDescriptorPoolSize sizes[3] = {{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, TEXTURES}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 16}, {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 8}};
     VkDescriptorPoolCreateInfo dp = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     dp.maxSets = 64;
     dp.poolSizeCount = 3;
@@ -1023,57 +796,14 @@ int main(int argc, char** argv) {
     VkDescriptorPool pool;
     CHECK(vkCreateDescriptorPool(device, &dp, NULL, &pool));
 
-    Video video = {0};
+    Buffer video = {0};
     if (f.hasVideo) {
-        VkDescriptorSetLayoutBinding bindings[2] = {
-            {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},
-            {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},
-        };
-        VkDescriptorSetLayoutCreateInfo li = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-        li.bindingCount = 2;
-        li.pBindings = bindings;
-        CHECK(vkCreateDescriptorSetLayout(device, &li, NULL, &video.setLayout));
-        VkPipelineLayoutCreateInfo pl = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-        pl.setLayoutCount = 1;
-        pl.pSetLayouts = &video.setLayout;
-        CHECK(vkCreatePipelineLayout(device, &pl, NULL, &video.layout));
-        VkComputePipelineCreateInfo cp = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
-        cp.stage = (VkPipelineShaderStageCreateInfo){VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_COMPUTE_BIT, module(legacy), "main", NULL};
-        cp.layout = video.layout;
-        CHECK(vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &cp, NULL, &video.pipeline));
         size_t size;
         void* words = readFile(frameWords, &size);
-        video.words = makeBuffer(size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-        memcpy(video.words.map, words, size);
+        video = makeBuffer(size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        memcpy(video.map, words, size);
         free(words);
     }
-
-    Buffer vertices = makeBuffer(f.vertexCount * sizeof(Vertex), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
-    Buffer indices = makeBuffer(f.indexCount * sizeof(uint32_t), VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
-    VkImageUsageFlags targetUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-    Image now = makeImage(f.width, f.height, targetUsage);
-    Image linear = makeImage(f.width, f.height, targetUsage);
-    Reference nowPass = reference(&f, &now, textures, sampler, pool, vert, frag, 0);
-    Reference linearPass = reference(&f, &linear, textures, sampler, pool, vert, linearFrag, 1);
-    VkDescriptorSet nowVideo = f.hasVideo ? videoSet(&video, pool, now.view) : VK_NULL_HANDLE;
-    VkDescriptorSet linearVideo = f.hasVideo ? videoSet(&video, pool, linear.view) : VK_NULL_HANDLE;
-    double best = 1e30, recording = 1e30, unused = 1e30;
-    for (int r = 0; r < rounds; r++) {
-        double us = drawReference(&f, &nowPass, &now, &video, nowVideo, &vertices, &indices, 0, &recording);
-        best = us < best ? us : best;
-    }
-    drawReference(&f, &linearPass, &linear, &video, linearVideo, &vertices, &indices, 1, &unused);
-    printf("now gpu %.1f us, cpu %.1f us (copy + record), %u commands, %u triangles\n", best, recording, f.commandCount, f.indexCount / 3);
-
-    uint8_t* nowPixels = malloc((size_t)f.width * f.height * 4);
-    uint8_t* linearPixels = malloc((size_t)f.width * f.height * 4);
-    readback(&now, f.width, f.height, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, nowPixels);
-    readback(&linear, f.width, f.height, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, linearPixels);
-    char path[1024];
-    snprintf(path, sizeof(path), "%s/now.ppm", outdir);
-    writePpm(path, nowPixels, f.width, f.height);
-    snprintf(path, sizeof(path), "%s/linear.ppm", outdir);
-    writePpm(path, linearPixels, f.width, f.height);
 
     Program program;
     memset(&program, 0, sizeof(program));
@@ -1158,7 +888,7 @@ int main(int argc, char** argv) {
         writes[5].pImageInfo = &storage;
         writes[6].descriptorCount = f.textureCount;
         writes[6].pImageInfo = sampled;
-        VkDescriptorBufferInfo words = {f.hasVideo ? video.words.buffer : headerBuffer.buffer, 0, VK_WHOLE_SIZE};
+        VkDescriptorBufferInfo words = {f.hasVideo ? video.buffer : headerBuffer.buffer, 0, VK_WHOLE_SIZE};
         writes[7] = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
         writes[7].dstSet = sets[1];
         writes[7].dstBinding = 0;
@@ -1195,26 +925,11 @@ int main(int argc, char** argv) {
         gpuBest = us < gpuBest ? us : gpuBest;
     }
     readback(&composed, f.width, f.height, VK_IMAGE_LAYOUT_GENERAL, composedPixels);
-    char label[128];
-    snprintf(label, sizeof(label), "compose gpu %.1f us; against linear blending:", gpuBest);
-    compare(label, linearPixels, composedPixels, f.width, f.height);
-    compare("  against now (sRGB blending):", nowPixels, composedPixels, f.width, f.height);
-    printf("sum: now %.1f us, compose %.1f us\n", best + recording, gpuBest + building);
+    printf("compose gpu %.1f us, cpu %.1f us, sum %.1f us\n", gpuBest, building, gpuBest + building);
     if (f.hasVideo) {
-        double kernelBest = 1e30, layerBest = 1e30;
-        uint32_t w = (uint32_t)(f.video[2] - f.video[0]), h = (uint32_t)(f.video[3] - f.video[1]);
+        double layerBest = 1e30;
         for (int r = 0; r < rounds; r++) {
             VkCommandBuffer cmd = begin();
-            vkCmdResetQueryPool(cmd, queries, 0, 2);
-            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, queries, 0);
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, video.pipeline);
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, video.layout, 0, 1, &nowVideo, 0, NULL);
-            vkCmdDispatch(cmd, (w + 15) / 16, (h + 15) / 16, 1);
-            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queries, 1);
-            finish(cmd);
-            double us = elapsed();
-            kernelBest = us < kernelBest ? us : kernelBest;
-            cmd = begin();
             vkCmdResetQueryPool(cmd, queries, 0, 2);
             vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, queries, 0);
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, composeLayout, 0, 2, sets, 0, NULL);
@@ -1224,11 +939,12 @@ int main(int argc, char** argv) {
             vkCmdDispatch(cmd, program.programs[1][1], 1, 1);
             vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queries, 1);
             finish(cmd);
-            us = elapsed();
+            double us = elapsed();
             layerBest = us < layerBest ? us : layerBest;
         }
-        printf("alone: video kernel %.1f us, layer tiles %.1f us\n", kernelBest, layerBest);
+        printf("alone: layer tiles %.1f us\n", layerBest);
     }
+    char path[1024];
     snprintf(path, sizeof(path), "%s/composed.ppm", outdir);
     writePpm(path, composedPixels, f.width, f.height);
     return 0;

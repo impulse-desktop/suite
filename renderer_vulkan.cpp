@@ -2884,8 +2884,6 @@ namespace {
         bool endFrame(ImDrawData* draw) override;
         u32 maxTextureSide() override;
         u32 maxTextures() override;
-        bool software() override;
-        bool kernels() override;
     };
 }
 
@@ -2931,18 +2929,6 @@ u32 VulkanRenderer::maxTextureSide() {
 
 u32 VulkanRenderer::maxTextures() {
     return maxTextureCount;
-}
-
-bool VulkanRenderer::software() {
-    VkPhysicalDeviceProperties props;
-
-    vkGetPhysicalDeviceProperties(gpu->phys, &props);
-
-    return props.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU;
-}
-
-bool VulkanRenderer::kernels() {
-    return true;
 }
 
 RenderImage* VulkanRenderer::bind(ObjPool& pool, u32 width, u32 height, const void* data, size_t size, size_t stride, Runable& retired) {

@@ -100,8 +100,6 @@ namespace {
         Vector<double> expected;
         int checked = 0;
         int failed = 0;
-        const char* filter = "bilinear";
-        const char* stage = "layer";
         u32 bucket = 0;
         u32 buckets = 1;
 
@@ -713,8 +711,6 @@ VideoShader FormatCheck::describe(const AVFrame* frame, const char* output) {
     out.transfer = transfer.shape;
     out.conversion = same ? "same" : "convert";
     out.output = output;
-    out.filter = filter;
-    out.stage = stage;
     out.tile = kernelTile;
     memcpy(out.curve, transfer.eotf, sizeof(out.curve));
     memcpy(out.oetf, transfer.oetf, sizeof(out.oetf));
@@ -1042,14 +1038,7 @@ void FormatCheck::write(AVFrame* frame, const Case& kase) {
                     rgba[c] = stored(c, x, y);
                 }
             } else if (descriptor->log2_chroma_w || descriptor->log2_chroma_h) {
-                double chromaX = fmin(fmax((x - siteX) / stepX, 0.), chromaWidth - 1.) * stepX + siteX;
-                double chromaY = fmin(fmax((y - siteY) / stepY, 0.), chromaHeight - 1.) * stepY + siteY;
-                double ycc[3] = {source(0, x, y), source(1, chromaX, chromaY), source(2, chromaX, chromaY)};
-
-                if (!strcmp(filter, "lanczos")) {
-                    ycc[1] = filtered(1, (x - siteX) / stepX, (y - siteY) / stepY);
-                    ycc[2] = filtered(2, (x - siteX) / stepX, (y - siteY) / stepY);
-                }
+                double ycc[3] = {source(0, x, y), filtered(1, (x - siteX) / stepX, (y - siteY) / stepY), filtered(2, (x - siteX) / stepX, (y - siteY) / stepY)};
 
                 apply(toSignal, ycc, rgba);
             }
@@ -1312,7 +1301,7 @@ void FormatCheck::formats() {
             kase.primaries = AVCOL_PRI_SMPTE428;
         }
 
-        check(kase, StringView(StringBuilder() << StringView(descriptor->name) << StringView(u8" ") << StringView(filter) << StringView(u8" ") << StringView(stage)));
+        check(kase, StringView(descriptor->name));
     }
 }
 
@@ -1646,12 +1635,9 @@ int main(int argc, char** argv) {
     auto body = makeRunable([&] {
         try {
             check.formats();
-            check.filter = "lanczos";
-            check.formats();
             check.underlay();
             check.scaled(StringView(u8"layer scaled"), scaledWidth, scaledHeight);
             check.scaled(StringView(u8"layer shrunk"), shrunkWidth, shrunkHeight);
-            check.filter = "bilinear";
             check.matrices();
             check.locations();
             check.systems();

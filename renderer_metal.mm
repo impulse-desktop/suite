@@ -265,8 +265,6 @@ namespace {
         bool endFrame(ImDrawData* draw) override;
         u32 maxTextureSide() override;
         u32 maxTextures() override;
-        bool software() override;
-        bool kernels() override;
         RenderImage* upload(ObjPool& pool, u32 width, u32 height, const void* rgba, bool hdr) override;
         RenderImage* import(ObjPool& pool, SharedImage& source, bool hdr) override;
 
@@ -1618,14 +1616,6 @@ u32 MetalRenderer::maxTextureSide() {
 
 u32 MetalRenderer::maxTextures() {
     return 0xffffffffu;
-}
-
-bool MetalRenderer::software() {
-    return false;
-}
-
-bool MetalRenderer::kernels() {
-    return true;
 }
 
 Renderer* createMetalRenderer(ObjPool& pool, plt::Platform& platform, plt::Window& window, const RendererOptions& options) {

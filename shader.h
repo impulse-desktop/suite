@@ -17,14 +17,10 @@ struct VideoShader {
     const char* transfer;
     const char* conversion;
     const char* output;
-    const char* filter;
-    const char* stage;
     u32 planeOffset[4];
     u32 lineSize[4];
     u32 size[4];
     u32 target[2];
-    u32 dither;
-    u32 phase;
     u32 origin[2];
     u32 tile;
     double chroma[4];
@@ -40,5 +36,4 @@ struct VideoShader {
     double luminance[3];
 };
 
-bool kernelable(const VideoShader& shader);
 stl::StringView compile(stl::ObjPool& pool, const VideoShader& shader);

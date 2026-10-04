@@ -1,6 +1,7 @@
-"""Every pixel format FFmpeg describes, with bilinear filtering, with
-lanczos against a CPU model of the filter and through the compute kernel,
-the layer scaled against that model in linear light, and every matrix,
+"""Every pixel format FFmpeg describes, drawn the player's one way (the
+lanczos kernel in the tile's shared memory, or per pixel where it cannot be
+built) against a CPU model of the filter, the layer scaled and shrunk
+against that model in linear light, and every matrix,
 chroma location, color system, transfer and set of primaries the video
 shaders know, from a picture through its shader back to that picture. A
 test node runs one bucket of these checks, by a hash of their names."""

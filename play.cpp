@@ -453,10 +453,9 @@ namespace {
         }
     }
 
-    static void aim(VideoShader& facts, u32 x, u32 y, u32 width, u32 height, Ui& ui) {
+    static void aim(VideoShader& facts, u32 x, u32 y, u32 width, u32 height) {
         facts.target[0] = width;
         facts.target[1] = height;
-        facts.filter = !ui.software() && width > facts.size[0] && height > facts.size[1] ? "lanczos" : "bilinear";
         facts.origin[0] = x;
         facts.origin[1] = y;
     }
@@ -573,10 +572,7 @@ namespace {
         out.transfer = transfer->shape;
         out.conversion = same ? "same" : "convert";
         out.output = target->name;
-        out.filter = "bilinear";
-        out.stage = "layer";
         out.tile = kernelTile;
-        out.dither = !strcmp(out.output, "sdr") ? 8 : 0;
         memcpy(out.curve, transfer->eotf, sizeof(out.curve));
         memcpy(out.oetf, transfer->oetf, sizeof(out.oetf));
         memcpy(out.inverse, transfer->inverse, sizeof(out.inverse));
@@ -1723,7 +1719,7 @@ void Screen::makeRender(VideoImage* image) {
     image->facts = describeFrame(frame, hdr ? "hdr" : "sdr", RendererOptions{}.sdrWhiteNits);
 
     if (targetWidth) {
-        aim(image->facts, targetX, targetY, targetWidth, targetHeight, *player->ui);
+        aim(image->facts, targetX, targetY, targetWidth, targetHeight);
     }
 
     RenderShader& shader = shaderFor(image->facts);
@@ -1770,7 +1766,7 @@ RenderShader& Screen::shaderFor(const VideoShader& facts) {
     compiled.pushBack(CompiledShader{facts, owner.ptr, shader, code.length(), compiledClock});
     compiledBytes += code.length();
     owner.drop();
-    player->ui->trace(StringView(StringBuilder() << StringView(u8"compiled video shader ") << StringView(facts.layout->name) << StringView(u8" ") << StringView(facts.system) << StringView(u8" ") << StringView(facts.transfer) << StringView(u8" ") << StringView(facts.conversion) << StringView(u8" ") << StringView(facts.output) << StringView(u8" ") << StringView(facts.filter) << StringView(u8" ") << StringView(facts.stage) << StringView(u8" ") << (u64)facts.target[0] << StringView(u8"x") << (u64)facts.target[1] << StringView(u8" compile_us=") << (built - start) << StringView(u8" driver_us=") << (done - built)));
+    player->ui->trace(StringView(StringBuilder() << StringView(u8"compiled video shader ") << StringView(facts.layout->name) << StringView(u8" ") << StringView(facts.system) << StringView(u8" ") << StringView(facts.transfer) << StringView(u8" ") << StringView(facts.conversion) << StringView(u8" ") << StringView(facts.output) << StringView(u8" ") << (u64)facts.target[0] << StringView(u8"x") << (u64)facts.target[1] << StringView(u8" compile_us=") << (built - start) << StringView(u8" driver_us=") << (done - built)));
 
     return *shader;
 }
@@ -1936,7 +1932,7 @@ void Screen::draw() {
 
         VideoShader aimed = image->facts;
 
-        aim(aimed, targetX, targetY, targetWidth, targetHeight, ui);
+        aim(aimed, targetX, targetY, targetWidth, targetHeight);
 
         if (memcmp(&aimed, &image->facts, sizeof(aimed))) {
             image->facts = aimed;
