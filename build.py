@@ -64,6 +64,11 @@ else:
     xkb = pkg_config("xkbcommon")
     vulkan = pkg_config("vulkan")
     platform_deps = [wayland_client, xkb, vulkan]
+    # musl gives a thread 128 KiB of stack unless the program asks for more
+    # in PT_GNU_STACK, and lavapipe compiles shaders through LLVM on threads
+    # of its own: a merged compositor recursed through 700 frames there and
+    # died; glibc's threads get 8 MiB and ignore this
+    build.ldflags += ["-Wl,-z,stack-size=8388608"]
 
 # the screenshot tool's encoders, Linux's alone; the scenarios read JPEG XL too
 if darwin:
