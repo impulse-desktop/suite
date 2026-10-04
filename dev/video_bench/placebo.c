@@ -51,6 +51,7 @@ int main(int argc, char** argv) {
     pl_log log = pl_log_create(PL_API_VER, &(struct pl_log_params) {.log_cb = pl_log_color, .log_level = PL_LOG_WARN});
     struct pl_vulkan_params vulkan = pl_vulkan_default_params;
     vulkan.get_proc_addr = vkGetInstanceProcAddr;
+    vulkan.async_compute = false;
     pl_vulkan vk = pl_vulkan_create(log, &vulkan);
     if (!vk) { fprintf(stderr, "no vulkan\n"); return 1; }
     pl_gpu gpu = vk->gpu;
@@ -63,9 +64,9 @@ int main(int argc, char** argv) {
         size_t size;
         uint8_t* data = readFile(joined(directory, "data.bin"), &size);
         char* text = readFile(joined(directory, "placebo.txt"), &size);
-        int width, height, tw, th, planes, rgb, full, subsampled, transfer;
+        int width, height, tw, th, planes, rgb, full, subsampled, transfer, depth, shift;
         int consumed;
-        if (sscanf(text, "%d %d %d %d %d %d %d %d %d%n", &width, &height, &tw, &th, &planes, &rgb, &full, &subsampled, &transfer, &consumed) != 9) {
+        if (sscanf(text, "%d %d %d %d %d %d %d %d %d %d %d%n", &width, &height, &tw, &th, &planes, &rgb, &full, &subsampled, &transfer, &depth, &shift, &consumed) != 11) {
             fprintf(stderr, "%s: bad placebo.txt\n", directory);
             return 1;
         }
@@ -74,8 +75,8 @@ int main(int argc, char** argv) {
         pl_tex textures[4] = {0};
         image.num_planes = planes;
         for (int p = 0; p < planes; p++) {
-            int pw, ph, offset, line, component, step;
-            if (sscanf(at, "%d %d %d %d %d %d%n", &pw, &ph, &offset, &line, &component, &step, &consumed) != 6) {
+            int pw, ph, offset, line, step, size, count;
+            if (sscanf(at, "%d %d %d %d %d %d %d%n", &pw, &ph, &offset, &line, &step, &size, &count, &consumed) != 7 || count < 1 || count > 4) {
                 fprintf(stderr, "%s: bad plane %d\n", directory, p);
                 return 1;
             }
@@ -84,12 +85,18 @@ int main(int argc, char** argv) {
                 .type = PL_FMT_UNORM,
                 .width = pw,
                 .height = ph,
-                .component_size = {8},
-                .component_map = {component},
                 .pixel_stride = (size_t)step,
                 .row_stride = (size_t)line,
                 .pixels = data + offset,
             };
+            for (int k = 0; k < count; k++) {
+                if (sscanf(at, "%d%n", &plane.component_map[k], &consumed) != 1) {
+                    fprintf(stderr, "%s: bad plane %d\n", directory, p);
+                    return 1;
+                }
+                at += consumed;
+                plane.component_size[k] = size;
+            }
             if (!pl_upload_plane(gpu, &image.planes[p], &textures[p], &plane)) {
                 fprintf(stderr, "%s: upload of plane %d failed\n", directory, p);
                 return 1;
@@ -97,6 +104,7 @@ int main(int argc, char** argv) {
         }
         image.repr = rgb ? pl_color_repr_rgb : pl_color_repr_hdtv;
         image.repr.levels = full ? PL_COLOR_LEVELS_FULL : PL_COLOR_LEVELS_LIMITED;
+        image.repr.bits = (struct pl_bit_encoding) {.sample_depth = depth + shift > 8 ? 16 : 8, .color_depth = depth, .bit_shift = shift};
         image.color = rgb ? pl_color_space_srgb : pl_color_space_bt709;
         image.color.transfer = transfer == 13 ? PL_COLOR_TRC_SRGB : image.color.transfer;
         if (subsampled) {
@@ -106,7 +114,7 @@ int main(int argc, char** argv) {
         pl_tex out = pl_tex_create(gpu, &(struct pl_tex_params) {
             .w = tw,
             .h = th,
-            .format = pl_find_named_fmt(gpu, "rgba16f"),
+            .format = pl_find_named_fmt(gpu, "rgba8"),
             .renderable = true,
             .host_readable = true,
         });
@@ -119,7 +127,8 @@ int main(int argc, char** argv) {
 
         double bestWall = 1e30;
         double bestGpu = 1e30;
-        for (int r = 0; r < rounds + 3; r++) {
+        int warm = rounds ? 3 : 0;
+        for (int r = 0; r < (rounds ? rounds + warm : 1); r++) {
             spent = 0;
             double start = seconds();
             if (!pl_render_image(renderer, &image, &target, &params)) {
@@ -128,7 +137,7 @@ int main(int argc, char** argv) {
             }
             pl_gpu_finish(gpu);
             double wall = seconds() - start;
-            if (r >= 3) {
+            if (r >= warm) {
                 if (wall < bestWall) bestWall = wall;
                 if (spent && spent < bestGpu) bestGpu = (double)spent;
             }
@@ -140,13 +149,20 @@ int main(int argc, char** argv) {
             fprintf(stderr, "%s: download failed\n", directory);
             return 1;
         }
-        char name[64];
-        snprintf(name, sizeof(name), "placebo_%s.raw", argv[1]);
-        FILE* dump = fopen(joined(directory, name), "wb");
-        fwrite(pixels, 1, bytes, dump);
-        fclose(dump);
-        printf("placebo %s %s gpu %.1f wall %.1f format %s\n", directory, argv[1], bestGpu / 1e3, bestWall * 1e6, out->params.format->name);
-        fflush(stdout);
+        FILE* truth = fopen(joined(directory, "truth.raw"), "rb");
+        if (!truth) truth = fopen(joined(directory, "dump"), "rb");
+        if (truth) {
+            fclose(truth);
+            char name[64];
+            snprintf(name, sizeof(name), "placebo_%s.raw", argv[1]);
+            FILE* dump = fopen(joined(directory, name), "wb");
+            fwrite(pixels, 1, bytes, dump);
+            fclose(dump);
+        }
+        if (rounds) {
+            printf("placebo %s %s gpu %.1f wall %.1f format %s\n", directory, argv[1], bestGpu / 1e3, bestWall * 1e6, out->params.format->name);
+            fflush(stdout);
+        }
         free(pixels);
         pl_tex_destroy(gpu, &out);
         for (int p = 0; p < planes; p++) {

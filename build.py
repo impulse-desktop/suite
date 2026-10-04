@@ -433,3 +433,165 @@ if not darwin:
             descr="OK",
             color="light-green",
         )
+
+
+
+# ---- the player's video next to libplacebo ----------------------------------
+# `./build video_quality` scores what the player draws (its video layer
+# merged into the compositor, dev/compositor/harness.c) and libplacebo's
+# presets against every corpus picture at scale factors from 0.1 to 10, in
+# the frame formats decoders hand out (dev/video_bench/quality.py tells how);
+# `./build video_speed` times videos of the usual sizes drawn into the usual
+# windows and displays, on its own: it needs none of the pictures. A quality
+# node is one variant of one format at one factor over every picture, so a
+# change to our shader redraws ours alone; frames, renders and metrics stay
+# in the node, only the scores leave it. The speed matrix makes its frames
+# and shaders side by side, a node to a format, and times in one node after
+# them, one case after another: on an APU a busy CPU slows the GPU down, and
+# processes timing side by side stretch each other's numbers. Linux only;
+# without libplacebo, ours alone
+if not darwin:
+    libplacebo = pkg_config("libplacebo", required=False)
+    bench_dir = "$(B)/dev/video_bench"
+    bench_script = "$(S)/dev/video_bench/quality.py"
+    bench_shader_inputs = [bench_script, "$(S)/dev/video_bench/bench.py", "$(S)/dev/compositor/bench.py", "$(S)/gpu/video_shaders.py", "$(S)/gpu/tables.py"]
+    corpus_tool = program(
+        name="corpus",
+        output=f"{bench_dir}/corpus",
+        srcs=["$(S)/dev/video_bench/corpus.c"],
+        cflags=warning_flags,
+        deps=[system],
+    )
+    compositor_tool = program(
+        name="compositor",
+        output=f"{bench_dir}/compositor",
+        srcs=["$(S)/dev/compositor/harness.c"],
+        cflags=warning_flags,
+        deps=[vulkan, system],
+    )
+    compositor_hosts = command(
+        name="compositor_hosts",
+        inputs=["$(S)/gpu/compose.comp"],
+        outputs=[f"{bench_dir}/compose_plain.spv", f"{bench_dir}/compose_layer.spv"],
+        cmd=[
+            ["glslangValidator", "--quiet", "--target-env", "vulkan1.1", "-V", "$(S)/gpu/compose.comp", "-o", f"{bench_dir}/compose_plain.spv"],
+            ["glslangValidator", "--quiet", "--target-env", "vulkan1.1", "-V", "-DGROUP=24", "-DLAYER", "$(S)/gpu/compose.comp", "-o", f"{bench_dir}/compose_layer.spv"],
+        ],
+        descr="SH",
+    )
+    placebo_tool = program(
+        name="placebo",
+        output=f"{bench_dir}/placebo",
+        srcs=["$(S)/dev/video_bench/placebo.c"],
+        cflags=warning_flags,
+        deps=[libplacebo, vulkan, system],
+    ) if libplacebo else None
+    presets = ["fast", "default", "high_quality"] if libplacebo else []
+    ours_tools = ["--compositor", f"{bench_dir}/compositor", "--plain", f"{bench_dir}/compose_plain.spv"]
+    shader_tools = [f"{bench_dir}/corpus", "$(B)/dev/video_shader", f"{bench_dir}/compose_layer.spv"]
+    video_formats = ["yuv420p", "nv12", "yuv420p10le", "p010le", "yuv444p", "bgra"]
+
+    # a factor above 1 draws the crop shrunk by it back to the crop's size,
+    # one below 1 shrinks the crop itself, against the crop shrunk exactly
+    video_factors = [0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.7, 0.75, 0.8, 0.9, 1, 1.1, 1.2, 1.25, 1.333, 1.5, 1.75, 2, 2.5, 3, 4, 5, 6, 8, 10]
+    crop = (960, 540)
+
+    def scaled(factor):
+        if factor >= 1:
+            return (round(crop[0] / factor), round(crop[1] / factor)), crop
+        return crop, (round(crop[0] * factor), round(crop[1] * factor))
+
+    quality_dir = "$(B)/video_quality"
+    pictures = [os.path.basename(path)[:-len(".jxl")] for path in build.glob("$(S)/dev/video_bench/corpus/*.jxl")]
+    shrinking = [factor for factor in video_factors if factor < 1]
+    truth_of = {}
+    decoded_nodes = []
+    shrunk_nodes = []
+    for name in pictures:
+        decoded = f"{quality_dir}/truth/{name}.ppm"
+        jxl = f"$(S)/dev/video_bench/corpus/{name}.jxl"
+        truth = command(
+            name=f"video_truth_{name}",
+            inputs=[jxl],
+            outputs=[decoded],
+            cmd=["djxl", "--quiet", "--num_threads=1", jxl, decoded],
+            descr="JX",
+        )
+        shrunk = {factor: f"{quality_dir}/truth/{name}_{factor:g}.ppm" for factor in shrinking}
+        decoded_nodes.append(truth)
+        shrunk_nodes.append(command(
+            name=f"video_shrunk_{name}",
+            outputs=list(shrunk.values()),
+            deps=[corpus_tool, truth],
+            cmd=[[f"{bench_dir}/corpus", "shrink", decoded, path, *map(str, scaled(factor)[1])] for factor, path in shrunk.items()],
+            descr="SR",
+        ))
+        truth_of[name] = (decoded, shrunk)
+
+    renders = []
+    for fmt in video_formats:
+        for factor in video_factors:
+            tag = f"{fmt}_{factor:g}"
+            sizes = [*map(str, scaled(factor)[0]), *map(str, scaled(factor)[1])]
+            shaders = f"{quality_dir}/shaders/{tag}"
+            shader_node = command(
+                name=f"video_shader_{tag}",
+                inputs=bench_shader_inputs,
+                outputs=[f"{shaders}/layer.spv"],
+                deps=[corpus_tool, video_shader, compositor_hosts],
+                cmd=["python3", bench_script, "shader", *shader_tools, fmt, *sizes, shaders],
+                descr="SH",
+            )
+            triples = [word for name in pictures for word in (name, truth_of[name][0], truth_of[name][1].get(factor, truth_of[name][0]))]
+            for variant, deps, tools in [
+                ("ours", [compositor_tool, compositor_hosts, shader_node], ["--layer", f"{shaders}/layer.spv", *ours_tools]),
+                *((f"placebo_{preset}", [placebo_tool], ["--placebo", f"{bench_dir}/placebo"]) for preset in presets),
+            ]:
+                out = f"{quality_dir}/scores/{tag}_{variant}.json"
+                renders.append(command(
+                    name=f"video_quality_{tag}_{variant}",
+                    inputs=[bench_script],
+                    outputs=[out],
+                    deps=[corpus_tool, *deps, *decoded_nodes, *(shrunk_nodes if factor < 1 else [])],
+                    cmd=["python3", bench_script, "render", out, variant, fmt, str(factor), *sizes, *triples, "--corpus", f"{bench_dir}/corpus", *tools],
+                    descr="RN",
+                ))
+    group("video_quality", command(
+        name="video_quality_report",
+        inputs=[bench_script],
+        outputs=[f"{quality_dir}/quality.json", f"{quality_dir}/quality.txt"],
+        deps=renders,
+        cmd=["python3", bench_script, "report", f"{quality_dir}/quality.json", f"{quality_dir}/quality.txt", *(render.outputs[0] for render in renders)],
+        descr="QR",
+    ))
+
+    videos = [(854, 480), (1280, 720), (1920, 1080), (2560, 1440), (3840, 2160)]
+    screens = [(1280, 720), (1824, 1026), (1920, 1080), (2560, 1440), (3840, 2160)]
+    pairs = [f"{video[0]}x{video[1]}:{screen[0]}x{screen[1]}" for video in videos for screen in screens]
+    speed_dir = "$(B)/video_speed"
+    speed_cases = []
+    for fmt in video_formats:
+        directory = f"{speed_dir}/{fmt}"
+        speed_cases.append(command(
+            name=f"video_speed_cases_{fmt}",
+            inputs=bench_shader_inputs,
+            outputs=[
+                *(f"{directory}/cases/{pair.replace(':', '_')}/{file}" for pair in pairs for file in ("size", "placebo.txt", "frame.bin", "layer.spv")),
+                *(f"{directory}/frames/{video[0]}x{video[1]}.bin" for video in videos),
+            ],
+            deps=[corpus_tool, video_shader, compositor_hosts],
+            cmd=["python3", bench_script, "cases", *shader_tools, fmt, directory, *pairs],
+            descr="SC",
+        ))
+    group("video_speed", command(
+        name="video_speed_report",
+        inputs=[bench_script],
+        outputs=[f"{speed_dir}/speed.json", f"{speed_dir}/speed.txt"],
+        deps=[compositor_tool, compositor_hosts, *([placebo_tool] if libplacebo else []), *speed_cases],
+        cmd=[
+            "python3", bench_script, "speed", f"{speed_dir}/speed.json", f"{speed_dir}/speed.txt",
+            "--formats", *video_formats, "--pairs", *pairs, "--presets", *presets, "--cases", speed_dir,
+            *ours_tools, *(["--placebo", f"{bench_dir}/placebo"] if libplacebo else []),
+        ],
+        descr="SP",
+    ))

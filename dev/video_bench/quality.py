@@ -1,189 +1,257 @@
 #!/usr/bin/env python3
 
-"""How close the video scalers come to a real picture.
+"""How close the player's video comes to a real picture, and how fast, next
+to libplacebo, over scale factors and the frame formats decoders hand out.
+The pieces are nodes of build.py's video_quality and video_speed targets;
+this file is what those nodes run between the C tools.
 
-Every crop of corpus/ is scaled down in linear light to an input size,
-stored as BT.709 limited-range 4:2:0 with left-sited chroma (sRGB transfer,
-so both sides decode the same curve), and scaled back to the crop's size by
-our shaders (fragment bilinear, fragment lanczos, the lanczos kernel) and by
-libplacebo's fast, default and high-quality presets. To measure shrinking
-(--downs) the crop itself is the input and its area average in linear
-light at the smaller size the truth. Each result is
-compared with its truth: PSNR and RMSE in linear light over RGB, the mean
-OKLab difference and its chroma part, SSIM of luma and SSIMULACRA 2 (higher
-is better: 100 is identical, 90 is visually lossless).
+Every crop of corpus/ (960x540) is a truth. A factor above 1 scales the crop
+down in linear light to 960/f x 540/f, stores it in the frame format and
+scales it back to 960x540; a factor below 1 stores the crop itself and
+shrinks it to 960f x 540f, the truth then being the crop's area average in
+linear light. YUV formats are BT.709 limited range with left-sited chroma
+and the sRGB transfer, so both sides decode the same curve; bgra is sRGB.
+Ours is what the player draws: compile()'s layer merged into the
+compositor of gpu/compose.comp, run by dev/compositor's harness over a
+frame the video fills; libplacebo draws with its fast, default and
+high-quality presets. Both write 8-bit sRGB, as a display takes it, each
+with its own dithering. Each result is compared with its truth: PSNR and
+RMSE in linear light over RGB, the mean OKLab difference and its chroma
+part, SSIM of luma and SSIMULACRA 2 (higher is better: 100 is identical,
+90 is visually lossless).
 
-  ix run set/pg/libs bin/jxl lib/placebo/7 --vulkan=amd/radv lib/vulkan/drivers --vulkan=amd/radv -- \\
-      python3 dev/video_bench/quality.py --compiler BUILD/dev/video_shader [--work DIR] [--ratios 1.333,2] [--downs 2] [NAME...]
+The speed matrix times videos of the usual sizes drawn into the usual
+windows and displays: GPU time per frame, the best of 20, ours the
+compositor's whole frame. The frames and shaders are made first, side by
+side; the timings then run one after another.
+
+  ix run set/pg/libs lib/ffmpeg/7 lib/openal bin/wabt bin/jxl bin/glslang lib/placebo/7 --vulkan=amd/radv \\
+      lib/vulkan/drivers --vulkan=amd/radv -- ./build -B BUILD video_quality video_speed
+
+leaves BUILD/video_quality/quality.{txt,json} and BUILD/video_speed/speed.{txt,json}.
 """
 
 import argparse
+import importlib.util
 import json
 import os
+import re
+import shutil
+import struct
 import subprocess
 import sys
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.dont_write_bytecode = True
 
-import bench
-
-CORPUS = HERE / "corpus"
-TARGET = (960, 540)
-OURS = [("bilinear", "bilinear", "fragment"), ("lanczos", "lanczos", "fragment"), ("kernel", "lanczos", "kernel")]
-PRESETS = ("fast", "default", "high_quality")
-VARIANTS = [name for name, _, _ in OURS] + [f"placebo_{preset}" for preset in PRESETS]
-METRICS = ("psnr", "linear", "delta", "chroma", "ssim", "ssimulacra2")
-BATCH = 48
+TILE = 24
+CHUNK = 16
+VARIANTS = ("ours", "placebo_fast", "placebo_default", "placebo_high_quality")
 
 
-def case(source, target, filter, stage):
-    return {"format": "yuv420p", "subsampling": (1, 1), "matrix": 1, "range": 1, "transfer": 13, "primaries": 1, "location": 1, "output": "sdr", "source": source, "target": target, "filter": filter, "stage": stage, "dither": 0, "phase": 0}
+def case(fmt, source, target):
+    rgb = fmt == "bgra"
+    subsampling = (1, 1) if fmt in ("yuv420p", "nv12", "yuv420p10le", "p010le") else (0, 0)
+    return {"format": fmt, "subsampling": subsampling, "matrix": 0 if rgb else 1, "range": 2 if rgb else 1, "transfer": 13, "primaries": 1, "location": 0 if rgb else 1, "output": "sdr", "source": source, "target": target, "origin": (0, 0), "tile": TILE, "content": "noise"}
 
 
-def planes(W, H):
-    sizes = [(W, H), (-(-W >> 1), -(-H >> 1)), (-(-W >> 1), -(-H >> 1))]
-    offsets, lines, total = [], [], 0
-    for width, height in sizes:
-        offsets.append(total)
-        lines.append((width + 63) // 64 * 64)
-        total += (lines[-1] * height + 63) // 64 * 64
-    return sizes, offsets, lines, total
+def shader(corpus, compiler, host, fmt, source, target, directory):
+    """The player's layer for the frame, merged into the compositor."""
+    import bench
+
+    spec = importlib.util.spec_from_file_location("compositor", HERE.parent / "compositor" / "bench.py")
+    compositor = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(compositor)
+    words = subprocess.run([corpus, "layout", fmt, *map(str, source)], check=True, capture_output=True, text=True).stdout.split()
+    offsets, lines = [int(word) for word in words[1:5]], [int(word) for word in words[6:10]]
+    _, layout, components = bench.layout_of(fmt)
+    layer = subprocess.run([compiler, *bench.facts(case(fmt, source, target), layout, components, offsets, lines)], check=True, capture_output=True).stdout
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "layer.spv").write_bytes(compositor.merge(Path(host).read_bytes(), layer))
 
 
-def pack(raw, W, H):
-    sizes, offsets, lines, total = planes(W, H)
-    data = bytearray(total + 64)
-    at = 0
-    for (width, height), offset, line in zip(sizes, offsets, lines):
-        for y in range(height):
-            data[offset + y * line:offset + y * line + width] = raw[at:at + width]
-            at += width
-    return bytes(data), (offsets + [0])[:4], (lines + [0])[:4]
+def filled(path, size):
+    """A compositor frame without ImGui whose video covers it."""
+    path.write_bytes(struct.pack("<6I4f", 0x46434D49, size[0], size[1], 0, 0, 1, 0.0, 0.0, float(size[0]), float(size[1])))
 
 
-def build(work):
-    flags = " ".join(os.environ.get(name, "") for name in ("CPPFLAGS", "CFLAGS"))
-    libraries = " ".join(os.environ.get(name, "") for name in ("CTRFLAGS", "LDFLAGS"))
-    tools = {}
-    for name, source, extra in (("corpus", "corpus.c", "-lm"), ("harness", "harness.c", "$(pkg-config --cflags --libs vulkan)"), ("placebo", "placebo.c", "$(pkg-config --cflags --libs libplacebo vulkan)")):
-        tools[name] = work / name
-        subprocess.run(f"cc -O2 {flags} -o {tools[name]} {HERE / source} {extra} {libraries}", shell=True, check=True)
-    tools["vertex"] = work / "fullscreen.vert.spv"
-    subprocess.run(["glslangValidator", "--quiet", "--target-env", "vulkan1.1", "-V", str(HERE / "fullscreen.vert"), "-o", str(tools["vertex"])], check=True)
-    return tools
+def compose(args, directory, layer, rounds):
+    text = subprocess.run([args.compositor, args.plain, str(rounds), str(directory / "frame.bin"), str(directory), str(layer), str(directory / "data.bin")], check=True, capture_output=True, text=True).stdout
+    return float(re.search(r"^compose gpu ([\d.]+) us", text, re.M).group(1))
 
 
-def shader(compiler, directory, label, source, target, filter, stage, offsets, lines):
-    name, layout, components = bench.layout_of("yuv420p")
-    arguments = bench.facts(case(source, target, filter, stage), layout, components, offsets, lines)
-    (directory / f"{label}.spv").write_bytes(subprocess.run([compiler, *arguments], check=True, capture_output=True).stdout)
-    (directory / f"{label}.ubo").write_bytes(bytes(16))
-    if stage == "kernel":
-        (directory / f"{label}.kind").write_text("kernel")
+def render(args):
+    """One variant of one format and factor over every picture: each frame
+    made in the format and drawn, a chunk at a time, and scored against its
+    truth."""
+    pictures = [args.pictures[i:i + 3] for i in range(0, len(args.pictures), 3)]
+    scratch = Path(args.out).with_suffix("")
+    scratch.mkdir(parents=True, exist_ok=True)
+    scores = scratch / "scores.txt"
+    source, target = tuple(args.sizes[:2]), tuple(args.sizes[2:])
+    for start in range(0, len(pictures), CHUNK):
+        chunk = pictures[start:start + CHUNK]
+        directories = [scratch / name for name, _, _ in chunk]
+        for (name, picture, _), directory in zip(chunk, directories):
+            directory.mkdir()
+            subprocess.run([args.corpus, "input", picture, str(directory), *map(str, source), args.format, *map(str, target)], check=True)
+        if args.variant == "ours":
+            for directory in directories:
+                filled(directory / "frame.bin", target)
+                compose(args, directory, args.layer, 1)
+            drawn = "composed.ppm"
+        else:
+            subprocess.run([args.placebo, args.variant[len("placebo_"):], "0", *map(str, directories)], check=True)
+            drawn = f"{args.variant}.raw"
+        subprocess.run([args.corpus, "metric", str(scores), *(word for (name, _, truth), directory in zip(chunk, directories) for word in (name, truth, str(directory / drawn)))], check=True)
+        for directory in directories:
+            shutil.rmtree(directory)
+    lines = [line.split() for line in scores.read_text().splitlines()]
+    shutil.rmtree(scratch)
+    pictures = {words[0]: {words[i]: float(words[i + 1]) for i in range(1, len(words), 2)} for words in lines}
+    Path(args.out).write_text(json.dumps({"format": args.format, "factor": args.factor, "variant": args.variant, "pictures": pictures}) + "\n")
 
 
-def sizes(scale):
-    if scale >= 1:
-        return (round(TARGET[0] / scale), round(TARGET[1] / scale)), TARGET
-    return TARGET, (round(TARGET[0] * scale), round(TARGET[1] * scale))
+def report(out_json, out_text, paths):
+    parts = [json.loads(Path(path).read_text()) for path in paths]
+    rows = [{"name": name, "format": part["format"], "factor": part["factor"], "variant": part["variant"], **values} for part in parts for name, values in sorted(part["pictures"].items())]
+    out_json.write_text(json.dumps(rows, indent=1) + "\n")
+    table = {(row["format"], row["factor"], row["variant"], row["name"]): row for row in rows}
+    variants = [variant for variant in VARIANTS if any(row["variant"] == variant for row in rows)]
+    names = sorted({row["name"] for row in rows})
+    text = []
+    for fmt in dict.fromkeys(row["format"] for row in rows):
+        text.append(f"{fmt}: mean ssimulacra2 (psnr) over {len(names)} pictures; wins: pictures where ours beats placebo default on ssimulacra2")
+        text.append(f"  {'factor':>7} " + " ".join(f"{variant:>20}" for variant in variants) + "   wins")
+        for factor in sorted({row["factor"] for row in rows if row["format"] == fmt}):
+            cells = []
+            for variant in variants:
+                chosen = [table[(fmt, factor, variant, name)] for name in names]
+                cells.append(f"{sum(row['ssimulacra2'] for row in chosen) / len(chosen):11.2f} ({sum(row['psnr'] for row in chosen) / len(chosen):6.2f})")
+            wins = sum(table[(fmt, factor, "ours", name)]["ssimulacra2"] > table[(fmt, factor, "placebo_default", name)]["ssimulacra2"] for name in names) if "placebo_default" in variants else 0
+            text.append(f"  {factor:>7g} " + " ".join(f"{cell:>20}" for cell in cells) + f"   {wins}/{len(names)}")
+    out_text.write_text("\n".join(text) + "\n")
 
 
-def prepare(tools, compiler, work, truth, name, ratio):
-    (W, H), target = sizes(ratio)
-    first, second = work / "runs" / f"{name}_{ratio:g}_a", work / "runs" / f"{name}_{ratio:g}_b"
-    yuv = work / "runs" / f"{name}_{ratio:g}.yuv"
-    first.mkdir(parents=True, exist_ok=True)
-    second.mkdir(parents=True, exist_ok=True)
-    subprocess.run([str(tools["corpus"]), "input", str(truth), str(yuv), str(W), str(H), "8"], check=True)
-    data, offsets, lines = pack(yuv.read_bytes(), W, H)
-    yuv.unlink()
-    for directory in (first, second):
-        (directory / "data.bin").write_bytes(data)
-        (directory / "size").write_text("%d %d" % target)
-        (directory / "dump").write_text("")
-    shader(compiler, first, "optimum", (W, H), target, *OURS[0][1:], offsets, lines)
-    shader(compiler, first, "template", (W, H), target, *OURS[2][1:], offsets, lines)
-    shader(compiler, second, "optimum", (W, H), target, *OURS[1][1:], offsets, lines)
-    shader(compiler, second, "template", (W, H), target, *OURS[1][1:], offsets, lines)
-    if ratio < 1:
-        subprocess.run([str(tools["corpus"]), "shrink", str(truth), str(work / "truth" / f"{name}_{ratio:g}.ppm"), *map(str, target)], check=True)
-    plane_sizes, _, _, _ = planes(W, H)
-    rows = [f"{W} {H} {target[0]} {target[1]} 3 0 0 1 13"]
-    rows += [f"{width} {height} {offsets[p]} {lines[p]} {p} 1" for p, (width, height) in enumerate(plane_sizes)]
-    (first / "placebo.txt").write_text("\n".join(rows) + "\n")
-    return first, second
+def pair_of(text):
+    video, screen = (tuple(int(value) for value in size.split("x")) for size in text.split(":"))
+    return video, screen
 
 
-def measure(tools, truth, raw):
-    words = subprocess.run([str(tools["corpus"]), "metric", str(truth), str(raw)], check=True, capture_output=True, text=True).stdout.split()
-    return {words[i]: float(words[i + 1]) for i in range(0, len(words), 2)}
+def cases(args):
+    """The CPU side of one format's timings: every video and screen size's
+    description, compositor frame and layer, and a noise frame of each video
+    size."""
+    root = Path(args.directory)
+    (root / "frames").mkdir(parents=True, exist_ok=True)
+    for text in args.pairs:
+        video, screen = pair_of(text)
+        directory = root / "cases" / text.replace(":", "_")
+        directory.mkdir(parents=True, exist_ok=True)
+        subprocess.run([args.corpus, "input", "noise", str(directory), *map(str, video), args.format, *map(str, screen)], check=True)
+        (directory / "dump").unlink()
+        frame = root / "frames" / f"{video[0]}x{video[1]}.bin"
+        if frame.exists():
+            (directory / "data.bin").unlink()
+        else:
+            (directory / "data.bin").rename(frame)
+        filled(directory / "frame.bin", screen)
+        shader(args.corpus, args.compiler, args.host, args.format, video, screen, directory)
 
 
-def run(tools, compiler, work, truths, jobs):
-    with ThreadPoolExecutor(os.cpu_count() or 1) as pool:
-        made = list(pool.map(lambda job: prepare(tools, compiler, work, truths[job[0]], *job), jobs))
-    directories = [str(directory) for pair in made for directory in pair]
-    subprocess.run([str(tools["harness"]), str(tools["vertex"]), "1", "0", *directories], check=True, capture_output=True)
-    for preset in PRESETS:
-        subprocess.run([str(tools["placebo"]), preset, "0", *(str(first) for first, _ in made)], check=True, capture_output=True)
-    outputs = []
-    for (name, ratio), (first, second) in zip(jobs, made):
-        truth = truths[name] if ratio >= 1 else work / "truth" / f"{name}_{ratio:g}.ppm"
-        outputs += [(name, ratio, "bilinear", first / "optimum.raw", truth), (name, ratio, "kernel", first / "template.raw", truth), (name, ratio, "lanczos", second / "optimum.raw", truth)]
-        outputs += [(name, ratio, f"placebo_{preset}", first / f"placebo_{preset}.raw", truth) for preset in PRESETS]
-    with ThreadPoolExecutor(os.cpu_count() or 1) as pool:
-        scores = list(pool.map(lambda output: measure(tools, output[4], output[3]), outputs))
-    for first, second in made:
-        for directory in (first, second):
-            for path in directory.iterdir():
-                path.unlink()
-            directory.rmdir()
-    return [(name, ratio, variant, score) for (name, ratio, variant, _, _), score in zip(outputs, scores)]
-
-
-def report(results, ratios):
-    for ratio in ratios:
-        rows = [row for row in results if row[1] == ratio]
-        names = sorted({row[0] for row in rows})
-        table = {(row[0], row[2]): row[3] for row in rows}
-        print(f"x{ratio:.3g} ({len(names)} pictures)          psnr   linear    delta   chroma     ssim  ssimulacra2  psnr>default  ssimulacra2>default")
-        for variant in (variant for variant in VARIANTS if (names[0], variant) in table):
-            means = [sum(table[(name, variant)][metric] for name in names) / len(names) for metric in METRICS]
-            wins = [sum(table[(name, variant)][metric] > table[(name, "placebo_default")][metric] for name in names) for metric in ("psnr", "ssimulacra2")]
-            print(f"  {variant:22} {means[0]:7.3f} {means[1]:8.5f} {means[2]:8.5f} {means[3]:8.5f} {means[4]:8.5f}  {means[5]:11.3f}  {wins[0]:3d}/{len(names)}       {wins[1]:3d}/{len(names)}")
+def speed(args):
+    """Every format, size and variant one after another, after all the CPU
+    work: on an APU a busy CPU slows the GPU down, and processes timing side
+    by side stretch each other's numbers."""
+    rows = []
+    for fmt in args.formats:
+        root = Path(args.cases) / fmt
+        scratch = Path(args.json).parent / "frames" / fmt
+        cases = []
+        for text in args.pairs:
+            video, screen = pair_of(text)
+            directory = scratch / text.replace(":", "_")
+            directory.mkdir(parents=True)
+            os.link(root / "frames" / f"{video[0]}x{video[1]}.bin", directory / "data.bin")
+            for name in ("size", "placebo.txt", "frame.bin"):
+                os.link(root / "cases" / directory.name / name, directory / name)
+            cases.append((video, screen, directory))
+        times = {(str(directory), "ours"): compose(args, directory, root / "cases" / directory.name / "layer.spv", args.rounds) for _, _, directory in cases}
+        for preset in args.presets:
+            text = subprocess.run([args.placebo, preset, str(args.rounds), *(str(directory) for _, _, directory in cases)], check=True, capture_output=True, text=True).stdout
+            times.update({(directory, f"placebo_{preset}"): float(value) for directory, value in re.findall(rf"^placebo (\S+) {preset} gpu ([\d.]+)", text, re.M)})
+        rows += [{"format": fmt, "video": video, "screen": screen, **{variant: times[(str(directory), variant)] for variant in VARIANTS if (str(directory), variant) in times}} for video, screen, directory in cases]
+        shutil.rmtree(scratch)
+    Path(args.json).write_text(json.dumps(rows, indent=1) + "\n")
+    text = []
+    for fmt in args.formats:
+        text.append(f"{fmt}: GPU us per frame")
+        text.append(f"  {'video':>9} -> {'screen':<9} {'factor':>6} " + " ".join(f"{variant:>20}" for variant in VARIANTS))
+        for row in rows:
+            if row["format"] == fmt:
+                (w, h), (tw, th) = row["video"], row["screen"]
+                cells = [f"{row[variant]:20.1f}" if row.get(variant) else f"{'-':>20}" for variant in VARIANTS]
+                text.append(f"  {w:>4}x{h:<4} -> {tw:>4}x{th:<4} {tw / w:6.3g} " + " ".join(cells))
+    Path(args.text).write_text("\n".join(text) + "\n")
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--compiler", required=True)
-    parser.add_argument("--work", default=str(HERE.parent.parent / ".build" / "video_quality"))
-    parser.add_argument("--ratios", default="1.333,1.5,2,3")
-    parser.add_argument("--downs", default="1.5,2,3")
-    parser.add_argument("names", nargs="*")
+    commands = parser.add_subparsers(dest="command", required=True)
+    one = commands.add_parser("shader")
+    one.add_argument("corpus")
+    one.add_argument("compiler")
+    one.add_argument("host")
+    one.add_argument("format")
+    one.add_argument("sizes", type=int, nargs=4)
+    one.add_argument("directory")
+    one = commands.add_parser("render")
+    one.add_argument("out")
+    one.add_argument("variant", choices=VARIANTS)
+    one.add_argument("format")
+    one.add_argument("factor", type=float)
+    one.add_argument("sizes", type=int, nargs=4)
+    one.add_argument("pictures", nargs="+", help="NAME SOURCE.ppm TRUTH.ppm for each picture")
+    one.add_argument("--corpus", required=True)
+    one.add_argument("--layer", default="")
+    one.add_argument("--compositor", default="")
+    one.add_argument("--plain", default="")
+    one.add_argument("--placebo", default="")
+    one = commands.add_parser("report")
+    one.add_argument("json")
+    one.add_argument("text")
+    one.add_argument("parts", nargs="+")
+    one = commands.add_parser("cases")
+    one.add_argument("corpus")
+    one.add_argument("compiler")
+    one.add_argument("host")
+    one.add_argument("format")
+    one.add_argument("directory")
+    one.add_argument("pairs", nargs="+", help="VIDEOWxH:SCREENWxH")
+    one = commands.add_parser("speed")
+    one.add_argument("json")
+    one.add_argument("text")
+    one.add_argument("--formats", nargs="+", required=True)
+    one.add_argument("--pairs", nargs="+", required=True, help="VIDEOWxH:SCREENWxH")
+    one.add_argument("--presets", nargs="*", default=[])
+    one.add_argument("--cases", required=True)
+    one.add_argument("--compositor", required=True)
+    one.add_argument("--plain", required=True)
+    one.add_argument("--placebo", default="")
+    one.add_argument("--rounds", type=int, default=20)
     args = parser.parse_args()
-    work = Path(args.work)
-    work.mkdir(parents=True, exist_ok=True)
-    ratios = [float(value) for value in args.ratios.split(",") if value] + [1 / float(value) for value in args.downs.split(",") if value]
-    manifest = json.loads((CORPUS / "manifest.json").read_text())
-    names = [entry["name"] for entry in manifest if not args.names or entry["name"] in args.names]
-    tools = build(work)
-    truths = {}
-    (work / "truth").mkdir(exist_ok=True)
-    for name in names:
-        truths[name] = work / "truth" / f"{name}.ppm"
-        if not truths[name].exists():
-            subprocess.run(["djxl", str(CORPUS / f"{name}.jxl"), str(truths[name])], check=True, capture_output=True)
-    jobs = [(name, ratio) for ratio in ratios for name in names]
-    results = []
-    for start in range(0, len(jobs), BATCH):
-        results += run(tools, args.compiler, work, truths, jobs[start:start + BATCH])
-        print(f"{min(start + BATCH, len(jobs))}/{len(jobs)}", file=sys.stderr, flush=True)
-    (work / "results.json").write_text(json.dumps([{"name": name, "ratio": ratio, "variant": variant, **score} for name, ratio, variant, score in results], indent=1) + "\n")
-    report(results, ratios)
+    if args.command == "shader":
+        shader(args.corpus, args.compiler, args.host, args.format, tuple(args.sizes[:2]), tuple(args.sizes[2:]), Path(args.directory))
+    elif args.command == "render":
+        render(args)
+    elif args.command == "report":
+        report(Path(args.json), Path(args.text), args.parts)
+    elif args.command == "cases":
+        cases(args)
+    else:
+        speed(args)
 
 
 if __name__ == "__main__":

@@ -165,50 +165,178 @@ static int crop(int argc, char** argv) {
     return 0;
 }
 
-static int input(int argc, char** argv) {
-    if (argc != 7) die("usage: corpus input TRUTH.ppm OUT.yuv WIDTH HEIGHT BITS");
-    Image truth = readPpm(argv[2]);
-    int width = atoi(argv[4]), height = atoi(argv[5]), bits = atoi(argv[6]);
+typedef struct {
+    const char* name;
+    int chroma, bits, planes, shift;
+} Format;
+
+static const Format formats[] = {
+    {"yuv420p", 420, 8, 3, 0},
+    {"nv12", 420, 8, 2, 0},
+    {"yuv420p10le", 420, 10, 3, 0},
+    {"p010le", 420, 10, 2, 6},
+    {"yuv444p", 444, 8, 3, 0},
+    {"bgra", 0, 8, 1, 0},
+};
+
+typedef struct {
+    int width, height, step, size, count, map[4];
+    size_t offset, line;
+} Plane;
+
+static const Format* formatOf(const char* name) {
+    for (size_t i = 0; i < sizeof(formats) / sizeof(formats[0]); i++)
+        if (!strcmp(formats[i].name, name)) return &formats[i];
+    die(name);
+    return NULL;
+}
+
+static size_t aligned(size_t value) {
+    return (value + 63) / 64 * 64;
+}
+
+static int planesOf(const Format* format, int width, int height, Plane* planes, size_t* total) {
+    int size = format->bits > 8 ? 2 : 1;
+    int cw = format->chroma == 420 ? (width + 1) / 2 : width, ch = format->chroma == 420 ? (height + 1) / 2 : height;
+    int count = format->planes;
+    if (count == 1) {
+        planes[0] = (Plane){width, height, 4, 1, 4, {2, 1, 0, 3}, 0, 0};
+    } else if (count == 2) {
+        planes[0] = (Plane){width, height, size, size, 1, {0}, 0, 0};
+        planes[1] = (Plane){cw, ch, 2 * size, size, 2, {1, 2}, 0, 0};
+    } else {
+        planes[0] = (Plane){width, height, size, size, 1, {0}, 0, 0};
+        planes[1] = (Plane){cw, ch, size, size, 1, {1}, 0, 0};
+        planes[2] = (Plane){cw, ch, size, size, 1, {2}, 0, 0};
+    }
+    *total = 0;
+    for (int p = 0; p < count; p++) {
+        planes[p].offset = *total;
+        planes[p].line = aligned((size_t)planes[p].width * planes[p].step);
+        *total += aligned(planes[p].line * planes[p].height);
+    }
+    return count;
+}
+
+static char* inside(const char* directory, const char* name) {
+    static char path[4096];
+    snprintf(path, sizeof(path), "%s/%s", directory, name);
+    return path;
+}
+
+static void samples(const Format* format, const char* source, int width, int height, uint16_t** components) {
+    size_t count = (size_t)width * height;
+    int cw = format->chroma == 420 ? (width + 1) / 2 : width, ch = format->chroma == 420 ? (height + 1) / 2 : height;
+    for (int c = 0; c < 4; c++) {
+        components[c] = calloc(c && format->chroma ? (size_t)cw * ch : count, sizeof(uint16_t));
+        if (!components[c]) die("out of memory");
+    }
+    if (!strcmp(source, "noise")) {
+        uint32_t state = 2463534242u;
+        int limit = (1 << format->bits) - 1;
+        for (int c = 0; c < 4; c++)
+            for (size_t i = 0; i < (c && format->chroma ? (size_t)cw * ch : count); i++) {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                components[c][i] = (uint16_t)(state % (uint32_t)(limit + 1));
+            }
+        return;
+    }
+    Image truth = readPpm(source);
     linearize(&truth);
     Image small = box(&truth, width, height);
     delinearize(&small);
-    int cw = (width + 1) / 2, ch = (height + 1) / 2;
-    double* ycc = malloc((size_t)width * height * 3 * sizeof(double));
-    for (size_t i = 0; i < (size_t)width * height; i++) {
+    if (!format->chroma) {
+        for (size_t i = 0; i < count; i++) {
+            for (int c = 0; c < 3; c++) components[c][i] = (uint16_t)lround(clamp(small.rgb[i * 3 + c]) * 255);
+            components[3][i] = 255;
+        }
+        return;
+    }
+    double* ycc = malloc(count * 3 * sizeof(double));
+    for (size_t i = 0; i < count; i++) {
         const double* p = small.rgb + i * 3;
         double y = 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2];
         ycc[i * 3] = y;
         ycc[i * 3 + 1] = (p[2] - y) / 1.8556;
         ycc[i * 3 + 2] = (p[0] - y) / 1.5748;
     }
-    double unit = (double)(1 << (bits - 8));
-    size_t lumaCount = (size_t)width * height, chromaCount = (size_t)cw * ch;
-    uint16_t* planes = malloc((lumaCount + 2 * chromaCount) * sizeof(uint16_t));
-    for (size_t i = 0; i < lumaCount; i++) planes[i] = (uint16_t)lround((16 + 219 * ycc[i * 3]) * unit);
+    double unit = (double)(1 << (format->bits - 8));
+    for (size_t i = 0; i < count; i++) components[0][i] = (uint16_t)lround((16 + 219 * ycc[i * 3]) * unit);
     for (int j = 0; j < ch; j++)
         for (int i = 0; i < cw; i++)
             for (int c = 1; c <= 2; c++) {
-                double sum = 0;
-                for (int r = 0; r < 2; r++) {
-                    int y = 2 * j + r < height ? 2 * j + r : height - 1;
-                    for (int k = -1; k <= 1; k++) {
-                        int x = 2 * i + k < 0 ? 0 : 2 * i + k >= width ? width - 1 : 2 * i + k;
-                        sum += (k ? 1 : 2) * ycc[((size_t)y * width + x) * 3 + c];
+                double value = ycc[((size_t)j * width + i) * 3 + c];
+                if (format->chroma == 420) {
+                    double sum = 0;
+                    for (int r = 0; r < 2; r++) {
+                        int y = 2 * j + r < height ? 2 * j + r : height - 1;
+                        for (int k = -1; k <= 1; k++) {
+                            int x = 2 * i + k < 0 ? 0 : 2 * i + k >= width ? width - 1 : 2 * i + k;
+                            sum += (k ? 1 : 2) * ycc[((size_t)y * width + x) * 3 + c];
+                        }
                     }
+                    value = sum / 8;
                 }
-                planes[lumaCount + (c - 1) * chromaCount + (size_t)j * cw + i] = (uint16_t)lround((128 + 224 * sum / 8) * unit);
+                components[c][(size_t)j * cw + i] = (uint16_t)lround((128 + 224 * value) * unit);
             }
-    FILE* f = openFile(argv[3], "wb");
-    size_t total = lumaCount + 2 * chromaCount;
-    if (bits == 8) {
-        uint8_t* bytes = malloc(total);
-        for (size_t i = 0; i < total; i++) bytes[i] = (uint8_t)planes[i];
-        fwrite(bytes, 1, total, f);
-        free(bytes);
-    } else {
-        fwrite(planes, 2, total, f);
+    free(ycc);
+}
+
+static int input(int argc, char** argv) {
+    if (argc != 9) die("usage: corpus input TRUTH.ppm|noise DIRECTORY WIDTH HEIGHT FORMAT TARGET_WIDTH TARGET_HEIGHT");
+    const char* directory = argv[3];
+    int width = atoi(argv[4]), height = atoi(argv[5]);
+    const Format* format = formatOf(argv[6]);
+    Plane planes[3];
+    size_t total;
+    int count = planesOf(format, width, height, planes, &total);
+    uint16_t* components[4];
+    samples(format, argv[2], width, height, components);
+    uint8_t* data = calloc(total + 64, 1);
+    if (!data) die("out of memory");
+    for (int p = 0; p < count; p++) {
+        const Plane* plane = &planes[p];
+        for (int y = 0; y < plane->height; y++)
+            for (int x = 0; x < plane->width; x++)
+                for (int j = 0; j < plane->count; j++) {
+                    uint16_t value = (uint16_t)(components[plane->map[j]][(size_t)y * plane->width + x] << format->shift);
+                    uint8_t* at = data + plane->offset + (size_t)y * plane->line + (size_t)x * plane->step + (size_t)j * plane->size;
+                    at[0] = (uint8_t)value;
+                    if (plane->size == 2) at[1] = (uint8_t)(value >> 8);
+                }
+    }
+    FILE* f = openFile(inside(directory, "data.bin"), "wb");
+    fwrite(data, 1, total + 64, f);
+    fclose(f);
+    f = openFile(inside(directory, "placebo.txt"), "w");
+    fprintf(f, "%d %d %s %s %d %d %d %d 13 %d %d\n", width, height, argv[7], argv[8], count, !format->chroma, !format->chroma, format->chroma == 420, format->bits, format->shift);
+    for (int p = 0; p < count; p++) {
+        fprintf(f, "%d %d %zu %zu %d %d %d", planes[p].width, planes[p].height, planes[p].offset, planes[p].line, planes[p].step, 8 * planes[p].size, planes[p].count);
+        for (int j = 0; j < planes[p].count; j++) fprintf(f, " %d", planes[p].map[j]);
+        fprintf(f, "\n");
     }
     fclose(f);
+    f = openFile(inside(directory, "size"), "w");
+    fprintf(f, "%s %s", argv[7], argv[8]);
+    fclose(f);
+    fclose(openFile(inside(directory, "dump"), "w"));
+    for (int c = 0; c < 4; c++) free(components[c]);
+    free(data);
+    return 0;
+}
+
+static int layout(int argc, char** argv) {
+    if (argc != 5) die("usage: corpus layout FORMAT WIDTH HEIGHT");
+    Plane planes[3];
+    size_t total;
+    int count = planesOf(formatOf(argv[2]), atoi(argv[3]), atoi(argv[4]), planes, &total);
+    printf("offsets");
+    for (int p = 0; p < 4; p++) printf(" %zu", p < count ? planes[p].offset : 0);
+    printf(" lines");
+    for (int p = 0; p < 4; p++) printf(" %zu", p < count ? planes[p].line : 0);
+    printf("\n");
     return 0;
 }
 
@@ -456,20 +584,44 @@ static double ssimulacra2(double* first, double* second, int width, int height) 
     return score > 0 ? 100.0 - 10.0 * pow(score, 0.6276336467831387) : 100.0;
 }
 
-static int metric(int argc, char** argv) {
-    if (argc != 4) die("usage: corpus metric TRUTH.ppm OUT.raw");
-    Image truth = readPpm(argv[2]);
+static void score(FILE* scores, const char* name, const char* truthPath, const char* rawPath) {
+    Image truth = readPpm(truthPath);
     int width = truth.width, height = truth.height;
-    FILE* f = openFile(argv[3], "rb");
-    fseek(f, 0, SEEK_END);
-    size_t size = (size_t)ftell(f);
-    fseek(f, 0, SEEK_SET);
     size_t count = (size_t)width * height;
-    int wide = size == count * 16;
-    if (!wide && size != count * 8) die("raw output does not match the truth's size");
-    uint8_t* bytes = malloc(size);
-    if (fread(bytes, 1, size, f) != size) die("short raw output");
-    fclose(f);
+    double* drawn = malloc(count * 3 * sizeof(double));
+    size_t length = strlen(rawPath);
+    if (length > 4 && !strcmp(rawPath + length - 4, ".ppm")) {
+        Image image = readPpm(rawPath);
+        if (image.width != width || image.height != height) die("the drawn picture does not match the truth's size");
+        memcpy(drawn, image.rgb, count * 3 * sizeof(double));
+        free(image.rgb);
+    } else {
+        FILE* f = openFile(rawPath, "rb");
+        fseek(f, 0, SEEK_END);
+        size_t size = (size_t)ftell(f);
+        fseek(f, 0, SEEK_SET);
+        size_t stride = size / (count ? count : 1);
+        if (size != count * stride || (stride != 16 && stride != 8 && stride != 4)) die("raw output does not match the truth's size");
+        uint8_t* bytes = malloc(size);
+        if (fread(bytes, 1, size, f) != size) die("short raw output");
+        fclose(f);
+        for (size_t i = 0; i < count; i++)
+            for (int c = 0; c < 3; c++) {
+                const uint8_t* at = bytes + i * stride;
+                if (stride == 16) {
+                    float v;
+                    memcpy(&v, at + c * 4, 4);
+                    drawn[i * 3 + c] = v;
+                } else if (stride == 8) {
+                    uint16_t h;
+                    memcpy(&h, at + c * 2, 2);
+                    drawn[i * 3 + c] = half(h);
+                } else {
+                    drawn[i * 3 + c] = at[c] / 255.0;
+                }
+            }
+        free(bytes);
+    }
     int border = 8;
     double srgb = 0, linear = 0, delta = 0, chroma = 0;
     size_t inside = 0;
@@ -481,17 +633,7 @@ static int metric(int argc, char** argv) {
         for (int x = 0; x < width; x++) {
             size_t i = (size_t)y * width + x;
             double out[3];
-            for (int c = 0; c < 3; c++) {
-                float v;
-                if (wide) {
-                    memcpy(&v, bytes + i * 16 + c * 4, 4);
-                } else {
-                    uint16_t h;
-                    memcpy(&h, bytes + i * 8 + c * 2, 2);
-                    v = half(h);
-                }
-                out[c] = clamp(v);
-            }
+            for (int c = 0; c < 3; c++) out[c] = clamp(drawn[i * 3 + c]);
             const double* t = truth.rgb + i * 3;
             for (int c = 0; c < 3; c++) {
                 first[c * count + i] = decode(t[c]);
@@ -515,15 +657,29 @@ static int metric(int argc, char** argv) {
             chroma += sqrt(da * da + db * db);
         }
     double rmse = sqrt(srgb / (inside * 3.0));
-    printf("psnr %.4f linear %.6f delta %.6f chroma %.6f ssim %.6f ssimulacra2 %.4f\n", 20 * log10(1 / rmse), sqrt(linear / (inside * 3.0)), delta / inside, chroma / inside, ssim(ta, oa, width, height), ssimulacra2(first, second, width, height));
+    fprintf(scores, "%s psnr %.4f linear %.6f delta %.6f chroma %.6f ssim %.6f ssimulacra2 %.4f\n", name, 20 * log10(1 / rmse), sqrt(linear / (inside * 3.0)), delta / inside, chroma / inside, ssim(ta, oa, width, height), ssimulacra2(first, second, width, height));
+    free(drawn);
+    free(ta);
+    free(oa);
+    free(first);
+    free(second);
+    free(truth.rgb);
+}
+
+static int metric(int argc, char** argv) {
+    if (argc < 6 || (argc - 3) % 3) die("usage: corpus metric SCORES NAME TRUTH.ppm OUT.raw [NAME TRUTH.ppm OUT.raw...]");
+    FILE* scores = openFile(argv[2], "a");
+    for (int i = 3; i < argc; i += 3) score(scores, argv[i], argv[i + 1], argv[i + 2]);
+    fclose(scores);
     return 0;
 }
 
 int main(int argc, char** argv) {
     if (argc > 1 && !strcmp(argv[1], "crop")) return crop(argc, argv);
     if (argc > 1 && !strcmp(argv[1], "input")) return input(argc, argv);
+    if (argc > 1 && !strcmp(argv[1], "layout")) return layout(argc, argv);
     if (argc > 1 && !strcmp(argv[1], "shrink")) return shrink(argc, argv);
     if (argc > 1 && !strcmp(argv[1], "metric")) return metric(argc, argv);
-    die("usage: corpus crop|input|shrink|metric ...");
+    die("usage: corpus crop|input|layout|shrink|metric ...");
     return 1;
 }
