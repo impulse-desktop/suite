@@ -111,7 +111,6 @@ namespace {
         i32 size[2];
         u32 tilesX;
         u32 first;
-        u32 phase;
         float white;
         u32 layerWide;
     };
@@ -1424,6 +1423,8 @@ namespace {
 
         size_t param = 0;
 
+        inside = false;
+
         for (size_t i = firstFunction; i < hostAt.length(); i++) {
             const u32* ins = host + hostAt[i];
             u32 op = ins[0] & 0xffffu;
@@ -1797,6 +1798,12 @@ VkPipeline Gpu::pipeline(const u32* code, size_t bytes, u32 output) {
     VkResult result = vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &ci, alloc, &made);
 
     vkDestroyShaderModule(device, module, alloc);
+
+    if (chaos->vulkanAt(StringView(u8"compose"), result) < 0 && made) {
+        vkDestroyPipeline(device, made, alloc);
+        made = VK_NULL_HANDLE;
+    }
+
     vkcAt(StringView(u8"compose"), result);
 
     return made;
@@ -1926,7 +1933,7 @@ void Gpu::bindCompose(VkDescriptorSet set, Buffer (&buffers)[composeBuffers], Vk
 
 void Gpu::dispatch(VkCommandBuffer command, VkDescriptorSet set, u32 width, u32 height, u32 output) {
     const Tiles& t = tiles;
-    Push push{{(i32)width, (i32)height}, t.tilesX, 0, (u32)(frames % 4096), sdrWhiteNits, 0};
+    Push push{{(i32)width, (i32)height}, t.tilesX, 0, sdrWhiteNits, 0};
     u32 groups = (composeTile / composeGroup) * (composeTile / composeGroup);
 
     vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_COMPUTE, composeLayout, 0, 1, &set, 0, nullptr);

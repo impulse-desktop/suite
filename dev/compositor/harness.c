@@ -947,7 +947,6 @@ typedef struct {
     int32_t size[2];
     uint32_t tilesX;
     uint32_t first;
-    uint32_t phase;
     float white;
     uint32_t layerWide;
 } Push;
@@ -965,8 +964,8 @@ static VkPipeline composePipeline(VkPipelineLayout layout, const char* path) {
 }
 
 int main(int argc, char** argv) {
-    if (argc != 9 && argc != 12) {
-        fprintf(stderr, "usage: harness VERT.spv FRAG.spv LINEARFRAG.spv PLAIN.spv ROUNDS FRAME.bin OUTDIR PHASE [LAYER.spv LEGACY.spv VIDEO.bin]\n");
+    if (argc != 8 && argc != 11) {
+        fprintf(stderr, "usage: harness VERT.spv FRAG.spv LINEARFRAG.spv PLAIN.spv ROUNDS FRAME.bin OUTDIR [LAYER.spv LEGACY.spv VIDEO.bin]\n");
         return 2;
     }
     const char* vert = argv[1];
@@ -976,15 +975,14 @@ int main(int argc, char** argv) {
     int rounds = atoi(argv[5]);
     Frame f = loadFrame(argv[6]);
     const char* outdir = argv[7];
-    uint32_t phase = (uint32_t)atoi(argv[8]);
-    const char* layerProgram = argc == 12 ? argv[9] : NULL;
-    const char* legacy = argc == 12 ? argv[10] : NULL;
-    const char* frameWords = argc == 12 ? argv[11] : NULL;
+    const char* layerProgram = argc == 11 ? argv[8] : NULL;
+    const char* legacy = argc == 11 ? argv[9] : NULL;
+    const char* frameWords = argc == 11 ? argv[10] : NULL;
     for (int i = 0; i < 256; i++) {
         double c = i / 255.0;
         srgbLinear[i] = (float)(c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4));
     }
-    if (f.hasVideo != (argc == 12)) {
+    if (f.hasVideo != (argc == 11)) {
         fprintf(stderr, "a frame with video needs its programs, and only it\n");
         return 2;
     }
@@ -1178,7 +1176,7 @@ int main(int argc, char** argv) {
         barrier(cmd, composed.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 0, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
         vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, queries, 0);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, composeLayout, 0, 2, sets, 0, NULL);
-        Push push = {{(int32_t)f.width, (int32_t)f.height}, program.tilesX, 0, phase, 203.0f, 0};
+        Push push = {{(int32_t)f.width, (int32_t)f.height}, program.tilesX, 0, 203.0f, 0};
         if (program.programs[0][1]) {
             push.first = program.programs[0][0];
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, plainPipeline);

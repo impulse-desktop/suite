@@ -238,7 +238,6 @@ def main():
     parser.add_argument("--size", default="1920x1080")
     parser.add_argument("--source", default="1280x720")
     parser.add_argument("--rounds", type=int, default=20)
-    parser.add_argument("--phase", type=int, default=0)
     parser.add_argument("scenes", nargs="*", default=["demo", "play", "menu", "view"])
     args = parser.parse_args()
     work = Path(args.work)
@@ -264,7 +263,7 @@ def main():
         rect = rectangle(frame)
         extra = [] if rect is None else [str(path) for path in programs(args.compiler, work, rect, source, host)]
         print(f"== {scene} {args.size}" + ("" if rect is None else f", video {rect[2] - rect[0]}x{rect[3] - rect[1]} from {args.source}"), flush=True)
-        subprocess.run([str(harness), str(work / "imgui.vert.spv"), str(work / "imgui.frag.spv"), str(work / "linear.frag.spv"), str(plain), str(args.rounds), str(frame), str(out), str(args.phase), *extra], check=True)
+        subprocess.run([str(harness), str(work / "imgui.vert.spv"), str(work / "imgui.frag.spv"), str(work / "linear.frag.spv"), str(plain), str(args.rounds), str(frame), str(out), *extra], check=True)
 
 
 if __name__ == "__main__":

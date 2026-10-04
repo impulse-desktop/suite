@@ -120,11 +120,10 @@ video_codes = command(
 
 
 # ImGui's core; the compositors of renderer_vulkan.cpp and renderer_metal.mm
-# draw what it lists, so neither of its renderer backends is built
-imgui_core = [path for path in build.glob("$(S)/ext/imgui/*.cpp") if not path.endswith("imgui_impl_vulkan.cpp")]
+# draw what it lists, in place of its renderer backends
 imgui = library(
     name="imgui",
-    srcs=imgui_core,
+    srcs=build.glob("$(S)/ext/imgui/*.cpp"),
     deps=platform_deps,
 )
 

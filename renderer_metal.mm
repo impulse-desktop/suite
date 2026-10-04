@@ -101,10 +101,8 @@ namespace {
         i32 size[2];
         u32 tilesX;
         u32 first;
-        u32 phase;
         float white;
         u32 layerWide;
-        u32 pad;
     };
 
     struct MetalTexture {
@@ -347,10 +345,8 @@ struct Frame {
     int2 size;
     uint tilesX;
     uint first;
-    uint phase;
     float white;
     uint layerWide;
-    uint pad;
 };
 
 struct Textures {
@@ -387,8 +383,8 @@ static float3 pqDecode(float3 e) {
     return pow(max(p - 0.8359375, 0.0) / (18.8515625 - 18.6875 * p), float3(16384.0 / 2610.0)) * 10000.0;
 }
 
-static float noise(int2 pixel, constant Frame& frame) {
-    float2 at = float2(pixel) + 0.5 + 5.588238 * float(frame.phase);
+static float noise(int2 pixel) {
+    float2 at = float2(pixel) + 0.5;
     float inner = at.x * 0.06711056 + at.y * 0.00583715;
 
     return fract(52.9829189 * fract(inner)) - 0.5;
@@ -396,7 +392,7 @@ static float noise(int2 pixel, constant Frame& frame) {
 
 static float3 encode(float3 c, int2 pixel, constant Frame& frame) {
     if (OUTPUT == 0) {
-        return srgbEncode(clamp(c, 0.0, 1.0)) + noise(pixel, frame) / 255.0;
+        return srgbEncode(clamp(c, 0.0, 1.0)) + noise(pixel) / 255.0;
     }
 
     return c;
@@ -1273,7 +1269,7 @@ void MetalRenderer::encode(id<MTLCommandBuffer> command, id<MTLTexture> target, 
     }
     [compute setBuffer:textures offset:0 atIndex:6];
     [compute setTexture:target atIndex:0];
-    Push push{{(i32)target.width, (i32)target.height}, t.tilesX, 0, (u32)(frames % 4096), sdrWhiteNits, 0, 0};
+    Push push{{(i32)target.width, (i32)target.height}, t.tilesX, 0, sdrWhiteNits, 0};
     for (u32 p = 0; p * 2 < t.programs.length(); p++) {
         u32 count = t.programs[p * 2 + 1];
         if (!count) {

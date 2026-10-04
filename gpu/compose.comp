@@ -80,7 +80,6 @@ layout(push_constant) uniform Frame {
     ivec2 size;
     uint tilesX;
     uint first;
-    uint phase;
     float white;
     uint layerWide;
 } frame;
@@ -122,7 +121,7 @@ vec3 pqEncode(vec3 nits) {
 }
 
 float noise(ivec2 pixel) {
-    vec2 at = vec2(pixel) + 0.5 + 5.588238 * float(frame.phase);
+    vec2 at = vec2(pixel) + 0.5;
     float inner = at.x * 0.06711056 + at.y * 0.00583715;
 
     return fract(52.9829189 * fract(inner)) - 0.5;
