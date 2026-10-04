@@ -1200,6 +1200,35 @@ int main(int argc, char** argv) {
     compare(label, linearPixels, composedPixels, f.width, f.height);
     compare("  against now (sRGB blending):", nowPixels, composedPixels, f.width, f.height);
     printf("sum: now %.1f us, compose %.1f us\n", best + recording, gpuBest + building);
+    if (f.hasVideo) {
+        double kernelBest = 1e30, layerBest = 1e30;
+        uint32_t w = (uint32_t)(f.video[2] - f.video[0]), h = (uint32_t)(f.video[3] - f.video[1]);
+        for (int r = 0; r < rounds; r++) {
+            VkCommandBuffer cmd = begin();
+            vkCmdResetQueryPool(cmd, queries, 0, 2);
+            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, queries, 0);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, video.pipeline);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, video.layout, 0, 1, &nowVideo, 0, NULL);
+            vkCmdDispatch(cmd, (w + 15) / 16, (h + 15) / 16, 1);
+            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queries, 1);
+            finish(cmd);
+            double us = elapsed();
+            kernelBest = us < kernelBest ? us : kernelBest;
+            cmd = begin();
+            vkCmdResetQueryPool(cmd, queries, 0, 2);
+            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, queries, 0);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, composeLayout, 0, 2, sets, 0, NULL);
+            Push push = {{(int32_t)f.width, (int32_t)f.height}, program.tilesX, program.programs[1][0], 203.0f, 0};
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, layerPipeline);
+            vkCmdPushConstants(cmd, composeLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+            vkCmdDispatch(cmd, program.programs[1][1], 1, 1);
+            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queries, 1);
+            finish(cmd);
+            us = elapsed();
+            layerBest = us < layerBest ? us : layerBest;
+        }
+        printf("alone: video kernel %.1f us, layer tiles %.1f us\n", kernelBest, layerBest);
+    }
     snprintf(path, sizeof(path), "%s/composed.ppm", outdir);
     writePpm(path, composedPixels, f.width, f.height);
     return 0;

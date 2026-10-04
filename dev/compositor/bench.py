@@ -10,6 +10,8 @@ compositor's tile programs and how far its pixels are from both.
 
 The video is a yuv420p BT.709 frame of the video bench's chart, scaled into
 the scene's video rectangle by the shaders the video_shader program makes.
+The scene native is play with a video of its rectangle's own size, and
+each scene with video also times the video kernel and the layer tiles alone.
 
   ix run set/pg/libs bin/glslang lib/vulkan/drivers --vulkan=amd/radv -- \\
       python3 dev/compositor/bench.py --dump BUILD/dev/compositor_dump --compiler BUILD/dev/video_shader [--work DIR] [--size 1920x1080] [--source 1280x720] [SCENE...]
@@ -71,8 +73,10 @@ def ids(ins):
         return [0, 1, 2] + list(range(4, len(w)))
     if op == 81:
         return [0, 1, 2]
-    if op in (71, 72):
+    if op in (71, 72, 247, 249):
         return [0]
+    if op == 250:
+        return [0, 1, 2]
     if op in (253, 56):
         return []
     if op in (248, 254, 55, 61, 62, 65, 80, 124, 224) or 109 <= op <= 200:
@@ -199,6 +203,8 @@ def merge(host_bytes, layer_bytes, name=b"layer("):
     return struct.pack("<%dI" % len(words), *words)
 
 
+NATIVE = {"native": "play"}
+
 
 def rectangle(frame):
     data = frame.read_bytes()
@@ -238,7 +244,7 @@ def main():
     parser.add_argument("--size", default="1920x1080")
     parser.add_argument("--source", default="1280x720")
     parser.add_argument("--rounds", type=int, default=20)
-    parser.add_argument("scenes", nargs="*", default=["demo", "play", "menu", "view"])
+    parser.add_argument("scenes", nargs="*", default=["demo", "play", "native", "menu", "view"])
     args = parser.parse_args()
     work = Path(args.work)
     work.mkdir(parents=True, exist_ok=True)
@@ -259,10 +265,11 @@ def main():
         out.mkdir(exist_ok=True)
         frame = out / "frame.bin"
         with frame.open("wb") as handle:
-            subprocess.run([args.dump, scene, width, height], check=True, stdout=handle)
+            subprocess.run([args.dump, NATIVE.get(scene, scene), width, height], check=True, stdout=handle)
         rect = rectangle(frame)
-        extra = [] if rect is None else [str(path) for path in programs(args.compiler, work, rect, source, host)]
-        print(f"== {scene} {args.size}" + ("" if rect is None else f", video {rect[2] - rect[0]}x{rect[3] - rect[1]} from {args.source}"), flush=True)
+        shown = source if rect is None or scene not in NATIVE else (rect[2] - rect[0], rect[3] - rect[1])
+        extra = [] if rect is None else [str(path) for path in programs(args.compiler, work, rect, shown, host)]
+        print(f"== {scene} {args.size}" + ("" if rect is None else f", video {rect[2] - rect[0]}x{rect[3] - rect[1]} from {shown[0]}x{shown[1]}"), flush=True)
         subprocess.run([str(harness), str(work / "imgui.vert.spv"), str(work / "imgui.frag.spv"), str(work / "linear.frag.spv"), str(plain), str(args.rounds), str(frame), str(out), *extra], check=True)
 
 

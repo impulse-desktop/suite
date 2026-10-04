@@ -907,6 +907,7 @@ namespace {
     struct Store {
         Node* index;
         Node* value;
+        Node* guard;
     };
 
     constexpr int kernelArrays = 4;
@@ -1818,6 +1819,10 @@ namespace {
             return t;
         }
 
+        Node* partial(Node* index, int pass, int count, int capacity) {
+            return (pass + 1) * capacity > count ? g.lt(index, count) : nullptr;
+        }
+
         void kernel(Kernel& k) {
             const int tile = (int)s.tile;
             bool sdr = !strcmp(s.output, "sdr");
@@ -1857,27 +1862,29 @@ namespace {
                     Node* x = g.sub(index, g.mul(y, chromaReach[0]));
                     Node* column = g.convert(g.clamp(g.add(chromaCorner[0], g.convert(x, Kind::Int)), 0, s.size[2] - 1.), Kind::Uint);
                     Node* line = g.convert(g.clamp(g.add(chromaCorner[1], g.convert(y, Kind::Int)), 0, s.size[3] - 1.), Kind::Uint);
-                    Node* slot = g.select(g.lt(index, positions), g.mul(index, 2), positions * 2);
+                    Node* slot = g.mul(index, 2);
+                    Node* guard = partial(index, pass, positions, tile * tile);
 
                     for (int c = 1; c <= 2; c++) {
                         int plane = l.components[c][0];
                         Node* row = g.shr(g.add(g.u(s.planeOffset[plane]), g.mul(line, g.u(s.lineSize[plane]))), 2);
 
-                        k.stores[0].pushBack(Store{g.add(slot, c - 1), value(c, window(c, row, column))});
+                        k.stores[0].pushBack(Store{g.add(slot, c - 1), value(c, window(c, row, column)), guard});
                     }
                 }
 
-                k.sizes[0] = positions * 2 + 2;
+                k.sizes[0] = positions * 2;
                 positions = reach[0] * chromaReach[1];
 
                 for (int pass = 0; pass * tile * tile < positions; pass++) {
                     Node* index = g.add(lane, pass * tile * tile);
                     Node* y = g.convert(g.floor(g.mul(g.add(g.convert(index, Kind::Float), 0.5), 1. / reach[0])), Kind::Uint);
                     Node* x = g.sub(index, g.mul(y, reach[0]));
-                    Node* row = g.min(y, chromaReach[1] - 1.);
+                    Node* row = y;
                     Taps across = chromaTaps(g.clamp(g.add(corner[0], g.convert(x, Kind::Int)), 0, last[0]), 0);
                     Node* start = g.convert(g.sub(across.base, chromaCorner[0]), Kind::Uint);
-                    Node* slot = g.select(g.lt(index, positions), g.mul(index, 2), positions * 2);
+                    Node* slot = g.mul(index, 2);
+                    Node* guard = partial(index, pass, positions, tile * tile);
 
                     for (int c = 1; c <= 2; c++) {
                         Node* sum = g.f(0.);
@@ -1886,11 +1893,11 @@ namespace {
                             sum = g.add(sum, g.mul(across.w[t], g.shared(g.add(g.mul(g.add(g.mul(row, chromaReach[0]), g.add(start, t)), 2), c - 1), 0)));
                         }
 
-                        k.stores[1].pushBack(Store{g.add(slot, c - 1), sum});
+                        k.stores[1].pushBack(Store{g.add(slot, c - 1), sum, guard});
                     }
                 }
 
-                k.sizes[1] = positions * 2 + 2;
+                k.sizes[1] = positions * 2;
             }
 
             int positions = reach[0] * reach[1];
@@ -1899,12 +1906,13 @@ namespace {
                 Node* index = g.add(lane, pass * tile * tile);
                 Node* y = g.convert(g.floor(g.mul(g.add(g.convert(index, Kind::Float), 0.5), 1. / reach[0])), Kind::Uint);
                 Node* x = g.sub(index, g.mul(y, reach[0]));
-                Node* at[2] = {g.clamp(g.add(corner[0], g.convert(x, Kind::Int)), 0, last[0]), g.clamp(g.add(corner[1], g.convert(g.min(y, reach[1] - 1.), Kind::Int)), 0, last[1])};
+                Node* at[2] = {g.clamp(g.add(corner[0], g.convert(x, Kind::Int)), 0, last[0]), g.clamp(g.add(corner[1], g.convert(y, Kind::Int)), 0, last[1])};
                 Node* codes[4];
                 Node* signal[3];
                 Node* light[3];
                 Node* alpha;
-                Node* slot = g.select(g.lt(index, positions), g.mul(index, 3), positions * 3);
+                Node* slot = g.mul(index, 3);
+                Node* guard = partial(index, pass, positions, tile * tile);
 
                 decodeAt(at, codes);
 
@@ -1927,11 +1935,11 @@ namespace {
                 lightOf(signal, light);
 
                 for (int c = 0; c < 3; c++) {
-                    k.stores[2].pushBack(Store{g.add(slot, c), sdr ? sigmoidize(light[c]) : light[c]});
+                    k.stores[2].pushBack(Store{g.add(slot, c), sdr ? sigmoidize(light[c]) : light[c], guard});
                 }
             }
 
-            k.sizes[2] = positions * 3 + 3;
+            k.sizes[2] = positions * 3;
 
             Node* across = g.convert(g.add(first[0], linear ? g.convert(local[0], Kind::Int) : local[0]), Kind::Float);
             Axis horizontal = axis(g.sub(g.mul(g.add(across, 0.5), ratio[0]), 0.5), 1. / ratio[0], true);
@@ -1940,7 +1948,8 @@ namespace {
             for (int pass = 0; pass * tile < reach[1]; pass++) {
                 Node* row = g.add(local[1], pass * tile);
                 Node* base = g.add(g.mul(row, reach[0]), start);
-                Node* slot = g.select(g.lt(row, reach[1]), g.mul(g.add(g.mul(row, tile), local[0]), 3), reach[1] * tile * 3);
+                Node* slot = g.mul(g.add(g.mul(row, tile), local[0]), 3);
+                Node* guard = partial(row, pass, reach[1], tile);
 
                 for (int c = 0; c < 3; c++) {
                     Node* sum = g.f(0.);
@@ -1949,11 +1958,11 @@ namespace {
                         sum = g.add(sum, g.mul(horizontal.w[t], g.shared(g.add(g.mul(g.add(base, t), 3), c), 2)));
                     }
 
-                    k.stores[3].pushBack(Store{g.add(slot, c), sum});
+                    k.stores[3].pushBack(Store{g.add(slot, c), sum, guard});
                 }
             }
 
-            k.sizes[3] = reach[1] * tile * 3 + 3;
+            k.sizes[3] = reach[1] * tile * 3;
 
             Node* pixel[2];
             Node* light[3];
@@ -2050,6 +2059,14 @@ namespace {
                     top->mark = 2;
                     out.pushBack(top);
                 }
+            }
+        }
+    }
+
+    static void forget(const Vector<Node*>& nodes) {
+        for (Node* node : nodes) {
+            if (node->op != Op::Const && node->op != Op::Input) {
+                node->mark = 0;
             }
         }
     }
@@ -2251,6 +2268,58 @@ namespace {
         return copied(pool, out);
     }
 
+    static void phases(StringBuilder& out, const Kernel& k, u32& next) {
+        for (int phase = 0; phase < kernelArrays; phase++) {
+            const Vector<Store>& stores = k.stores[phase];
+
+            if (stores.empty()) {
+                continue;
+            }
+
+            for (size_t first = 0; first < stores.length();) {
+                Node* guard = stores[first].guard;
+                size_t end = first;
+                Vector<Node*> roots;
+                Vector<Node*> nodes;
+
+                for (; end < stores.length() && stores[end].guard == guard; end++) {
+                    roots.pushBack(stores[end].index);
+                    roots.pushBack(stores[end].value);
+                }
+
+                if (guard) {
+                    Vector<Node*> condition;
+
+                    order(&guard, 1, condition);
+                    statements(out, condition, next);
+                    out << StringView(u8"    if (");
+                    operand(out, guard);
+                    out << StringView(u8") {\n");
+                }
+
+                order(roots.data(), roots.length(), nodes);
+                statements(out, nodes, next);
+
+                for (size_t i = first; i < end; i++) {
+                    out << StringView(u8"    ") << StringView(sharedNames[phase % kernelBuffers]) << StringView(u8"[");
+                    operand(out, stores[i].index);
+                    out << StringView(u8"] = ");
+                    operand(out, stores[i].value);
+                    out << StringView(u8";\n");
+                }
+
+                if (guard) {
+                    out << StringView(u8"    }\n");
+                    forget(nodes);
+                }
+
+                first = end;
+            }
+
+            out << StringView(u8"    threadgroup_barrier(mem_flags::mem_threadgroup);\n");
+        }
+    }
+
     static StringView mslLayer(ObjPool& pool, const Kernel& k, Node* const* uv) {
         StringBuilder out;
         u32 next = 3;
@@ -2276,32 +2345,7 @@ namespace {
             out << StringView(u8");\n");
         }
 
-        for (int phase = 0; phase < kernelArrays; phase++) {
-            Vector<Node*> roots;
-            Vector<Node*> nodes;
-
-            if (k.stores[phase].empty()) {
-                continue;
-            }
-
-            for (const Store& store : k.stores[phase]) {
-                roots.pushBack(store.index);
-                roots.pushBack(store.value);
-            }
-
-            order(roots.data(), roots.length(), nodes);
-            statements(out, nodes, next);
-
-            for (const Store& store : k.stores[phase]) {
-                out << StringView(u8"    ") << StringView(sharedNames[phase % kernelBuffers]) << StringView(u8"[");
-                operand(out, store.index);
-                out << StringView(u8"] = ");
-                operand(out, store.value);
-                out << StringView(u8";\n");
-            }
-
-            out << StringView(u8"    threadgroup_barrier(mem_flags::mem_threadgroup);\n");
-        }
+        phases(out, k, next);
 
         Vector<Node*> nodes;
 
@@ -2324,32 +2368,7 @@ namespace {
             }
         }
 
-        for (int phase = 0; phase < kernelArrays; phase++) {
-            Vector<Node*> roots;
-            Vector<Node*> nodes;
-
-            if (k.stores[phase].empty()) {
-                continue;
-            }
-
-            for (const Store& store : k.stores[phase]) {
-                roots.pushBack(store.index);
-                roots.pushBack(store.value);
-            }
-
-            order(roots.data(), roots.length(), nodes);
-            statements(out, nodes, next);
-
-            for (const Store& store : k.stores[phase]) {
-                out << StringView(u8"    ") << StringView(sharedNames[phase % kernelBuffers]) << StringView(u8"[");
-                operand(out, store.index);
-                out << StringView(u8"] = ");
-                operand(out, store.value);
-                out << StringView(u8";\n");
-            }
-
-            out << StringView(u8"    threadgroup_barrier(mem_flags::mem_threadgroup);\n");
-        }
+        phases(out, k, next);
 
         Node* roots[6] = {k.at[0], k.at[1], k.color[0], k.color[1], k.color[2], k.color[3]};
         Vector<Node*> nodes;
@@ -2600,6 +2619,61 @@ namespace {
             }
         }
 
+        void phases(const Kernel& k, u32 scope, u32 semantics) {
+            for (int phase = 0; phase < kernelArrays; phase++) {
+                const Vector<Store>& stores = k.stores[phase];
+
+                if (stores.empty()) {
+                    continue;
+                }
+
+                for (size_t first = 0; first < stores.length();) {
+                    Node* guard = stores[first].guard;
+                    size_t end = first;
+                    u32 merge = 0;
+                    Vector<Node*> roots;
+                    Vector<Node*> nodes;
+
+                    for (; end < stores.length() && stores[end].guard == guard; end++) {
+                        roots.pushBack(stores[end].index);
+                        roots.pushBack(stores[end].value);
+                    }
+
+                    if (guard) {
+                        Vector<Node*> condition;
+                        u32 inside = s.fresh();
+
+                        merge = s.fresh();
+                        order(&guard, 1, condition);
+                        emit(condition);
+                        Spirv::op(s.body, 247, merge, 0);
+                        Spirv::op(s.body, 250, guard->id, inside, merge);
+                        Spirv::op(s.body, 248, inside);
+                    }
+
+                    order(roots.data(), roots.length(), nodes);
+                    emit(nodes);
+
+                    for (size_t i = first; i < end; i++) {
+                        u32 pointer = s.fresh();
+
+                        Spirv::op(s.body, 65, sharedFloat, pointer, arrays[phase % kernelBuffers], stores[i].index->id);
+                        Spirv::op(s.body, 62, pointer, stores[i].value->id);
+                    }
+
+                    if (guard) {
+                        Spirv::op(s.body, 249, merge);
+                        Spirv::op(s.body, 248, merge);
+                        forget(nodes);
+                    }
+
+                    first = end;
+                }
+
+                Spirv::op(s.body, 224, scope, scope, semantics);
+            }
+        }
+
         void common(Vector<u32>& module, u32 set) {
             Spirv::op(module, 71, typeWords, 6, 4);
             Spirv::op(module, 72, typeBytes, 0, 24);
@@ -2743,31 +2817,7 @@ namespace {
             e.inputs[1] = uv[1]->id;
         }
 
-        for (int phase = 0; phase < kernelArrays; phase++) {
-            Vector<Node*> roots;
-            Vector<Node*> nodes;
-
-            if (k.stores[phase].empty()) {
-                continue;
-            }
-
-            for (const Store& store : k.stores[phase]) {
-                roots.pushBack(store.index);
-                roots.pushBack(store.value);
-            }
-
-            order(roots.data(), roots.length(), nodes);
-            e.emit(nodes);
-
-            for (const Store& store : k.stores[phase]) {
-                u32 pointer = s.fresh();
-
-                Spirv::op(s.body, 65, e.sharedFloat, pointer, e.arrays[phase % kernelBuffers], store.index->id);
-                Spirv::op(s.body, 62, pointer, store.value->id);
-            }
-
-            Spirv::op(s.body, 224, scope, scope, semantics);
-        }
+        e.phases(k, scope, semantics);
 
         Vector<Node*> nodes;
 
@@ -2837,31 +2887,7 @@ namespace {
         Spirv::op(s.body, 81, e.typeUint, e.inputs[4], ids[1], 0);
         Spirv::op(s.body, 81, e.typeUint, e.inputs[5], ids[1], 1);
 
-        for (int phase = 0; phase < kernelArrays; phase++) {
-            Vector<Node*> roots;
-            Vector<Node*> nodes;
-
-            if (k.stores[phase].empty()) {
-                continue;
-            }
-
-            for (const Store& store : k.stores[phase]) {
-                roots.pushBack(store.index);
-                roots.pushBack(store.value);
-            }
-
-            order(roots.data(), roots.length(), nodes);
-            e.emit(nodes);
-
-            for (const Store& store : k.stores[phase]) {
-                u32 pointer = s.fresh();
-
-                Spirv::op(s.body, 65, e.sharedFloat, pointer, e.arrays[phase % kernelBuffers], store.index->id);
-                Spirv::op(s.body, 62, pointer, store.value->id);
-            }
-
-            Spirv::op(s.body, 224, scope, scope, semantics);
-        }
+        e.phases(k, scope, semantics);
 
         Node* roots[6] = {k.at[0], k.at[1], k.color[0], k.color[1], k.color[2], k.color[3]};
         Vector<Node*> nodes;
