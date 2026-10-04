@@ -31,6 +31,8 @@ namespace {
     constexpr size_t samplePixels = (size_t)sampleWidth * sampleHeight;
     constexpr int scaledWidth = 80;
     constexpr int scaledHeight = 60;
+    constexpr int shrunkWidth = 21;
+    constexpr int shrunkHeight = 16;
     constexpr double readback = 1. / 512.;
 
     struct Chromaticity {
@@ -120,7 +122,7 @@ namespace {
         void check(const Case& kase, StringView what);
         void examine(const Case& kase, StringView what);
         void underlay();
-        void scaled();
+        void scaled(StringView what, int width, int height);
         void formats();
         void matrices();
         void locations();
@@ -1363,8 +1365,8 @@ void FormatCheck::underlay() {
     }
 }
 
-void FormatCheck::scaled() {
-    if (!mine(StringView(u8"layer scaled"))) {
+void FormatCheck::scaled(StringView what, int width, int height) {
+    if (!mine(what)) {
         return;
     }
 
@@ -1384,41 +1386,46 @@ void FormatCheck::scaled() {
     Vector<double> source = expected;
     Vector<double> got;
     double spread = 0.;
-    auto taps = [](double at, int size, int (&index)[6], double (&weight)[6]) {
+    auto taps = [](int pixel, int size, int target, int (&index)[8], double (&weight)[8]) {
+        double ratio = (double)size / target;
+        double at = (pixel + 0.5) * ratio - 0.5;
         double base = floor(at);
+        double reach = fmin(ratio, 4.);
+        int half = ratio > 1. ? (int)ceil(reach - 1e-9) : 3;
         double total = 0.;
 
-        for (int k = 0; k < 6; k++) {
-            index[k] = (int)fmin(fmax(base - 2. + k, 0.), size - 1.);
-            weight[k] = lanczos3(k - 2. - (at - base));
+        for (int k = 0; k < 2 * half; k++) {
+            double x = fmin(fabs(at - base - (k + 1 - half)) / reach, 1.);
+
+            index[k] = (int)fmin(fmax(base + 1 - half + k, 0.), size - 1.);
+            weight[k] = ratio > 1. ? (2. * x - 3.) * x * x + 1. : lanczos3(k - 2. - (at - base));
             total += weight[k];
         }
 
-        for (double& w : weight) {
-            w /= total;
+        for (int k = 0; k < 2 * half; k++) {
+            weight[k] /= total;
         }
+
+        return 2 * half;
     };
 
-    facts.target[0] = scaledWidth;
-    facts.target[1] = scaledHeight;
+    facts.target[0] = (u32)width;
+    facts.target[1] = (u32)height;
     expected.clear();
 
     for (int y = 0; y < sampleHeight; y++) {
-        int rows[6];
-        double down[6];
-
-        taps((y + 0.5) * sampleHeight / scaledHeight - 0.5, sampleHeight, rows, down);
+        int rows[8];
+        double down[8];
+        int tall = taps(y < height ? y : height - 1, sampleHeight, height, rows, down);
 
         for (int x = 0; x < sampleWidth; x++) {
-            int columns[6];
-            double across[6];
-
-            taps((x + 0.5) * sampleWidth / scaledWidth - 0.5, sampleWidth, columns, across);
-
+            int columns[8];
+            double across[8];
+            int wide = taps(x < width ? x : width - 1, sampleWidth, width, columns, across);
             double reach = 0.;
 
-            for (int j = 0; j < 6; j++) {
-                for (int k = 0; k < 6; k++) {
+            for (int j = 0; j < tall; j++) {
+                for (int k = 0; k < wide; k++) {
                     reach += fabs(down[j] * across[k]);
                 }
             }
@@ -1428,8 +1435,8 @@ void FormatCheck::scaled() {
             for (int c = 0; c < 4; c++) {
                 double total = 0.;
 
-                for (int j = 0; j < 6; j++) {
-                    for (int k = 0; k < 6; k++) {
+                for (int j = 0; j < tall; j++) {
+                    for (int k = 0; k < wide; k++) {
                         total += down[j] * across[k] * source[((size_t)rows[j] * sampleWidth + (size_t)columns[k]) * 4 + (size_t)c];
                     }
                 }
@@ -1440,7 +1447,7 @@ void FormatCheck::scaled() {
     }
 
     shade(frame, facts, true, got);
-    compare(StringView(u8"layer scaled"), StringView(u8"hdr"), got, 2.4 * tolerance(kase, *layoutOf("yuv420p")) * spread, true);
+    compare(what, StringView(u8"hdr"), got, 2.4 * tolerance(kase, *layoutOf("yuv420p")) * spread, true);
 }
 
 void FormatCheck::matrices() {
@@ -1638,7 +1645,8 @@ int main(int argc, char** argv) {
             check.filter = "lanczos";
             check.formats();
             check.underlay();
-            check.scaled();
+            check.scaled(StringView(u8"layer scaled"), scaledWidth, scaledHeight);
+            check.scaled(StringView(u8"layer shrunk"), shrunkWidth, shrunkHeight);
             check.filter = "bilinear";
             check.matrices();
             check.locations();

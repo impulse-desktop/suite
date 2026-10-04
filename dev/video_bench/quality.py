@@ -106,7 +106,7 @@ def prepare(tools, compiler, work, truth, name, ratio):
         (directory / "size").write_text("%d %d" % target)
         (directory / "dump").write_text("")
     shader(compiler, first, "optimum", (W, H), target, *OURS[0][1:], offsets, lines)
-    shader(compiler, first, "template", (W, H), target, *OURS[2 if ratio >= 1 else 1][1:], offsets, lines)
+    shader(compiler, first, "template", (W, H), target, *OURS[2][1:], offsets, lines)
     shader(compiler, second, "optimum", (W, H), target, *OURS[1][1:], offsets, lines)
     shader(compiler, second, "template", (W, H), target, *OURS[1][1:], offsets, lines)
     if ratio < 1:
@@ -133,8 +133,7 @@ def run(tools, compiler, work, truths, jobs):
     outputs = []
     for (name, ratio), (first, second) in zip(jobs, made):
         truth = truths[name] if ratio >= 1 else work / "truth" / f"{name}_{ratio:g}.ppm"
-        outputs += [(name, ratio, "bilinear", first / "optimum.raw", truth), (name, ratio, "lanczos", second / "optimum.raw", truth)]
-        outputs += [(name, ratio, "kernel", first / "template.raw", truth)] if ratio >= 1 else []
+        outputs += [(name, ratio, "bilinear", first / "optimum.raw", truth), (name, ratio, "kernel", first / "template.raw", truth), (name, ratio, "lanczos", second / "optimum.raw", truth)]
         outputs += [(name, ratio, f"placebo_{preset}", first / f"placebo_{preset}.raw", truth) for preset in PRESETS]
     with ThreadPoolExecutor(os.cpu_count() or 1) as pool:
         scores = list(pool.map(lambda output: measure(tools, output[4], output[3]), outputs))
