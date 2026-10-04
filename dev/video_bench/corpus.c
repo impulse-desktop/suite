@@ -212,6 +212,16 @@ static int input(int argc, char** argv) {
     return 0;
 }
 
+static int shrink(int argc, char** argv) {
+    if (argc != 6) die("usage: corpus shrink TRUTH.ppm OUT.ppm WIDTH HEIGHT");
+    Image truth = readPpm(argv[2]);
+    linearize(&truth);
+    Image small = box(&truth, atoi(argv[4]), atoi(argv[5]));
+    delinearize(&small);
+    writePpm(argv[3], &small);
+    return 0;
+}
+
 static float half(uint16_t h) {
     int exponent = (h >> 10) & 31, mantissa = h & 1023;
     double v = exponent == 0 ? ldexp(mantissa, -24) : exponent == 31 ? INFINITY : ldexp(mantissa | 1024, exponent - 25);
@@ -512,7 +522,8 @@ static int metric(int argc, char** argv) {
 int main(int argc, char** argv) {
     if (argc > 1 && !strcmp(argv[1], "crop")) return crop(argc, argv);
     if (argc > 1 && !strcmp(argv[1], "input")) return input(argc, argv);
+    if (argc > 1 && !strcmp(argv[1], "shrink")) return shrink(argc, argv);
     if (argc > 1 && !strcmp(argv[1], "metric")) return metric(argc, argv);
-    die("usage: corpus crop|input|metric ...");
+    die("usage: corpus crop|input|shrink|metric ...");
     return 1;
 }

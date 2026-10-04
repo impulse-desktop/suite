@@ -6,13 +6,15 @@ Every crop of corpus/ is scaled down in linear light to an input size,
 stored as BT.709 limited-range 4:2:0 with left-sited chroma (sRGB transfer,
 so both sides decode the same curve), and scaled back to the crop's size by
 our shaders (fragment bilinear, fragment lanczos, the lanczos kernel) and by
-libplacebo's fast, default and high-quality presets. Each result is
-compared with the crop: PSNR and RMSE in linear light over RGB, the mean
+libplacebo's fast, default and high-quality presets. To measure shrinking
+(--downs) the crop itself is the input and its area average in linear
+light at the smaller size the truth. Each result is
+compared with its truth: PSNR and RMSE in linear light over RGB, the mean
 OKLab difference and its chroma part, SSIM of luma and SSIMULACRA 2 (higher
 is better: 100 is identical, 90 is visually lossless).
 
   ix run set/pg/libs bin/jxl lib/placebo/7 --vulkan=amd/radv lib/vulkan/drivers --vulkan=amd/radv -- \\
-      python3 dev/video_bench/quality.py --compiler BUILD/dev/video_shader [--work DIR] [--ratios 1.333,2] [NAME...]
+      python3 dev/video_bench/quality.py --compiler BUILD/dev/video_shader [--work DIR] [--ratios 1.333,2] [--downs 2] [NAME...]
 """
 
 import argparse
@@ -38,8 +40,8 @@ METRICS = ("psnr", "linear", "delta", "chroma", "ssim", "ssimulacra2")
 BATCH = 48
 
 
-def case(source, filter, stage):
-    return {"format": "yuv420p", "subsampling": (1, 1), "matrix": 1, "range": 1, "transfer": 13, "primaries": 1, "location": 1, "output": "sdr", "source": source, "target": TARGET, "filter": filter, "stage": stage, "dither": 0, "phase": 0}
+def case(source, target, filter, stage):
+    return {"format": "yuv420p", "subsampling": (1, 1), "matrix": 1, "range": 1, "transfer": 13, "primaries": 1, "location": 1, "output": "sdr", "source": source, "target": target, "filter": filter, "stage": stage, "dither": 0, "phase": 0}
 
 
 def planes(W, H):
@@ -75,17 +77,23 @@ def build(work):
     return tools
 
 
-def shader(compiler, directory, label, source, filter, stage, offsets, lines):
+def shader(compiler, directory, label, source, target, filter, stage, offsets, lines):
     name, layout, components = bench.layout_of("yuv420p")
-    arguments = bench.facts(case(source, filter, stage), layout, components, offsets, lines)
+    arguments = bench.facts(case(source, target, filter, stage), layout, components, offsets, lines)
     (directory / f"{label}.spv").write_bytes(subprocess.run([compiler, *arguments], check=True, capture_output=True).stdout)
     (directory / f"{label}.ubo").write_bytes(bytes(16))
     if stage == "kernel":
         (directory / f"{label}.kind").write_text("kernel")
 
 
+def sizes(scale):
+    if scale >= 1:
+        return (round(TARGET[0] / scale), round(TARGET[1] / scale)), TARGET
+    return TARGET, (round(TARGET[0] * scale), round(TARGET[1] * scale))
+
+
 def prepare(tools, compiler, work, truth, name, ratio):
-    W, H = round(TARGET[0] / ratio), round(TARGET[1] / ratio)
+    (W, H), target = sizes(ratio)
     first, second = work / "runs" / f"{name}_{ratio:g}_a", work / "runs" / f"{name}_{ratio:g}_b"
     yuv = work / "runs" / f"{name}_{ratio:g}.yuv"
     first.mkdir(parents=True, exist_ok=True)
@@ -95,15 +103,17 @@ def prepare(tools, compiler, work, truth, name, ratio):
     yuv.unlink()
     for directory in (first, second):
         (directory / "data.bin").write_bytes(data)
-        (directory / "size").write_text("%d %d" % TARGET)
+        (directory / "size").write_text("%d %d" % target)
         (directory / "dump").write_text("")
-    shader(compiler, first, "optimum", (W, H), *OURS[0][1:], offsets, lines)
-    shader(compiler, first, "template", (W, H), *OURS[2][1:], offsets, lines)
-    shader(compiler, second, "optimum", (W, H), *OURS[1][1:], offsets, lines)
-    shader(compiler, second, "template", (W, H), *OURS[1][1:], offsets, lines)
-    sizes, _, _, _ = planes(W, H)
-    rows = [f"{W} {H} {TARGET[0]} {TARGET[1]} 3 0 0 1 13"]
-    rows += [f"{width} {height} {offsets[p]} {lines[p]} {p} 1" for p, (width, height) in enumerate(sizes)]
+    shader(compiler, first, "optimum", (W, H), target, *OURS[0][1:], offsets, lines)
+    shader(compiler, first, "template", (W, H), target, *OURS[2 if ratio >= 1 else 1][1:], offsets, lines)
+    shader(compiler, second, "optimum", (W, H), target, *OURS[1][1:], offsets, lines)
+    shader(compiler, second, "template", (W, H), target, *OURS[1][1:], offsets, lines)
+    if ratio < 1:
+        subprocess.run([str(tools["corpus"]), "shrink", str(truth), str(work / "truth" / f"{name}_{ratio:g}.ppm"), *map(str, target)], check=True)
+    plane_sizes, _, _, _ = planes(W, H)
+    rows = [f"{W} {H} {target[0]} {target[1]} 3 0 0 1 13"]
+    rows += [f"{width} {height} {offsets[p]} {lines[p]} {p} 1" for p, (width, height) in enumerate(plane_sizes)]
     (first / "placebo.txt").write_text("\n".join(rows) + "\n")
     return first, second
 
@@ -122,16 +132,18 @@ def run(tools, compiler, work, truths, jobs):
         subprocess.run([str(tools["placebo"]), preset, "0", *(str(first) for first, _ in made)], check=True, capture_output=True)
     outputs = []
     for (name, ratio), (first, second) in zip(jobs, made):
-        outputs += [(name, ratio, "bilinear", first / "optimum.raw"), (name, ratio, "kernel", first / "template.raw"), (name, ratio, "lanczos", second / "optimum.raw")]
-        outputs += [(name, ratio, f"placebo_{preset}", first / f"placebo_{preset}.raw") for preset in PRESETS]
+        truth = truths[name] if ratio >= 1 else work / "truth" / f"{name}_{ratio:g}.ppm"
+        outputs += [(name, ratio, "bilinear", first / "optimum.raw", truth), (name, ratio, "lanczos", second / "optimum.raw", truth)]
+        outputs += [(name, ratio, "kernel", first / "template.raw", truth)] if ratio >= 1 else []
+        outputs += [(name, ratio, f"placebo_{preset}", first / f"placebo_{preset}.raw", truth) for preset in PRESETS]
     with ThreadPoolExecutor(os.cpu_count() or 1) as pool:
-        scores = list(pool.map(lambda output: measure(tools, truths[output[0]], output[3]), outputs))
+        scores = list(pool.map(lambda output: measure(tools, output[4], output[3]), outputs))
     for first, second in made:
         for directory in (first, second):
             for path in directory.iterdir():
                 path.unlink()
             directory.rmdir()
-    return [(name, ratio, variant, score) for (name, ratio, variant, _), score in zip(outputs, scores)]
+    return [(name, ratio, variant, score) for (name, ratio, variant, _, _), score in zip(outputs, scores)]
 
 
 def report(results, ratios):
@@ -139,8 +151,8 @@ def report(results, ratios):
         rows = [row for row in results if row[1] == ratio]
         names = sorted({row[0] for row in rows})
         table = {(row[0], row[2]): row[3] for row in rows}
-        print(f"x{ratio:g} ({len(names)} pictures)          psnr   linear    delta   chroma     ssim  ssimulacra2  psnr>default  ssimulacra2>default")
-        for variant in VARIANTS:
+        print(f"x{ratio:.3g} ({len(names)} pictures)          psnr   linear    delta   chroma     ssim  ssimulacra2  psnr>default  ssimulacra2>default")
+        for variant in (variant for variant in VARIANTS if (names[0], variant) in table):
             means = [sum(table[(name, variant)][metric] for name in names) / len(names) for metric in METRICS]
             wins = [sum(table[(name, variant)][metric] > table[(name, "placebo_default")][metric] for name in names) for metric in ("psnr", "ssimulacra2")]
             print(f"  {variant:22} {means[0]:7.3f} {means[1]:8.5f} {means[2]:8.5f} {means[3]:8.5f} {means[4]:8.5f}  {means[5]:11.3f}  {wins[0]:3d}/{len(names)}       {wins[1]:3d}/{len(names)}")
@@ -151,11 +163,12 @@ def main():
     parser.add_argument("--compiler", required=True)
     parser.add_argument("--work", default=str(HERE.parent.parent / ".build" / "video_quality"))
     parser.add_argument("--ratios", default="1.333,1.5,2,3")
+    parser.add_argument("--downs", default="1.5,2,3")
     parser.add_argument("names", nargs="*")
     args = parser.parse_args()
     work = Path(args.work)
     work.mkdir(parents=True, exist_ok=True)
-    ratios = [float(value) for value in args.ratios.split(",")]
+    ratios = [float(value) for value in args.ratios.split(",") if value] + [1 / float(value) for value in args.downs.split(",") if value]
     manifest = json.loads((CORPUS / "manifest.json").read_text())
     names = [entry["name"] for entry in manifest if not args.names or entry["name"] in args.names]
     tools = build(work)
