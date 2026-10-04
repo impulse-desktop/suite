@@ -379,6 +379,14 @@ namespace {
                 return a;
             }
 
+            if (b->op == Op::Const && a->op == Op::Add && a->args[1]->op == Op::Const) {
+                return addValues(a->args[0], addValues(a->args[1], b));
+            }
+
+            if (b->op == Op::Const && a->op == Op::Sub && a->args[1]->op == Op::Const) {
+                return addValues(a->args[0], subValues(b, a->args[1]));
+            }
+
             if (b->op == Op::Neg) {
                 return subValues(a, b->args[0]);
             }
@@ -453,6 +461,17 @@ namespace {
 
                 if (b->value == -1. && a->kind != Kind::Uint) {
                     return neg(a);
+                }
+
+                if (a->op == Op::Mul && a->args[1]->op == Op::Const) {
+                    return mulValues(a->args[0], mulValues(a->args[1], b));
+                }
+
+                if ((a->op == Op::Add || a->op == Op::Sub) && a->args[1]->op == Op::Const) {
+                    Node* scaled = mulValues(a->args[0], b);
+                    Node* offset = mulValues(a->args[1], b);
+
+                    return a->op == Op::Add ? addValues(scaled, offset) : subValues(scaled, offset);
                 }
 
                 if (a->kind == Kind::Uint && b->value > 0. && ::exp2(::floor(::log2(b->value))) == b->value) {
@@ -536,6 +555,22 @@ namespace {
             return make(Op::Max, a->kind, 2, a, b, nullptr, 0., a->lo > b->lo ? a->lo : b->lo, a->hi > b->hi ? a->hi : b->hi);
         }
 
+        static bool aligned(const Node* x, double step) {
+            if (x->op == Op::Const) {
+                return ::fmod(x->value, step) == 0.;
+            }
+
+            if (x->op == Op::Shl && x->args[1]->op == Op::Const) {
+                return ::exp2(x->args[1]->value) >= step;
+            }
+
+            if (x->op == Op::Mul && x->args[1]->op == Op::Const) {
+                return ::fmod(x->args[1]->value, step) == 0.;
+            }
+
+            return x->op == Op::Add && aligned(x->args[0], step) && aligned(x->args[1], step);
+        }
+
         Node* shrValues(Node* a, Node* s) {
             if (s->op == Op::Const && s->value == 0.) {
                 return a;
@@ -549,6 +584,23 @@ namespace {
                 double total = a->args[1]->value + s->value;
 
                 return total < 32. ? shrValues(a->args[0], u(total)) : u(0.);
+            }
+
+            if (s->op == Op::Const && a->arity == 2 && a->args[1]->op == Op::Const) {
+                double step = ::exp2(s->value);
+                double k = a->args[1]->value;
+
+                if (a->op == Op::Add && k >= 0. && aligned(a->args[0], step)) {
+                    return addValues(shrValues(a->args[0], s), u(::floor(k / step)));
+                }
+
+                if (a->op == Op::Shl) {
+                    return k >= s->value ? shlValues(a->args[0], u(k - s->value)) : shrValues(a->args[0], u(s->value - k));
+                }
+
+                if (a->op == Op::Mul && ::fmod(k, step) == 0.) {
+                    return convert(mulValues(a->args[0], constant(k / step, a->kind)), Kind::Uint);
+                }
             }
 
             if (s->op == Op::Const) {
@@ -692,7 +744,7 @@ namespace {
                 return f(::floor(a->value));
             }
 
-            if (a->op == Op::Convert && a->args[0]->kind != Kind::Float) {
+            if ((a->op == Op::Convert && a->args[0]->kind != Kind::Float) || a->op == Op::Floor) {
                 return a;
             }
 
@@ -762,19 +814,13 @@ namespace {
 
             if (a->op == Op::Convert && a->kind != Kind::Bool && a->args[0]->kind != Kind::Bool && kind != Kind::Bool) {
                 Node* b = a->args[0];
-                bool same = b->kind == kind;
-                bool positive = b->lo >= 0. && b->hi < 2147483648.;
 
-                if (b->kind != Kind::Float && a->kind != Kind::Float && (same || positive)) {
+                if (b->kind != Kind::Float || kind != Kind::Float) {
                     return convert(b, kind);
                 }
 
-                if (b->kind == Kind::Float && kind != Kind::Float && b->lo > -1. && b->hi < 2147483648.) {
-                    return convert(b, kind);
-                }
-
-                if (b->kind != Kind::Float && a->kind == Kind::Float && b->lo >= -16777216. && b->hi <= 16777216. && (same || b->lo >= 0.)) {
-                    return convert(b, kind);
+                if (b->op == Op::Floor) {
+                    return b;
                 }
             }
 
@@ -1183,10 +1229,10 @@ namespace {
         void run(int c, Node* row, Node* left, int taps, Node* (&out)[maxTaps]) {
             int step = l.components[c][1];
             int first = start(c);
-            Node* byte = g.add(g.mul(left, step), first);
+            Node* byte = g.mul(left, step);
             Node* index = g.add(row, g.shr(byte, 2));
             bool known = step % 4 == 0;
-            int count = ((known ? first % 4 : 3) + span(c, taps) + 3) / 4;
+            int count = ((known ? 0 : 3) + first + span(c, taps) + 3) / 4;
             Node* words[20];
 
             for (int i = 0; i < count; i++) {
@@ -1201,11 +1247,10 @@ namespace {
                 }
 
                 words[count - 1] = g.shr(words[count - 1], s);
-                first = 0;
             }
 
             for (int m = 0; m < taps; m++) {
-                int at = (known ? first % 4 : 0) + m * step;
+                int at = first + m * step;
 
                 out[m] = value(c, g.shr(words[at / 4], 8 * (at % 4)));
             }
