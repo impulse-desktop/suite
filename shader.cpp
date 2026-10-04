@@ -64,6 +64,7 @@ namespace {
         u32 index;
         u32 id;
         u8 mark;
+        bool uniform;
     };
 
     constexpr double word = 4294967295.;
@@ -182,7 +183,13 @@ namespace {
                 hi = 2147483647.;
             }
 
-            Node* node = pool.make<Node>(Node{op, kind, (u8)arity, {args[0], args[1], args[2]}, value, lo, hi, count++, 0, 0});
+            bool uniform = op != Op::Input || value >= 4.;
+
+            for (int i = 0; i < arity; i++) {
+                uniform = uniform && args[i]->uniform;
+            }
+
+            Node* node = pool.make<Node>(Node{op, kind, (u8)arity, {args[0], args[1], args[2]}, value, lo, hi, count++, 0, 0, uniform});
 
             slots[at] = node;
 
@@ -2093,6 +2100,16 @@ namespace {
         }
     }
 
+    static void hoist(Vector<Node*>& nodes, Vector<Node*>& inside) {
+        Vector<Node*> uniform;
+
+        for (Node* node : nodes) {
+            (node->uniform ? uniform : inside).pushBack(node);
+        }
+
+        nodes.xchg(uniform);
+    }
+
     static void forget(const Vector<Node*>& nodes) {
         for (Node* node : nodes) {
             if (node->op != Op::Const && node->op != Op::Input) {
@@ -2317,17 +2334,26 @@ namespace {
                     roots.pushBack(stores[end].value);
                 }
 
-                if (guard) {
-                    Vector<Node*> condition;
+                Vector<Node*> condition;
 
+                if (guard) {
                     order(&guard, 1, condition);
+                }
+
+                order(roots.data(), roots.length(), nodes);
+
+                if (guard) {
+                    Vector<Node*> inside;
+
                     statements(out, condition, next);
+                    hoist(nodes, inside);
+                    statements(out, nodes, next);
+                    nodes.xchg(inside);
                     out << StringView(u8"    if (");
                     operand(out, guard);
                     out << StringView(u8") {\n");
                 }
 
-                order(roots.data(), roots.length(), nodes);
                 statements(out, nodes, next);
 
                 for (size_t i = first; i < end; i++) {
@@ -2669,19 +2695,28 @@ namespace {
                         roots.pushBack(stores[end].value);
                     }
 
-                    if (guard) {
-                        Vector<Node*> condition;
-                        u32 inside = s.fresh();
+                    Vector<Node*> condition;
 
-                        merge = s.fresh();
+                    if (guard) {
                         order(&guard, 1, condition);
-                        emit(condition);
-                        Spirv::op(s.body, 247, merge, 0);
-                        Spirv::op(s.body, 250, guard->id, inside, merge);
-                        Spirv::op(s.body, 248, inside);
                     }
 
                     order(roots.data(), roots.length(), nodes);
+
+                    if (guard) {
+                        Vector<Node*> inside;
+                        u32 label = s.fresh();
+
+                        merge = s.fresh();
+                        emit(condition);
+                        hoist(nodes, inside);
+                        emit(nodes);
+                        nodes.xchg(inside);
+                        Spirv::op(s.body, 247, merge, 0);
+                        Spirv::op(s.body, 250, guard->id, label, merge);
+                        Spirv::op(s.body, 248, label);
+                    }
+
                     emit(nodes);
 
                     for (size_t i = first; i < end; i++) {
