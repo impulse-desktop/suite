@@ -274,7 +274,7 @@ def prepare(case, directory, compiler):
     planar = layout["model"] in ("yuv", "rgb") and all(component[1] == 1 and component[2] == 0 and component[3] == 0 and component[4] == 8 for component in components)
     planar = planar and sorted(component[0] for component in components) == list(range(len(components)))
     if planar:
-        rows = [f"{W} {H} {TW} {TH} {len(components)} {int(layout['model'] == 'rgb')} {int(case['range'] == 2 or layout['model'] == 'rgb')} {int(bool(sx or sy))}"]
+        rows = [f"{W} {H} {TW} {TH} {len(components)} {int(layout['model'] == 'rgb')} {int(case['range'] == 2 or layout['model'] == 'rgb')} {int(bool(sx or sy))} {case['transfer']}"]
         for plane in range(len(components)):
             c = next(c for c, component in enumerate(components) if component[0] == plane)
             chroma = layout["model"] == "yuv" and c in (1, 2)

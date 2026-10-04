@@ -602,6 +602,7 @@ int main(int argc, char** argv) {
             if (d > worst) worst = d;
         }
         FILE* truth = fopen(joined(c->directory, "truth.raw"), "rb");
+        if (!truth) truth = fopen(joined(c->directory, "dump"), "rb");
         if (truth) {
             fclose(truth);
             for (int k = 0; k < 2; k++) {

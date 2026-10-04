@@ -63,9 +63,9 @@ int main(int argc, char** argv) {
         size_t size;
         uint8_t* data = readFile(joined(directory, "data.bin"), &size);
         char* text = readFile(joined(directory, "placebo.txt"), &size);
-        int width, height, tw, th, planes, rgb, full, subsampled;
+        int width, height, tw, th, planes, rgb, full, subsampled, transfer;
         int consumed;
-        if (sscanf(text, "%d %d %d %d %d %d %d %d%n", &width, &height, &tw, &th, &planes, &rgb, &full, &subsampled, &consumed) != 8) {
+        if (sscanf(text, "%d %d %d %d %d %d %d %d %d%n", &width, &height, &tw, &th, &planes, &rgb, &full, &subsampled, &transfer, &consumed) != 9) {
             fprintf(stderr, "%s: bad placebo.txt\n", directory);
             return 1;
         }
@@ -98,6 +98,7 @@ int main(int argc, char** argv) {
         image.repr = rgb ? pl_color_repr_rgb : pl_color_repr_hdtv;
         image.repr.levels = full ? PL_COLOR_LEVELS_FULL : PL_COLOR_LEVELS_LIMITED;
         image.color = rgb ? pl_color_space_srgb : pl_color_space_bt709;
+        image.color.transfer = transfer == 13 ? PL_COLOR_TRC_SRGB : image.color.transfer;
         if (subsampled) {
             pl_frame_set_chroma_location(&image, PL_CHROMA_LEFT);
         }
