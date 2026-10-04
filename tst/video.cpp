@@ -115,6 +115,7 @@ namespace {
         void compare(StringView what, StringView output, const Vector<double>& got, double tolerance, bool relative);
         void verify(AVFrame* frame, StringView what, double tolerance);
         void verifyLinear(AVFrame* frame, StringView what, double tolerance);
+        double tolerance(const Case& kase, const VideoLayout& layout);
         bool mine(StringView what);
         void check(const Case& kase, StringView what);
         void examine(const Case& kase, StringView what);
@@ -1245,39 +1246,45 @@ void FormatCheck::examine(const Case& kase, StringView what) {
         return;
     }
 
+    verify(frame, what, tolerance(kase, *layout));
+}
+
+double FormatCheck::tolerance(const Case& kase, const VideoLayout& layout) {
     double tolerance = readback;
 
-    if (model == Model::Yuv) {
-        Matrix fromSignal = {};
-        double steps[3];
-
-        for (int k = 0; k < 3; k++) {
-            double rgb[3] = {k == 0 ? 1. : 0., k == 1 ? 1. : 0., k == 2 ? 1. : 0.};
-            double ycc[3];
-
-            forward(kase, rgb, ycc);
-
-            for (int c = 0; c < 3; c++) {
-                fromSignal.m[c][k] = ycc[c];
-            }
-
-            steps[k] = layout->floating ? 0. : 0.5 / levels(kase, *layout, k).scale;
-        }
-
-        Matrix toSignal = invert(fromSignal);
-
-        for (int c = 0; c < 3; c++) {
-            double bound = readback;
-
-            for (int k = 0; k < 3; k++) {
-                bound += fabs(toSignal.m[c][k]) * steps[k];
-            }
-
-            tolerance = fmax(tolerance, bound);
-        }
+    if (modelOf(layout) != Model::Yuv) {
+        return tolerance;
     }
 
-    verify(frame, what, tolerance);
+    Matrix fromSignal = {};
+    double steps[3];
+
+    for (int k = 0; k < 3; k++) {
+        double rgb[3] = {k == 0 ? 1. : 0., k == 1 ? 1. : 0., k == 2 ? 1. : 0.};
+        double ycc[3];
+
+        forward(kase, rgb, ycc);
+
+        for (int c = 0; c < 3; c++) {
+            fromSignal.m[c][k] = ycc[c];
+        }
+
+        steps[k] = layout.floating ? 0. : 0.5 / levels(kase, layout, k).scale;
+    }
+
+    Matrix toSignal = invert(fromSignal);
+
+    for (int c = 0; c < 3; c++) {
+        double bound = readback;
+
+        for (int k = 0; k < 3; k++) {
+            bound += fabs(toSignal.m[c][k]) * steps[k];
+        }
+
+        tolerance = fmax(tolerance, bound);
+    }
+
+    return tolerance;
 }
 
 void FormatCheck::formats() {
@@ -1376,6 +1383,7 @@ void FormatCheck::scaled() {
     VideoShader facts = describe(frame, "hdr");
     Vector<double> source = expected;
     Vector<double> got;
+    double spread = 0.;
     auto taps = [](double at, int size, int (&index)[6], double (&weight)[6]) {
         double base = floor(at);
         double total = 0.;
@@ -1407,6 +1415,16 @@ void FormatCheck::scaled() {
 
             taps((x + 0.5) * sampleWidth / scaledWidth - 0.5, sampleWidth, columns, across);
 
+            double reach = 0.;
+
+            for (int j = 0; j < 6; j++) {
+                for (int k = 0; k < 6; k++) {
+                    reach += fabs(down[j] * across[k]);
+                }
+            }
+
+            spread = fmax(spread, reach);
+
             for (int c = 0; c < 4; c++) {
                 double total = 0.;
 
@@ -1422,7 +1440,7 @@ void FormatCheck::scaled() {
     }
 
     shade(frame, facts, true, got);
-    compare(StringView(u8"layer scaled"), StringView(u8"hdr"), got, 2. * readback, true);
+    compare(StringView(u8"layer scaled"), StringView(u8"hdr"), got, 2.4 * tolerance(kase, *layoutOf("yuv420p")) * spread, true);
 }
 
 void FormatCheck::matrices() {
