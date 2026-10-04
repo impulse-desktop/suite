@@ -905,7 +905,12 @@ void Tiles::addCommand(const ImDrawList& list, const ImDrawCmd& command) {
 
         bool solid = atlas && t.uv[0][0] == white.x && t.uv[1][0] == white.x && t.uv[2][0] == white.x && t.uv[0][1] == white.y && t.uv[1][1] == white.y && t.uv[2][1] == white.y;
 
-        t.flags = texture->flags | (solid ? Solid : 0);
+        t.flags = texture->flags;
+
+        if (solid) {
+            t.flags |= Solid;
+        }
+
         memcpy(t.clip, clip, sizeof(clip));
 
         i64 lo[2];

@@ -910,6 +910,7 @@ namespace {
     };
 
     constexpr int kernelArrays = 4;
+    constexpr int kernelBuffers = 2;
 
     struct Kernel {
         Vector<Store> stores[kernelArrays];
@@ -917,6 +918,10 @@ namespace {
         u32 tile = 0;
         Node* at[2];
         Node* color[4];
+
+        u32 buffer(int i) const {
+            return sizes[i] > sizes[i + kernelBuffers] ? sizes[i] : sizes[i + kernelBuffers];
+        }
     };
 
     constexpr double sigmoidCenter = 0.75;
@@ -2078,7 +2083,7 @@ namespace {
         }
     }
 
-    const char* const sharedNames[kernelArrays] = {"sharedA", "sharedB", "sharedC", "sharedD"};
+    const char* const sharedNames[kernelBuffers] = {"sharedA", "sharedB"};
 
     static void statements(StringBuilder& out, const Vector<Node*>& nodes, u32& next) {
         for (Node* node : nodes) {
@@ -2198,7 +2203,7 @@ namespace {
                 operand(out, node->args[0]);
                 out << StringView(u8").x)");
             } else if (node->op == Op::Shared) {
-                out << StringView(sharedNames[(int)node->value]) << StringView(u8"[");
+                out << StringView(sharedNames[(int)node->value % kernelBuffers]) << StringView(u8"[");
                 operand(out, node->args[0]);
                 out << StringView(u8"]");
             } else if (node->op == Op::BitsFloat) {
@@ -2252,12 +2257,12 @@ namespace {
 
         out << StringView(u8"#define LAYER_SHARED");
 
-        for (int i = 0; i < kernelArrays; i++) {
-            out << StringView(u8" threadgroup float ") << StringView(sharedNames[i]) << StringView(u8"[") << (u64)(k.sizes[i] ? k.sizes[i] : 1) << StringView(u8"];");
+        for (int i = 0; i < kernelBuffers; i++) {
+            out << StringView(u8" threadgroup float ") << StringView(sharedNames[i]) << StringView(u8"[") << (u64)(k.buffer(i) ? k.buffer(i) : 1) << StringView(u8"];");
         }
 
-        out << StringView(u8"\n#define LAYER_CALL(local, origin, words) layer(local, origin, words, sharedA, sharedB, sharedC, sharedD)\n");
-        out << StringView(u8"float4 layer(uint2 local, int2 origin, const device uint* words, threadgroup float* sharedA, threadgroup float* sharedB, threadgroup float* sharedC, threadgroup float* sharedD) {\n");
+        out << StringView(u8"\n#define LAYER_CALL(local, origin, words) layer(local, origin, words, sharedA, sharedB)\n");
+        out << StringView(u8"float4 layer(uint2 local, int2 origin, const device uint* words, threadgroup float* sharedA, threadgroup float* sharedB) {\n");
 
         if (uv) {
             Vector<Node*> nodes;
@@ -2288,7 +2293,7 @@ namespace {
             statements(out, nodes, next);
 
             for (const Store& store : k.stores[phase]) {
-                out << StringView(u8"    ") << StringView(sharedNames[phase]) << StringView(u8"[");
+                out << StringView(u8"    ") << StringView(sharedNames[phase % kernelBuffers]) << StringView(u8"[");
                 operand(out, store.index);
                 out << StringView(u8"] = ");
                 operand(out, store.value);
@@ -2313,9 +2318,9 @@ namespace {
         u32 next = 3;
 
         out << StringView(u8"#include <metal_stdlib>\nusing namespace metal;\nkernel void main0(const device uint* words [[buffer(0)]], texture2d<float, access::write> target [[texture(0)]], uint3 local [[thread_position_in_threadgroup]], uint3 group [[threadgroup_position_in_grid]]) {\n");
-        for (int i = 0; i < kernelArrays; i++) {
-            if (k.sizes[i]) {
-                out << StringView(u8"    threadgroup float ") << StringView(sharedNames[i]) << StringView(u8"[") << (u64)k.sizes[i] << StringView(u8"];\n");
+        for (int i = 0; i < kernelBuffers; i++) {
+            if (k.buffer(i)) {
+                out << StringView(u8"    threadgroup float ") << StringView(sharedNames[i]) << StringView(u8"[") << (u64)k.buffer(i) << StringView(u8"];\n");
             }
         }
 
@@ -2336,7 +2341,7 @@ namespace {
             statements(out, nodes, next);
 
             for (const Store& store : k.stores[phase]) {
-                out << StringView(u8"    ") << StringView(sharedNames[phase]) << StringView(u8"[");
+                out << StringView(u8"    ") << StringView(sharedNames[phase % kernelBuffers]) << StringView(u8"[");
                 operand(out, store.index);
                 out << StringView(u8"] = ");
                 operand(out, store.value);
@@ -2432,7 +2437,7 @@ namespace {
         u32 main = s.fresh();
         u32 label = s.fresh();
         u32 sharedFloat = s.fresh();
-        u32 arrays[kernelArrays] = {s.fresh(), s.fresh(), s.fresh(), s.fresh()};
+        u32 arrays[kernelBuffers] = {s.fresh(), s.fresh()};
         u32 inputs[8] = {s.fresh(), s.fresh(), s.fresh(), s.fresh(), s.fresh(), s.fresh(), s.fresh(), s.fresh()};
         u32 zero = 0;
         u32 one = 0;
@@ -2585,7 +2590,7 @@ namespace {
                     case Op::Shared: {
                         u32 pointer = s.fresh();
 
-                        Spirv::op(s.body, 65, sharedFloat, pointer, arrays[(int)node->value], a);
+                        Spirv::op(s.body, 65, sharedFloat, pointer, arrays[(int)node->value % kernelBuffers], a);
                         Spirv::op(s.body, 61, typeFloat, node->id, pointer);
                         break;
                     }
@@ -2708,9 +2713,9 @@ namespace {
         u32 pointerUvec2 = s.fresh();
         u32 pointerIvec2 = s.fresh();
         u32 typeLayer = s.fresh();
-        u32 lengths[kernelArrays] = {s.fresh(), s.fresh(), s.fresh(), s.fresh()};
-        u32 arrayTypes[kernelArrays] = {s.fresh(), s.fresh(), s.fresh(), s.fresh()};
-        u32 arrayPointers[kernelArrays] = {s.fresh(), s.fresh(), s.fresh(), s.fresh()};
+        u32 lengths[kernelBuffers] = {s.fresh(), s.fresh()};
+        u32 arrayTypes[kernelBuffers] = {s.fresh(), s.fresh()};
+        u32 arrayPointers[kernelBuffers] = {s.fresh(), s.fresh()};
         u32 scope = s.fresh();
         u32 semantics = s.fresh();
         u32 local = s.fresh();
@@ -2757,7 +2762,7 @@ namespace {
             for (const Store& store : k.stores[phase]) {
                 u32 pointer = s.fresh();
 
-                Spirv::op(s.body, 65, e.sharedFloat, pointer, e.arrays[phase], store.index->id);
+                Spirv::op(s.body, 65, e.sharedFloat, pointer, e.arrays[phase % kernelBuffers], store.index->id);
                 Spirv::op(s.body, 62, pointer, store.value->id);
             }
 
@@ -2783,9 +2788,9 @@ namespace {
         Spirv::op(module, 32, pointerIvec2, 7, typeIvec2);
         Spirv::op(module, 33, typeLayer, e.typeVec4, pointerUvec2, pointerIvec2);
 
-        for (int i = 0; i < kernelArrays; i++) {
-            if (k.sizes[i]) {
-                Spirv::op(module, 43, e.typeUint, lengths[i], k.sizes[i]);
+        for (int i = 0; i < kernelBuffers; i++) {
+            if (k.buffer(i)) {
+                Spirv::op(module, 43, e.typeUint, lengths[i], k.buffer(i));
                 Spirv::op(module, 28, arrayTypes[i], e.typeFloat, lengths[i]);
                 Spirv::op(module, 32, arrayPointers[i], 4, arrayTypes[i]);
             }
@@ -2796,8 +2801,8 @@ namespace {
         Spirv::op(module, 43, e.typeUint, semantics, 264);
         Spirv::op(module, 59, e.storageBytes, e.bytes, 12);
 
-        for (int i = 0; i < kernelArrays; i++) {
-            if (k.sizes[i]) {
+        for (int i = 0; i < kernelBuffers; i++) {
+            if (k.buffer(i)) {
                 Spirv::op(module, 59, arrayPointers[i], e.arrays[i], 4);
             }
         }
@@ -2816,9 +2821,9 @@ namespace {
         u32 image = s.fresh();
         u32 local = s.fresh();
         u32 group = s.fresh();
-        u32 lengths[kernelArrays] = {s.fresh(), s.fresh(), s.fresh(), s.fresh()};
-        u32 arrayTypes[kernelArrays] = {s.fresh(), s.fresh(), s.fresh(), s.fresh()};
-        u32 arrayPointers[kernelArrays] = {s.fresh(), s.fresh(), s.fresh(), s.fresh()};
+        u32 lengths[kernelBuffers] = {s.fresh(), s.fresh()};
+        u32 arrayTypes[kernelBuffers] = {s.fresh(), s.fresh()};
+        u32 arrayPointers[kernelBuffers] = {s.fresh(), s.fresh()};
         u32 scope = s.fresh();
         u32 semantics = s.fresh();
         u32 ids[2] = {s.fresh(), s.fresh()};
@@ -2851,7 +2856,7 @@ namespace {
             for (const Store& store : k.stores[phase]) {
                 u32 pointer = s.fresh();
 
-                Spirv::op(s.body, 65, e.sharedFloat, pointer, e.arrays[phase], store.index->id);
+                Spirv::op(s.body, 65, e.sharedFloat, pointer, e.arrays[phase % kernelBuffers], store.index->id);
                 Spirv::op(s.body, 62, pointer, store.value->id);
             }
 
@@ -2897,9 +2902,9 @@ namespace {
         Spirv::op(module, 25, typeImage, e.typeFloat, 1, 0, 0, 0, 2, 0);
         Spirv::op(module, 32, imagePointer, 0, typeImage);
 
-        for (int i = 0; i < kernelArrays; i++) {
-            if (k.sizes[i]) {
-                Spirv::op(module, 43, e.typeUint, lengths[i], k.sizes[i]);
+        for (int i = 0; i < kernelBuffers; i++) {
+            if (k.buffer(i)) {
+                Spirv::op(module, 43, e.typeUint, lengths[i], k.buffer(i));
                 Spirv::op(module, 28, arrayTypes[i], e.typeFloat, lengths[i]);
                 Spirv::op(module, 32, arrayPointers[i], 4, arrayTypes[i]);
             }
@@ -2913,8 +2918,8 @@ namespace {
         Spirv::op(module, 59, e.storageBytes, e.bytes, 12);
         Spirv::op(module, 59, imagePointer, image, 0);
 
-        for (int i = 0; i < kernelArrays; i++) {
-            if (k.sizes[i]) {
+        for (int i = 0; i < kernelBuffers; i++) {
+            if (k.buffer(i)) {
                 Spirv::op(module, 59, arrayPointers[i], e.arrays[i], 4);
             }
         }
