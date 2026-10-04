@@ -10,6 +10,7 @@ namespace stl {
 struct VideoLayout;
 
 constexpr u32 kernelTile = 24;
+constexpr u32 kernelShared = 32768;
 
 struct VideoShader {
     const VideoLayout* layout;

@@ -2,6 +2,7 @@
 
 #include "error.h"
 #include "pooled.h"
+#include "shader.h"
 #include "renderer.h"
 
 #include <std/dbg/insist.h>
@@ -1628,6 +1629,9 @@ Renderer* createMetalRenderer(ObjPool& pool, plt::Platform& platform, plt::Windo
     renderer->sdrWhiteNits = options.sdrWhiteNits;
     if (renderer->device == nil) {
         fail(StringView(u8"no metal device"));
+    }
+    if (renderer->device.maxThreadgroupMemoryLength < kernelShared || renderer->device.maxThreadsPerThreadgroup.width < composeTile || renderer->device.maxThreadsPerThreadgroup.height < composeTile) {
+        fail(StringView(u8"Metal runs smaller threadgroups than the compositor's tiles"));
     }
     renderer->queue = [renderer->device newCommandQueue];
     if (!renderer->queue) {

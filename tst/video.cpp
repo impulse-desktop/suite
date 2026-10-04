@@ -33,6 +33,8 @@ namespace {
     constexpr int scaledHeight = 60;
     constexpr int shrunkWidth = 21;
     constexpr int shrunkHeight = 16;
+    constexpr int farWidth = 7;
+    constexpr int farHeight = 5;
     constexpr double readback = 1. / 512.;
 
     struct Chromaticity {
@@ -120,7 +122,7 @@ namespace {
         void check(const Case& kase, StringView what);
         void examine(const Case& kase, StringView what);
         void underlay();
-        void scaled(StringView what, int width, int height);
+        void scaled(StringView what, AVPixelFormat format, int width, int height);
         void formats();
         void matrices();
         void locations();
@@ -1358,32 +1360,42 @@ void FormatCheck::underlay() {
     }
 }
 
-void FormatCheck::scaled(StringView what, int width, int height) {
+void FormatCheck::scaled(StringView what, AVPixelFormat format, int width, int height) {
     if (!mine(what)) {
         return;
     }
 
     Case kase;
+    const VideoLayout& layout = *layoutOf(av_get_pix_fmt_name(format));
+    Model model = modelOf(layout);
 
-    kase.format = AV_PIX_FMT_YUV420P;
+    kase.format = format;
+    kase.matrix = model == Model::Yuv ? AVCOL_SPC_BT709 : AVCOL_SPC_RGB;
+    kase.range = model == Model::Yuv ? AVCOL_RANGE_MPEG : AVCOL_RANGE_JPEG;
 
     AVFrame* frame = this->frame(kase);
     STD_DEFER {
         av_frame_free(&frame);
     };
 
-    write(frame, kase);
+    if (model == Model::Palette) {
+        writePalette(frame);
+        frame->color_trc = AVCOL_TRC_IEC61966_2_1;
+    } else {
+        write(frame, kase);
+    }
+
     linearize(kase);
 
     VideoShader facts = describe(frame, "hdr");
     Vector<double> source = expected;
     Vector<double> got;
     double spread = 0.;
-    auto taps = [](int pixel, int size, int target, int (&index)[8], double (&weight)[8]) {
+    auto taps = [](int pixel, int size, int target, int (&index)[64], double (&weight)[64]) {
         double ratio = (double)size / target;
         double at = (pixel + 0.5) * ratio - 0.5;
         double base = floor(at);
-        double reach = fmin(ratio, 4.);
+        double reach = ratio;
         int half = ratio > 1. ? (int)ceil(reach - 1e-9) : 3;
         double total = 0.;
 
@@ -1407,13 +1419,13 @@ void FormatCheck::scaled(StringView what, int width, int height) {
     expected.clear();
 
     for (int y = 0; y < sampleHeight; y++) {
-        int rows[8];
-        double down[8];
+        int rows[64];
+        double down[64];
         int tall = taps(y < height ? y : height - 1, sampleHeight, height, rows, down);
 
         for (int x = 0; x < sampleWidth; x++) {
-            int columns[8];
-            double across[8];
+            int columns[64];
+            double across[64];
             int wide = taps(x < width ? x : width - 1, sampleWidth, width, columns, across);
             double reach = 0.;
 
@@ -1425,22 +1437,27 @@ void FormatCheck::scaled(StringView what, int width, int height) {
 
             spread = fmax(spread, reach);
 
-            for (int c = 0; c < 4; c++) {
-                double total = 0.;
+            double totals[4] = {};
 
-                for (int j = 0; j < tall; j++) {
-                    for (int k = 0; k < wide; k++) {
-                        total += down[j] * across[k] * source[((size_t)rows[j] * sampleWidth + (size_t)columns[k]) * 4 + (size_t)c];
+            for (int j = 0; j < tall; j++) {
+                for (int k = 0; k < wide; k++) {
+                    const double* texel = &source[((size_t)rows[j] * sampleWidth + (size_t)columns[k]) * 4];
+                    double cover = layout.alpha ? texel[3] : 1.;
+
+                    for (int c = 0; c < 4; c++) {
+                        totals[c] += down[j] * across[k] * texel[c] * (c < 3 ? cover : 1.);
                     }
                 }
+            }
 
-                expected.pushBack(total);
+            for (int c = 0; c < 4; c++) {
+                expected.pushBack(c < 3 && layout.alpha ? (totals[3] > 0. ? totals[c] / totals[3] : 0.) : totals[c]);
             }
         }
     }
 
     shade(frame, facts, true, got);
-    compare(what, StringView(u8"hdr"), got, 2.4 * tolerance(kase, *layoutOf("yuv420p")) * spread, true, width, height);
+    compare(what, StringView(u8"hdr"), got, 2.4 * tolerance(kase, layout) * spread, true, width, height);
 }
 
 void FormatCheck::matrices() {
@@ -1636,8 +1653,18 @@ int main(int argc, char** argv) {
         try {
             check.formats();
             check.underlay();
-            check.scaled(StringView(u8"layer scaled"), scaledWidth, scaledHeight);
-            check.scaled(StringView(u8"layer shrunk"), shrunkWidth, shrunkHeight);
+            check.scaled(StringView(u8"layer scaled"), AV_PIX_FMT_YUV420P, scaledWidth, scaledHeight);
+            check.scaled(StringView(u8"layer shrunk"), AV_PIX_FMT_YUV420P, shrunkWidth, shrunkHeight);
+            check.scaled(StringView(u8"layer shrunk far"), AV_PIX_FMT_YUV420P, farWidth, farHeight);
+            check.scaled(StringView(u8"layer scaled yuva420p"), AV_PIX_FMT_YUVA420P, scaledWidth, scaledHeight);
+            check.scaled(StringView(u8"layer shrunk yuva420p"), AV_PIX_FMT_YUVA420P, shrunkWidth, shrunkHeight);
+            check.scaled(StringView(u8"layer scaled bgra"), AV_PIX_FMT_BGRA, scaledWidth, scaledHeight);
+            check.scaled(StringView(u8"layer shrunk bgra"), AV_PIX_FMT_BGRA, shrunkWidth, shrunkHeight);
+            check.scaled(StringView(u8"layer shrunk far bgra"), AV_PIX_FMT_BGRA, farWidth, farHeight);
+            check.scaled(StringView(u8"layer scaled pal8"), AV_PIX_FMT_PAL8, scaledWidth, scaledHeight);
+            check.scaled(StringView(u8"layer shrunk pal8"), AV_PIX_FMT_PAL8, shrunkWidth, shrunkHeight);
+            check.scaled(StringView(u8"layer scaled bayer"), AV_PIX_FMT_BAYER_RGGB8, scaledWidth, scaledHeight);
+            check.scaled(StringView(u8"layer shrunk bayer"), AV_PIX_FMT_BAYER_RGGB8, shrunkWidth, shrunkHeight);
             check.matrices();
             check.locations();
             check.systems();

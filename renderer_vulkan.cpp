@@ -2,6 +2,7 @@
 
 #include "error.h"
 #include "pooled.h"
+#include "shader.h"
 #include "renderer.h"
 
 #include <std/alg/defer.h>
@@ -2240,6 +2241,10 @@ void Gpu::setupVulkan(ObjPool& pool, const GpuOptions& wants) {
 
     if (limits.limits.maxPerStageDescriptorSamplers < composeTextures || limits.limits.maxPerStageDescriptorSampledImages < composeTextures) {
         fail(StringView(u8"vulkan binds fewer textures than the compositor draws"));
+    }
+
+    if (limits.limits.maxComputeWorkGroupInvocations < composeTile * composeTile || limits.limits.maxComputeWorkGroupSize[0] < composeTile || limits.limits.maxComputeWorkGroupSize[1] < composeTile || limits.limits.maxComputeSharedMemorySize < kernelShared) {
+        fail(StringView(u8"vulkan runs smaller workgroups than the compositor's tiles"));
     }
 
     VkPhysicalDeviceVulkan12Features enabled12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
