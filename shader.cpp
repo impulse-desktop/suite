@@ -753,6 +753,24 @@ namespace {
                 return constant(kind == Kind::Float ? a->value : ::floor(a->value), kind);
             }
 
+            if (a->op == Op::Convert && a->kind != Kind::Bool && a->args[0]->kind != Kind::Bool && kind != Kind::Bool) {
+                Node* b = a->args[0];
+                bool same = b->kind == kind;
+                bool positive = b->lo >= 0. && b->hi < 2147483648.;
+
+                if (b->kind != Kind::Float && a->kind != Kind::Float && (same || positive)) {
+                    return convert(b, kind);
+                }
+
+                if (b->kind == Kind::Float && kind != Kind::Float && b->lo > -1. && b->hi < 2147483648.) {
+                    return convert(b, kind);
+                }
+
+                if (b->kind != Kind::Float && a->kind == Kind::Float && b->lo >= -16777216. && b->hi <= 16777216. && (same || b->lo >= 0.)) {
+                    return convert(b, kind);
+                }
+            }
+
             double lo = a->lo;
             double hi = a->hi;
 
