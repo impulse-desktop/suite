@@ -275,7 +275,7 @@ namespace {
         RenderShader* compileKernel(ObjPool& pool, const void* code, size_t size, u32 tile) override;
         RenderImage* shade(ObjPool& pool, RenderShader& shader, u32 width, u32 height, const void* data, size_t size, bool hdr, Runable& retired) override;
         id<MTLLibrary> library(NSString* source);
-        id<MTLComputePipelineState> pipeline(id<MTLLibrary> library, u32 output);
+        id<MTLComputePipelineState> pipeline(id<MTLLibrary> library, u32 output, u32 side);
         void updateTextures(ImDrawData* draw);
         void encode(id<MTLCommandBuffer> command, id<MTLTexture> target, u32 output);
         void setMode(bool wide);
@@ -288,9 +288,6 @@ namespace {
     }
 
     static constexpr const char* composeSource = R"metal(
-#include <metal_stdlib>
-using namespace metal;
-
 #ifndef GROUP
 #define GROUP 8
 #endif
@@ -399,8 +396,8 @@ static float3 encode(float3 c, int2 pixel, constant Frame& frame) {
 }
 
 static float4 sampled(constant Textures& textures, uint index, uint flags, float2 at, constant Frame& frame) {
-    constexpr sampler linear(filter::linear, address::clamp_to_edge);
-    float4 s = textures.items[index].sample(linear, at, level(0.0));
+    constexpr sampler smooth(filter::linear, address::clamp_to_edge);
+    float4 s = textures.items[index].sample(smooth, at, level(0.0));
     uint decode = flags & DECODE;
 
     if (decode == DECODE_SRGB) {
@@ -1208,14 +1205,14 @@ id<MTLLibrary> MetalRenderer::library(NSString* source) {
     NSError* error = nil;
     MTLCompileOptions* options = [[MTLCompileOptions alloc] init];
     options.languageVersion = MTLLanguageVersion3_0;
-    id<MTLLibrary> made = [device newLibraryWithSource:source options:options error:&error];
+    id<MTLLibrary> made = [device newLibraryWithSource:[@"#include <metal_stdlib>\nusing namespace metal;\n" stringByAppendingString:source] options:options error:&error];
     if (!made) {
         fail(StringView(StringBuilder() << StringView(u8"Metal compositor: ") << StringView(error ? error.localizedDescription.UTF8String : "no library")));
     }
     return made;
 }
 
-id<MTLComputePipelineState> MetalRenderer::pipeline(id<MTLLibrary> from, u32 output) {
+id<MTLComputePipelineState> MetalRenderer::pipeline(id<MTLLibrary> from, u32 output, u32 side) {
     MTLFunctionConstantValues* constants = [[MTLFunctionConstantValues alloc] init];
     int encoding = output == OutputSrgb ? 0 : 2;
     bool wideOutput = output == OutputWideLinear;
@@ -1226,19 +1223,22 @@ id<MTLComputePipelineState> MetalRenderer::pipeline(id<MTLLibrary> from, u32 out
     if (!function) {
         fail(StringView(StringBuilder() << StringView(u8"Metal compositor function: ") << StringView(error ? error.localizedDescription.UTF8String : "missing")));
     }
-    id<MTLComputePipelineState> made = [device newComputePipelineStateWithFunction:function error:&error];
+    MTLComputePipelineDescriptor* descriptor = [[MTLComputePipelineDescriptor alloc] init];
+    descriptor.computeFunction = function;
+    descriptor.maxTotalThreadsPerThreadgroup = (NSUInteger)side * side;
+    id<MTLComputePipelineState> made = [device newComputePipelineStateWithDescriptor:descriptor options:MTLPipelineOptionNone reflection:nil error:&error];
     if (!made) {
         fail(StringView(StringBuilder() << StringView(u8"Metal compositor pipeline: ") << StringView(error ? error.localizedDescription.UTF8String : "missing")));
+    }
+    if (made.maxTotalThreadsPerThreadgroup < (NSUInteger)side * side) {
+        fail(StringView(u8"Metal compositor does not fit a threadgroup"));
     }
     return made;
 }
 
 id<MTLComputePipelineState> MetalShader::pipeline(u32 output) {
     if (!pipelines[output]) {
-        pipelines[output] = renderer->pipeline(library, output);
-        if (pipelines[output].maxTotalThreadsPerThreadgroup < (NSUInteger)composeTile * composeTile) {
-            fail(StringView(u8"Metal kernel does not fit a threadgroup"));
-        }
+        pipelines[output] = renderer->pipeline(library, output, composeTile);
     }
     return pipelines[output];
 }
@@ -1258,7 +1258,7 @@ void MetalRenderer::encode(id<MTLCommandBuffer> command, id<MTLTexture> target, 
         }
         [compute setBuffer:buffer offset:0 atIndex:i];
     }
-    id<MTLBuffer> textures = [device newBufferWithLength:(t.textures.length() ? t.textures.length() : 1) * sizeof(MTLResourceID) options:MTLResourceStorageModeShared];
+    id<MTLBuffer> textures = [device newBufferWithLength:1024 * sizeof(MTLResourceID) options:MTLResourceStorageModeShared];
     if (!textures) {
         fail(StringView(u8"cannot allocate the Metal compositor's textures"));
     }
@@ -1278,7 +1278,7 @@ void MetalRenderer::encode(id<MTLCommandBuffer> command, id<MTLTexture> target, 
         push.first = t.programs[p * 2];
         if (p == 0) {
             if (!plain[output]) {
-                plain[output] = pipeline(plainLibrary, output);
+                plain[output] = pipeline(plainLibrary, output, composeGroup);
             }
             push.layerWide = 0;
             [compute setComputePipelineState:plain[output]];
@@ -1652,7 +1652,7 @@ Renderer* createMetalRenderer(ObjPool& pool, plt::Platform& platform, plt::Windo
     layer.presentsWithTransaction = NO;
     renderer->setMode(false);
     renderer->plainLibrary = renderer->library([NSString stringWithFormat:@"#define GROUP %u\n%s", composeGroup, composeSource]);
-    renderer->plain[OutputSrgb] = renderer->pipeline(renderer->plainLibrary, OutputSrgb);
+    renderer->plain[OutputSrgb] = renderer->pipeline(renderer->plainLibrary, OutputSrgb, composeGroup);
     renderer->wake = platform.createLoopWake(pool, *pool.make<PollMetal>(renderer));
     renderer->smallObjects = SmallObjAllocator::create(&pool);
     renderer->landed = Channel::create(&pool, 64);
