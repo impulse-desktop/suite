@@ -235,6 +235,10 @@ namespace {
             return make(Op::Input, Kind::Uint, 0, nullptr, nullptr, nullptr, which, 0., hi);
         }
 
+        Node* origin(int which) {
+            return make(Op::Input, Kind::Int, 0, nullptr, nullptr, nullptr, which, 0., 65535.);
+        }
+
         Node* shared(Node* index, int array) {
             return make(Op::Shared, Kind::Float, 1, index, nullptr, nullptr, array, -INFINITY, INFINITY);
         }
@@ -910,11 +914,11 @@ namespace {
     struct Kernel {
         Vector<Store> stores[kernelArrays];
         u32 sizes[kernelArrays] = {};
+        u32 tile = 0;
         Node* at[2];
         Node* color[4];
     };
 
-    constexpr int tile = (int)kernelTile;
     constexpr double sigmoidCenter = 0.75;
     constexpr double sigmoidSlope = 6.5;
     constexpr double sigmoidLow = 0.007577241268;
@@ -924,6 +928,7 @@ namespace {
         Graph& g;
         const VideoShader& s;
         const VideoLayout& l;
+        bool linear = false;
 
         bool model(const char* name) const {
             return !strcmp(l.model, name);
@@ -1676,6 +1681,11 @@ namespace {
 
                 Node* display = g.clamp(light[i], 0., 1.);
 
+                if (linear) {
+                    out[i] = display;
+                    continue;
+                }
+
                 out[i] = g.select(g.le(display, 0.0031308), g.mul(display, 12.92), g.sub(g.mul(g.pow(display, 1. / 2.4), 1.055), 0.055));
             }
         }
@@ -1686,6 +1696,13 @@ namespace {
             bool sdr = !strcmp(s.output, "sdr");
 
             signalOf(codes, signal, out[3]);
+
+            if (linear) {
+                lightOf(signal, light);
+                outputOf(light, out);
+
+                return;
+            }
 
             if (!strcmp(s.transfer, "identity")) {
                 for (int i = 0; i < 3; i++) {
@@ -1797,13 +1814,14 @@ namespace {
         }
 
         void kernel(Kernel& k) {
+            const int tile = (int)s.tile;
             bool sdr = !strcmp(s.output, "sdr");
             bool subsampled = model("yuv") && (s.chroma[0] < 1. || s.chroma[1] < 1.);
             double ratio[2];
             int reach[2];
             int chromaReach[2] = {0, 0};
             Node* local[2] = {g.invocation(2, tile - 1), g.invocation(3, tile - 1)};
-            Node* group[2];
+            Node* first[2];
             Node* corner[2];
             Node* chromaCorner[2] = {nullptr, nullptr};
             Node* last[2];
@@ -1811,8 +1829,8 @@ namespace {
             for (int i = 0; i < 2; i++) {
                 ratio[i] = (double)s.size[i] / s.target[i];
                 reach[i] = (int)::ceil((tile - 1) * ratio[i]) + 7;
-                group[i] = g.invocation(4 + i, (s.target[i] + tile - 1) / tile - 1);
-                corner[i] = g.add(g.convert(g.floor(g.sub(g.mul(g.add(g.convert(g.mul(group[i], tile), Kind::Float), 0.5), ratio[i]), 0.5)), Kind::Int), -(lanczosRadius - 1));
+                first[i] = linear ? g.sub(g.origin(6 + i), (double)s.origin[i]) : g.mul(g.invocation(4 + i, (s.target[i] + tile - 1) / tile - 1), tile);
+                corner[i] = g.add(g.convert(g.floor(g.sub(g.mul(g.add(g.convert(first[i], Kind::Float), 0.5), ratio[i]), 0.5)), Kind::Int), -(lanczosRadius - 1));
                 last[i] = g.i(s.size[i] - 1.);
 
                 if (subsampled) {
@@ -1910,7 +1928,7 @@ namespace {
 
             k.sizes[2] = positions * 3 + 3;
 
-            Node* across = g.convert(g.add(g.mul(group[0], tile), local[0]), Kind::Float);
+            Node* across = g.convert(g.add(first[0], linear ? g.convert(local[0], Kind::Int) : local[0]), Kind::Float);
             Axis horizontal = axis(g.sub(g.mul(g.add(across, 0.5), ratio[0]), 0.5), 1. / ratio[0], true);
             Node* start = g.convert(g.sub(horizontal.origin, corner[0]), Kind::Uint);
 
@@ -1937,11 +1955,11 @@ namespace {
             Node* centre[2];
 
             for (int i = 0; i < 2; i++) {
-                pixel[i] = g.min(g.add(g.mul(group[i], tile), local[i]), s.target[i] - 1.);
+                pixel[i] = linear ? g.clamp(g.add(first[i], g.convert(local[i], Kind::Int)), 0., s.target[i] - 1.) : g.min(g.add(first[i], local[i]), s.target[i] - 1.);
                 centre[i] = g.add(g.convert(pixel[i], Kind::Float), 0.5);
             }
 
-            Node* column = g.sub(pixel[0], g.mul(group[0], tile));
+            Node* column = linear ? g.convert(g.clamp(g.sub(pixel[0], first[0]), 0., tile - 1.), Kind::Uint) : g.sub(pixel[0], first[0]);
             Axis vertical = axis(g.sub(g.mul(centre[1], ratio[1]), 0.5), 1. / ratio[1], true);
             Node* top = g.convert(g.sub(vertical.origin, corner[1]), Kind::Uint);
 
@@ -1957,11 +1975,23 @@ namespace {
 
             outputOf(light, k.color);
             k.color[3] = g.f(1.);
+
+            if (linear) {
+                return;
+            }
+
             dither(centre, k.color);
 
             for (int i = 0; i < 2; i++) {
                 k.at[i] = g.convert(g.add(pixel[i], s.origin[i]), Kind::Int);
             }
+        }
+
+        void pixelLayer(Kernel& k) {
+            Node* values[4];
+
+            codes(values);
+            color(values, k.color);
         }
 
         void dither(Node* const (&pixel)[2], Node* (&out)[4]) {
@@ -2027,7 +2057,7 @@ namespace {
     }
 
     static void operand(StringBuilder& out, const Node* node) {
-        const char* inputs[6] = {"in.uv.x", "in.uv.y", "local.x", "local.y", "group.x", "group.y"};
+        const char* inputs[8] = {"uv.x", "uv.y", "local.x", "local.y", "group.x", "group.y", "origin.x", "origin.y"};
 
         if (node->op == Op::Input) {
             out << StringView(inputs[(int)node->value]);
@@ -2208,10 +2238,72 @@ namespace {
         u32 next = 3;
 
         order(color, 4, nodes);
-        out << StringView(u8"#include <metal_stdlib>\nusing namespace metal;\nstruct In {\n    float2 uv [[user(locn0)]];\n};\nfragment float4 main0(In in [[stage_in]], const device uint* words [[buffer(0)]]) {\n");
+        out << StringView(u8"#include <metal_stdlib>\nusing namespace metal;\nstruct In {\n    float2 uv [[user(locn0)]];\n};\nfragment float4 main0(In in [[stage_in]], const device uint* words [[buffer(0)]]) {\n    float2 uv = in.uv;\n");
         statements(out, nodes, next);
         out << StringView(u8"    return ");
         finish(out, color, ";\n}\n");
+
+        return copied(pool, out);
+    }
+
+    static StringView mslLayer(ObjPool& pool, const Kernel& k, Node* const* uv) {
+        StringBuilder out;
+        u32 next = 3;
+
+        out << StringView(u8"#define LAYER_SHARED");
+
+        for (int i = 0; i < kernelArrays; i++) {
+            out << StringView(u8" threadgroup float ") << StringView(sharedNames[i]) << StringView(u8"[") << (u64)(k.sizes[i] ? k.sizes[i] : 1) << StringView(u8"];");
+        }
+
+        out << StringView(u8"\n#define LAYER_CALL(local, origin, words) layer(local, origin, words, sharedA, sharedB, sharedC, sharedD)\n");
+        out << StringView(u8"float4 layer(uint2 local, int2 origin, const device uint* words, threadgroup float* sharedA, threadgroup float* sharedB, threadgroup float* sharedC, threadgroup float* sharedD) {\n");
+
+        if (uv) {
+            Vector<Node*> nodes;
+
+            order(uv, 2, nodes);
+            statements(out, nodes, next);
+            out << StringView(u8"    float2 uv = float2(");
+            operand(out, uv[0]);
+            out << StringView(u8", ");
+            operand(out, uv[1]);
+            out << StringView(u8");\n");
+        }
+
+        for (int phase = 0; phase < kernelArrays; phase++) {
+            Vector<Node*> roots;
+            Vector<Node*> nodes;
+
+            if (k.stores[phase].empty()) {
+                continue;
+            }
+
+            for (const Store& store : k.stores[phase]) {
+                roots.pushBack(store.index);
+                roots.pushBack(store.value);
+            }
+
+            order(roots.data(), roots.length(), nodes);
+            statements(out, nodes, next);
+
+            for (const Store& store : k.stores[phase]) {
+                out << StringView(u8"    ") << StringView(sharedNames[phase]) << StringView(u8"[");
+                operand(out, store.index);
+                out << StringView(u8"] = ");
+                operand(out, store.value);
+                out << StringView(u8";\n");
+            }
+
+            out << StringView(u8"    threadgroup_barrier(mem_flags::mem_threadgroup);\n");
+        }
+
+        Vector<Node*> nodes;
+
+        order(k.color, 4, nodes);
+        statements(out, nodes, next);
+        out << StringView(u8"    return ");
+        finish(out, k.color, ";\n}\n");
 
         return copied(pool, out);
     }
@@ -2341,7 +2433,7 @@ namespace {
         u32 label = s.fresh();
         u32 sharedFloat = s.fresh();
         u32 arrays[kernelArrays] = {s.fresh(), s.fresh(), s.fresh(), s.fresh()};
-        u32 inputs[6] = {s.fresh(), s.fresh(), s.fresh(), s.fresh(), s.fresh(), s.fresh()};
+        u32 inputs[8] = {s.fresh(), s.fresh(), s.fresh(), s.fresh(), s.fresh(), s.fresh(), s.fresh(), s.fresh()};
         u32 zero = 0;
         u32 one = 0;
         u32 none = 0;
@@ -2503,12 +2595,12 @@ namespace {
             }
         }
 
-        void common(Vector<u32>& module) {
+        void common(Vector<u32>& module, u32 set) {
             Spirv::op(module, 71, typeWords, 6, 4);
             Spirv::op(module, 72, typeBytes, 0, 24);
             Spirv::op(module, 72, typeBytes, 0, 35, 0);
             Spirv::op(module, 71, typeBytes, 2);
-            Spirv::op(module, 71, bytes, 34, 0);
+            Spirv::op(module, 71, bytes, 34, set);
             Spirv::op(module, 71, bytes, 33, 0);
         }
 
@@ -2597,13 +2689,118 @@ namespace {
         Spirv::op(module, 16, e.main, 7);
         Spirv::op(module, 71, uv, 30, 0);
         Spirv::op(module, 71, fColor, 30, 0);
-        e.common(module);
+        e.common(module, 0);
         e.types(module);
         Spirv::op(module, 32, inputVec2, 1, e.typeVec2);
         Spirv::op(module, 32, outputVec4, 3, e.typeVec4);
         Spirv::op(module, 59, inputVec2, uv, 1);
         Spirv::op(module, 59, outputVec4, fColor, 3);
         Spirv::op(module, 59, e.storageBytes, e.bytes, 12);
+
+        return e.finish(pool, module);
+    }
+
+    static StringView spirvLayer(ObjPool& pool, Graph& g, const Kernel& k, Node* const* uv) {
+        Emitter e(g);
+        Spirv& s = e.s;
+        u32 typeUvec2 = s.fresh();
+        u32 typeIvec2 = s.fresh();
+        u32 pointerUvec2 = s.fresh();
+        u32 pointerIvec2 = s.fresh();
+        u32 typeLayer = s.fresh();
+        u32 lengths[kernelArrays] = {s.fresh(), s.fresh(), s.fresh(), s.fresh()};
+        u32 arrayTypes[kernelArrays] = {s.fresh(), s.fresh(), s.fresh(), s.fresh()};
+        u32 arrayPointers[kernelArrays] = {s.fresh(), s.fresh(), s.fresh(), s.fresh()};
+        u32 scope = s.fresh();
+        u32 semantics = s.fresh();
+        u32 local = s.fresh();
+        u32 origin = s.fresh();
+        u32 loaded[2] = {s.fresh(), s.fresh()};
+        u32 color = s.fresh();
+
+        Spirv::op(s.body, 54, e.typeVec4, e.main, 0, typeLayer);
+        Spirv::op(s.body, 55, pointerUvec2, local);
+        Spirv::op(s.body, 55, pointerIvec2, origin);
+        Spirv::op(s.body, 248, e.label);
+        Spirv::op(s.body, 61, typeUvec2, loaded[0], local);
+        Spirv::op(s.body, 81, e.typeUint, e.inputs[2], loaded[0], 0);
+        Spirv::op(s.body, 81, e.typeUint, e.inputs[3], loaded[0], 1);
+        Spirv::op(s.body, 61, typeIvec2, loaded[1], origin);
+        Spirv::op(s.body, 81, e.typeInt, e.inputs[6], loaded[1], 0);
+        Spirv::op(s.body, 81, e.typeInt, e.inputs[7], loaded[1], 1);
+
+        if (uv) {
+            Vector<Node*> nodes;
+
+            order(uv, 2, nodes);
+            e.emit(nodes);
+            e.inputs[0] = uv[0]->id;
+            e.inputs[1] = uv[1]->id;
+        }
+
+        for (int phase = 0; phase < kernelArrays; phase++) {
+            Vector<Node*> roots;
+            Vector<Node*> nodes;
+
+            if (k.stores[phase].empty()) {
+                continue;
+            }
+
+            for (const Store& store : k.stores[phase]) {
+                roots.pushBack(store.index);
+                roots.pushBack(store.value);
+            }
+
+            order(roots.data(), roots.length(), nodes);
+            e.emit(nodes);
+
+            for (const Store& store : k.stores[phase]) {
+                u32 pointer = s.fresh();
+
+                Spirv::op(s.body, 65, e.sharedFloat, pointer, e.arrays[phase], store.index->id);
+                Spirv::op(s.body, 62, pointer, store.value->id);
+            }
+
+            Spirv::op(s.body, 224, scope, scope, semantics);
+        }
+
+        Vector<Node*> nodes;
+
+        order(k.color, 4, nodes);
+        e.emit(nodes);
+        Spirv::op(s.body, 80, e.typeVec4, color, k.color[0]->id, k.color[1]->id, k.color[2]->id, k.color[3]->id);
+        Spirv::op(s.body, 254, color);
+        Spirv::op(s.body, 56);
+
+        Vector<u32> module;
+
+        e.head(module, false);
+        e.common(module, 1);
+        e.types(module);
+        Spirv::op(module, 23, typeUvec2, e.typeUint, 2);
+        Spirv::op(module, 23, typeIvec2, e.typeInt, 2);
+        Spirv::op(module, 32, pointerUvec2, 7, typeUvec2);
+        Spirv::op(module, 32, pointerIvec2, 7, typeIvec2);
+        Spirv::op(module, 33, typeLayer, e.typeVec4, pointerUvec2, pointerIvec2);
+
+        for (int i = 0; i < kernelArrays; i++) {
+            if (k.sizes[i]) {
+                Spirv::op(module, 43, e.typeUint, lengths[i], k.sizes[i]);
+                Spirv::op(module, 28, arrayTypes[i], e.typeFloat, lengths[i]);
+                Spirv::op(module, 32, arrayPointers[i], 4, arrayTypes[i]);
+            }
+        }
+
+        Spirv::op(module, 32, e.sharedFloat, 4, e.typeFloat);
+        Spirv::op(module, 43, e.typeUint, scope, 2);
+        Spirv::op(module, 43, e.typeUint, semantics, 264);
+        Spirv::op(module, 59, e.storageBytes, e.bytes, 12);
+
+        for (int i = 0; i < kernelArrays; i++) {
+            if (k.sizes[i]) {
+                Spirv::op(module, 59, arrayPointers[i], e.arrays[i], 4);
+            }
+        }
 
         return e.finish(pool, module);
     }
@@ -2686,10 +2883,10 @@ namespace {
         entry.pushBack(local);
         entry.pushBack(group);
         Spirv::put(module, 15, entry.data(), (u32)entry.length());
-        Spirv::op(module, 16, e.main, 17, tile, tile, 1);
+        Spirv::op(module, 16, e.main, 17, k.tile, k.tile, 1);
         Spirv::op(module, 71, local, 11, 27);
         Spirv::op(module, 71, group, 11, 26);
-        e.common(module);
+        e.common(module, 0);
         Spirv::op(module, 71, image, 34, 0);
         Spirv::op(module, 71, image, 33, 1);
         Spirv::op(module, 71, image, 25);
@@ -2737,12 +2934,49 @@ StringView compile(ObjPool& pool, const VideoShader& shader) {
     Graph g(pool);
     Video video{g, shader, *shader.layout};
 
+    if (!strcmp(shader.stage, "layer")) {
+        Kernel layer;
+        Node* uv[2];
+        bool lds = !strcmp(shader.filter, "lanczos") && kernelable(shader);
+
+        if (!shader.tile || shader.tile > 32) {
+            fail(StringView(u8"a video layer has an invalid tile"));
+        }
+
+        layer.tile = shader.tile;
+        video.linear = true;
+
+        if (lds) {
+            video.kernel(layer);
+        } else {
+            for (int i = 0; i < 2; i++) {
+                Node* pixel = g.add(g.sub(g.origin(6 + i), (double)shader.origin[i]), g.convert(g.invocation(2 + i, shader.tile - 1.), Kind::Int));
+
+                uv[i] = g.clamp(g.div(g.add(g.convert(pixel, Kind::Float), 0.5), (double)shader.target[i]), 0., 1.);
+            }
+
+            video.pixelLayer(layer);
+        }
+
+#if defined(__APPLE__)
+        return mslLayer(pool, layer, lds ? nullptr : uv);
+#else
+        return spirvLayer(pool, g, layer, lds ? nullptr : uv);
+#endif
+    }
+
     if (!strcmp(shader.stage, "kernel")) {
         Kernel kernel;
 
         if (!kernelable(shader)) {
             fail(StringView(u8"a video kernel cannot draw this frame"));
         }
+
+        if (!shader.tile || shader.tile > 32) {
+            fail(StringView(u8"a video kernel has an invalid tile"));
+        }
+
+        kernel.tile = shader.tile;
 
         video.kernel(kernel);
 

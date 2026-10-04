@@ -1,8 +1,7 @@
-"""The HDR editor blends its interface in a linear-light scene target sized
-to the window. Opened at ui scale 3 it is clamped to 90% of the output
-right after mapping, which rebuilds the swapchain and that target with it:
-the resized window still shows the captured frame, not a black or stale
-one."""
+"""The HDR editor composes its frames into a PQ swapchain sized to the
+window. Opened at ui scale 3 it is clamped to 90% of the output right after
+mapping, which rebuilds the swapchain in the same mode: the resized window
+still shows the captured frame, not a black or stale one."""
 
 from session import Session
 
@@ -25,4 +24,4 @@ with Session("resize_hdr") as s:
 
     s.wait(drawn, "the resized HDR editor showing the frame")
     s.close()
-    print("OK: the HDR editor's scene target follows a resize")
+    print("OK: the HDR editor's frames follow a resize")

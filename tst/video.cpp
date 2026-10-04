@@ -97,7 +97,7 @@ namespace {
         int checked = 0;
         int failed = 0;
         const char* filter = "bilinear";
-        const char* stage = "fragment";
+        const char* stage = "layer";
         u32 bucket = 0;
         u32 buckets = 1;
 
@@ -708,6 +708,7 @@ VideoShader FormatCheck::describe(const AVFrame* frame, const char* output) {
     out.output = output;
     out.filter = filter;
     out.stage = stage;
+    out.tile = kernelTile;
     memcpy(out.curve, transfer.eotf, sizeof(out.curve));
     memcpy(out.oetf, transfer.oetf, sizeof(out.oetf));
     memcpy(out.inverse, transfer.inverse, sizeof(out.inverse));
@@ -809,7 +810,7 @@ RenderShader& FormatCheck::shaderFor(const VideoShader& facts) {
 
     ScopedPtr<ObjPool> scratch{ObjPool::fromMemoryRaw()};
     StringView code = compile(*scratch.ptr, facts);
-    RenderShader* shader = !strcmp(facts.stage, "kernel") ? ui->compileKernel(*pool, code.data(), code.length(), kernelTile) : ui->compileShader(*pool, code.data(), code.length());
+    RenderShader* shader = ui->compileKernel(*pool, code.data(), code.length(), facts.tile);
 
     compiled.pushBack(CompiledShader{facts, shader});
 
@@ -1096,7 +1097,7 @@ void FormatCheck::linearize(const Case& kase) {
 void FormatCheck::shade(AVFrame* frame, const char* output, Vector<double>& out) {
     VideoShader facts = describe(frame, output);
     ScopedPtr<ObjPool> owner{ObjPool::fromMemoryRaw()};
-    RenderImage* image = ui->shadeImage(*owner.ptr, shaderFor(facts), (u32)frame->width, (u32)frame->height, frame->buf[0]->data, frame->buf[0]->size, retired);
+    RenderImage* image = ui->shadeImage(*owner.ptr, shaderFor(facts), (u32)frame->width, (u32)frame->height, frame->buf[0]->data, frame->buf[0]->size, !strcmp(output, "hdr"), retired);
     ImagePixels pixels;
 
     image->prepare();
@@ -1139,7 +1140,7 @@ void FormatCheck::verify(AVFrame* frame, StringView what, double tolerance) {
 
     for (size_t i = 0; i < samplePixels * 4; i++) {
         if (i % 4 != 3) {
-            got.mut(i) = pow(srgbDecode(got[i]), 1. / 2.4);
+            got.mut(i) = pow(got[i], 1. / 2.4);
         }
     }
 
@@ -1213,10 +1214,6 @@ void FormatCheck::examine(const Case& kase, StringView what) {
     STD_DEFER {
         av_frame_free(&frame);
     };
-
-    if (!strcmp(stage, "kernel") && !kernelable(describe(frame, "sdr"))) {
-        return;
-    }
 
     if (model == Model::Palette) {
         writePalette(frame);
@@ -1300,18 +1297,11 @@ void FormatCheck::formats() {
 }
 
 void FormatCheck::underlay() {
-    if (!mine(StringView(u8"kernel underlay"))) {
+    if (!mine(StringView(u8"layer underlay"))) {
         return;
     }
 
     checked++;
-
-    if (!ui->kernels()) {
-        failed++;
-        sysE << StringView(u8"video formats: the display takes no kernels") << endL;
-
-        return;
-    }
 
     Case kase;
 
@@ -1330,7 +1320,7 @@ void FormatCheck::underlay() {
     facts.origin[1] = 1;
 
     ScopedPtr<ObjPool> owner{ObjPool::fromMemoryRaw()};
-    RenderImage* image = ui->shadeImage(*owner.ptr, shaderFor(facts), (u32)frame->width, (u32)frame->height, frame->buf[0]->data, frame->buf[0]->size, retired);
+    RenderImage* image = ui->shadeImage(*owner.ptr, shaderFor(facts), (u32)frame->width, (u32)frame->height, frame->buf[0]->data, frame->buf[0]->size, false, retired);
     UiEvent event;
     int frames = 0;
 
@@ -1355,7 +1345,7 @@ void FormatCheck::underlay() {
 
     if (frames < 3) {
         failed++;
-        sysE << StringView(u8"video formats: the kernel underlay saw ") << (u64)frames << StringView(u8" frames") << endL;
+        sysE << StringView(u8"video formats: the layer underlay saw ") << (u64)frames << StringView(u8" frames") << endL;
     }
 }
 
@@ -1553,10 +1543,7 @@ int main(int argc, char** argv) {
             check.formats();
             check.filter = "lanczos";
             check.formats();
-            check.stage = "kernel";
-            check.formats();
             check.underlay();
-            check.stage = "fragment";
             check.filter = "bilinear";
             check.matrices();
             check.locations();

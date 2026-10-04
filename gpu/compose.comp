@@ -1,0 +1,261 @@
+#version 450
+#extension GL_ARB_gpu_shader_int64 : require
+
+#ifndef GROUP
+#define GROUP 8
+#endif
+
+layout(local_size_x = GROUP, local_size_y = GROUP) in;
+
+layout(constant_id = 0) const int OUTPUT = 0;
+layout(constant_id = 1) const bool WIDE = false;
+
+const int TILE = 24;
+const uint NONE = 0xffffffffu;
+const uint FILL = 0x80000000u;
+const uint OP_RECT = 0u;
+const uint OP_TEXTURE = 1u;
+const uint OP_TRIANGLE = 2u;
+const uint OP_LAYER = 3u;
+const uint DECODE = 3u;
+const uint DECODE_SRGB = 1u;
+const uint DECODE_PQ = 2u;
+const uint SOURCE_WIDE = 4u;
+const uint SOLID = 8u;
+
+struct Header {
+    uint base;
+    uint start;
+    uint count;
+    uint pad;
+    vec4 color;
+};
+
+struct Op {
+    uint kind;
+    uint index;
+    uint flags;
+    uint pad;
+    ivec4 rect;
+    vec4 uv;
+    vec4 map;
+    vec4 color;
+};
+
+struct Triangle {
+    ivec4 edges[3];
+    vec4 colors[3];
+    vec2 uv[3];
+    uint texture;
+    uint flags;
+    ivec4 clip;
+    int64_t offset[3];
+    int64_t area;
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer Headers {
+    Header headers[];
+};
+
+layout(std430, set = 0, binding = 1) readonly buffer List {
+    uint list[];
+};
+
+layout(std430, set = 0, binding = 2) readonly buffer Ops {
+    Op ops[];
+};
+
+layout(std430, set = 0, binding = 3) readonly buffer Triangles {
+    Triangle triangles[];
+};
+
+layout(std430, set = 0, binding = 4) readonly buffer Tiles {
+    uint tiles[];
+};
+
+layout(set = 0, binding = 5) uniform writeonly image2D target;
+layout(set = 0, binding = 6) uniform sampler2D textures[1024];
+
+layout(push_constant) uniform Frame {
+    ivec2 size;
+    uint tilesX;
+    uint first;
+    uint phase;
+    float white;
+    uint layerWide;
+} frame;
+
+vec3 widen(vec3 c) {
+    return mat3(0.627404, 0.069097, 0.016391, 0.329283, 0.919540, 0.088013, 0.043313, 0.011362, 0.895595) * c;
+}
+
+vec3 narrow(vec3 c) {
+    return mat3(1.660491, -0.124550, -0.018151, -0.587641, 1.132900, -0.100579, -0.072850, -0.008349, 1.118730) * c;
+}
+
+vec3 toFrame(vec3 c, bool wide) {
+    if (WIDE) {
+        return wide ? c : widen(c);
+    }
+
+    return wide ? clamp(narrow(c), 0.0, 1.0) : c;
+}
+
+vec3 srgbDecode(vec3 c) {
+    return mix(pow((c + 0.055) / 1.055, vec3(2.4)), c / 12.92, lessThanEqual(c, vec3(0.04045)));
+}
+
+vec3 srgbEncode(vec3 c) {
+    return mix(1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, c * 12.92, lessThanEqual(c, vec3(0.0031308)));
+}
+
+vec3 pqDecode(vec3 e) {
+    vec3 p = pow(max(e, 0.0), vec3(32.0 / 2523.0));
+
+    return pow(max(p - 0.8359375, 0.0) / (18.8515625 - 18.6875 * p), vec3(16384.0 / 2610.0)) * 10000.0;
+}
+
+vec3 pqEncode(vec3 nits) {
+    vec3 y = pow(clamp(nits / 10000.0, 0.0, 1.0), vec3(2610.0 / 16384.0));
+
+    return pow((0.8359375 + 18.8515625 * y) / (1.0 + 18.6875 * y), vec3(2523.0 / 32.0));
+}
+
+float noise(ivec2 pixel) {
+    vec2 at = vec2(pixel) + 0.5 + 5.588238 * float(frame.phase);
+    float inner = at.x * 0.06711056 + at.y * 0.00583715;
+
+    return fract(52.9829189 * fract(inner)) - 0.5;
+}
+
+vec3 encode(vec3 c, ivec2 pixel) {
+    if (OUTPUT == 0) {
+        return srgbEncode(clamp(c, 0.0, 1.0)) + noise(pixel) / 255.0;
+    }
+
+    if (OUTPUT == 1) {
+        return pqEncode(c * frame.white) + noise(pixel) / 1023.0;
+    }
+
+    return c;
+}
+
+vec4 sampled(uint index, uint flags, vec2 at) {
+    vec4 s = textureLod(textures[index], at, 0.0);
+    uint decode = flags & DECODE;
+
+    if (decode == DECODE_SRGB) {
+        s.rgb = srgbDecode(s.rgb);
+    } else if (decode == DECODE_PQ) {
+        s.rgb = pqDecode(s.rgb) / frame.white;
+    }
+
+    s.rgb = toFrame(s.rgb, (flags & SOURCE_WIDE) != 0u);
+
+    return s;
+}
+
+vec4 over(vec4 src, vec4 acc) {
+    return vec4(src.rgb * src.a, src.a) + acc * (1.0 - src.a);
+}
+
+#ifdef LAYER
+vec4 layer(uvec2 local, ivec2 origin) {
+    return vec4(0.0);
+}
+#endif
+
+void main() {
+    const uint across = uint(TILE / GROUP);
+    uint tile = tiles[frame.first + gl_WorkGroupID.x];
+    ivec2 origin = ivec2(tile % frame.tilesX, tile / frame.tilesX) * TILE;
+    ivec2 corner = origin + ivec2(gl_WorkGroupID.y % across, gl_WorkGroupID.y / across) * GROUP;
+    ivec2 local = ivec2(gl_LocalInvocationID.xy);
+    ivec2 pixel = corner + local;
+    vec2 centre = vec2(pixel) + 0.5;
+    Header h = headers[tile];
+    vec4 shown = vec4(0.0);
+
+#ifdef LAYER
+    shown = layer(gl_LocalInvocationID.xy, origin);
+    shown.rgb = toFrame(shown.rgb, frame.layerWide != 0u);
+#endif
+
+    if (pixel.x >= frame.size.x || pixel.y >= frame.size.y) {
+        return;
+    }
+
+    vec4 acc = h.color;
+
+    if (h.base != NONE) {
+        Op b = ops[h.base];
+        vec4 src = shown;
+
+        if (b.kind != OP_LAYER) {
+            src = b.color * sampled(b.index, b.flags, mix(b.uv.xy, b.uv.zw, (centre - b.map.xy) * b.map.zw));
+        }
+
+        acc = h.color + vec4(src.rgb * src.a, src.a) * (1.0 - h.color.a);
+    }
+
+    for (uint i = 0u; i < h.count; i++) {
+        uint entry = list[h.start + i];
+        Op op = ops[entry & ~FILL];
+
+        if ((entry & FILL) != 0u) {
+            acc = over(op.color, acc);
+            continue;
+        }
+
+        if (op.kind == OP_TRIANGLE) {
+            Triangle t = triangles[op.index];
+            int64_t cx = int64_t(corner.x * 256 + 128);
+            int64_t cy = int64_t(corner.y * 256 + 128);
+            float area = float(t.area);
+            float b[3];
+            bool covered = pixel.x >= t.clip.x && pixel.y >= t.clip.y && pixel.x < t.clip.z && pixel.y < t.clip.w;
+
+            for (int k = 0; k < 3; k++) {
+                int64_t start = int64_t(t.edges[k].x) * cx + int64_t(t.edges[k].y) * cy + t.offset[k];
+                int64_t need = -start;
+                int threshold = int(clamp((need + (need > 0l ? 255l : 0l)) / 256l, -2147483647l, 2147483647l));
+                int step = t.edges[k].x * local.x + t.edges[k].y * local.y;
+
+                covered = covered && step >= threshold;
+                b[k] = (float(start + int64_t(t.edges[k].z)) + 256.0 * float(step)) / area;
+            }
+
+            if (!covered) {
+                continue;
+            }
+
+            float b0 = 1.0 - b[1] - b[2];
+            vec4 src = b0 * t.colors[0] + b[1] * t.colors[1] + b[2] * t.colors[2];
+
+            if ((t.flags & SOLID) == 0u) {
+                src *= sampled(t.texture, t.flags, b0 * t.uv[0] + b[1] * t.uv[1] + b[2] * t.uv[2]);
+            }
+
+            acc = over(src, acc);
+            continue;
+        }
+
+        if (pixel.x < op.rect.x || pixel.y < op.rect.y || pixel.x >= op.rect.z || pixel.y >= op.rect.w) {
+            continue;
+        }
+
+        if (op.kind == OP_RECT) {
+            acc = over(op.color, acc);
+        } else if (op.kind == OP_TEXTURE) {
+            acc = over(op.color * sampled(op.index, op.flags, mix(op.uv.xy, op.uv.zw, (centre - op.map.xy) * op.map.zw)), acc);
+        } else if (op.kind == OP_LAYER) {
+            acc = over(shown, acc);
+        }
+    }
+
+    if (OUTPUT == 2) {
+        imageStore(target, pixel, acc.a > 0.0 ? vec4(acc.rgb / acc.a, acc.a) : vec4(0.0));
+    } else {
+        imageStore(target, pixel, vec4(encode(acc.rgb, pixel), 1.0));
+    }
+}

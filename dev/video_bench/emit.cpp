@@ -82,6 +82,7 @@ int main(int argc, char** argv) {
     numbers.words(&shader.dither, 1);
     numbers.words(&shader.phase, 1);
     numbers.words(shader.origin, 2);
+    numbers.words(&shader.tile, 1);
     numbers.numbers(shader.chroma, 4);
     numbers.numbers(&shader.decode[0][0], 9);
     numbers.numbers(shader.bias, 4);

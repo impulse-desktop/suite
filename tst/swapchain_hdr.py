@@ -1,8 +1,7 @@
-"""The HDR editor's swapchain going stale under it: it blends its interface
-in a linear-light scene target sized to the window, so a rebuild after an
-acquire or a present reports the swapchain out of date (IM_CHAOS) waits for
-the device to let go of that target and builds it again with the
-swapchain; the editor is drawn and closes cleanly."""
+"""The HDR editor's swapchain going stale under it: a rebuild after an
+acquire or a present reports the swapchain out of date (IM_CHAOS) makes the
+PQ swapchain again, with the compositor's frame buffers; the editor is
+drawn and closes cleanly."""
 
 from session import Session
 
@@ -22,4 +21,4 @@ with Session("swapchain_hdr") as s:
         s.said("surface HDR10 PQ")
         s.wait(drawn, f"{fault}: the HDR editor drawn after the rebuild")
         s.close()
-    print("OK: a stale swapchain under the HDR editor is rebuilt with its scene target")
+    print("OK: a stale swapchain under the HDR editor is rebuilt in its mode")

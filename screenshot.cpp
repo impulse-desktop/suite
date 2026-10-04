@@ -889,12 +889,11 @@ int mainScreenshot(ObjPool& pool, int argc, char** argv) {
     ChaosMonkey& chaos = *ChaosMonkey::create(pool);
 
     UiOptions options{480_d, 180_d};
-    options.renderer.hdr = loaded && img.color.hdr;
     options.renderer.sdrWhiteNits = (float)img.color.sdrWhiteNits;
     options.renderer.shared = img.native;
     Ui& ui = *Ui::create(pool, StringView(u8"screenshot"), options);
     auto body = makeRunable([&] {
-        ui.trace(options.renderer.hdr ? StringView(u8"surface HDR10 PQ") : StringView(u8"surface sRGB"));
+        ui.trace(loaded && img.color.hdr ? StringView(u8"surface HDR10 PQ") : StringView(u8"surface sRGB"));
         if (loaded) {
             int w, h;
             initialWindowSize(ui, img, w, h);

@@ -253,7 +253,6 @@ namespace {
         bool hasVideo;
         bool hasAudio;
         double duration;
-        const char* output = "sdr";
         Vector<CompiledShader> compiled;
         size_t compiledBytes = 0;
         u64 compiledClock = 0;
@@ -261,7 +260,6 @@ namespace {
         u32 targetY = 0;
         u32 targetWidth = 0;
         u32 targetHeight = 0;
-        u32 phase = 0;
         int shownWidth = 0;
         int shownHeight = 0;
         int shownFormat = AV_PIX_FMT_NONE;
@@ -459,15 +457,8 @@ namespace {
         facts.target[0] = width;
         facts.target[1] = height;
         facts.filter = !ui.software() && width > facts.size[0] && height > facts.size[1] ? "lanczos" : "bilinear";
-        facts.stage = "fragment";
-        facts.origin[0] = 0;
-        facts.origin[1] = 0;
-
-        if (ui.kernels() && !strcmp(facts.filter, "lanczos") && kernelable(facts)) {
-            facts.stage = "kernel";
-            facts.origin[0] = x;
-            facts.origin[1] = y;
-        }
+        facts.origin[0] = x;
+        facts.origin[1] = y;
     }
 
     static VideoShader describeFrame(const AVFrame* frame, const char* output, float sdrWhiteNits) {
@@ -583,7 +574,8 @@ namespace {
         out.conversion = same ? "same" : "convert";
         out.output = target->name;
         out.filter = "bilinear";
-        out.stage = "fragment";
+        out.stage = "layer";
+        out.tile = kernelTile;
         out.dither = !strcmp(out.output, "sdr") ? 8 : 0;
         memcpy(out.curve, transfer->eotf, sizeof(out.curve));
         memcpy(out.oetf, transfer->oetf, sizeof(out.oetf));
@@ -1663,7 +1655,6 @@ void Screen::show(Frame* frame) {
     Frame* previous = shown;
 
     shown = frame;
-    phase = (phase + 1) % 4;
 
     if (previous) {
         if (previous->image->draws == 0) {
@@ -1727,7 +1718,9 @@ void Screen::makeRender(VideoImage* image) {
         player->ui->trace(StringView(StringBuilder() << StringView(u8"video ") << (i64)frame->width << StringView(u8"x") << (i64)frame->height << StringView(u8" ") << StringView(av_get_pix_fmt_name((AVPixelFormat)frame->format))));
     }
 
-    image->facts = describeFrame(frame, output, RendererOptions{}.sdrWhiteNits);
+    bool hdr = frame->color_trc == AVCOL_TRC_SMPTE2084 || frame->color_trc == AVCOL_TRC_ARIB_STD_B67;
+
+    image->facts = describeFrame(frame, hdr ? "hdr" : "sdr", RendererOptions{}.sdrWhiteNits);
 
     if (targetWidth) {
         aim(image->facts, targetX, targetY, targetWidth, targetHeight, *player->ui);
@@ -1736,7 +1729,7 @@ void Screen::makeRender(VideoImage* image) {
     RenderShader& shader = shaderFor(image->facts);
     ScopedPtr<ObjPool> owner{ObjPool::fromMemoryRaw()};
 
-    image->render = player->ui->shadeImage(*owner.ptr, shader, (u32)frame->width, (u32)frame->height, frame->buf[0]->data, frame->buf[0]->size, *image);
+    image->render = player->ui->shadeImage(*owner.ptr, shader, (u32)frame->width, (u32)frame->height, frame->buf[0]->data, frame->buf[0]->size, hdr, *image);
     image->render->prepare();
     image->pool = owner.ptr;
     owner.drop();
@@ -1758,7 +1751,7 @@ RenderShader& Screen::shaderFor(const VideoShader& facts) {
     StringView code = compile(*scratch.ptr, facts);
     u64 built = monotonicNowUs();
     ScopedPtr<ObjPool> owner{ObjPool::fromMemoryRaw()};
-    RenderShader* shader = !strcmp(facts.stage, "kernel") ? player->ui->compileKernel(*owner.ptr, code.data(), code.length(), kernelTile) : player->ui->compileShader(*owner.ptr, code.data(), code.length());
+    RenderShader* shader = player->ui->compileKernel(*owner.ptr, code.data(), code.length(), facts.tile);
     u64 done = monotonicNowUs();
 
     while (!compiled.empty() && compiledBytes + code.length() > shaderBudget) {
@@ -1944,7 +1937,6 @@ void Screen::draw() {
         VideoShader aimed = image->facts;
 
         aim(aimed, targetX, targetY, targetWidth, targetHeight, ui);
-        aimed.phase = aimed.dither ? phase : 0;
 
         if (memcmp(&aimed, &image->facts, sizeof(aimed))) {
             image->facts = aimed;

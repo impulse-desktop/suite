@@ -19,7 +19,6 @@
 #include <plt/window.h>
 #include <plt/platform.h>
 #include <plt/loop_wake.h>
-#include <imgui_impl_metal.h>
 
 #import <Metal/Metal.h>
 #import <AppKit/AppKit.h>
@@ -36,8 +35,89 @@ using namespace stl;
 namespace {
     constexpr u32 drawables = 3;
     constexpr u32 maxTextureSize = 16384;
+    constexpr u32 composeTile = 24;
+    constexpr u32 composeGroup = 8;
+    constexpr u32 composeTextures = 1024;
+    constexpr u32 composeNone = 0xffffffffu;
+    constexpr u32 composeFill = 0x80000000u;
+
+    enum : u32 {
+        OpRect,
+        OpTexture,
+        OpTriangle,
+        OpLayer,
+    };
+
+    enum : u32 {
+        DecodeLinear = 0,
+        DecodeSrgb = 1,
+        DecodePq = 2,
+        SourceWide = 4,
+        Solid = 8,
+    };
+
+    enum : u32 {
+        OutputSrgb,
+        OutputLinear,
+        OutputWideLinear,
+        Outputs,
+    };
+
+    struct Header {
+        u32 base;
+        u32 start;
+        u32 count;
+        u32 pad;
+        float color[4];
+    };
+
+    struct Op {
+        u32 kind;
+        u32 index;
+        u32 flags;
+        u32 pad;
+        i32 rect[4];
+        float uv[4];
+        float map[4];
+        float color[4];
+    };
+
+    struct Triangle {
+        i32 edges[3][4];
+        float colors[3][4];
+        float uv[3][2];
+        u32 texture;
+        u32 flags;
+        i32 clip[4];
+        i64 offset[3];
+        i64 area;
+    };
+
+    static_assert(sizeof(Header) == 32);
+    static_assert(sizeof(Op) == 80);
+    static_assert(sizeof(Triangle) == 176);
+
+    struct Push {
+        i32 size[2];
+        u32 tilesX;
+        u32 first;
+        u32 phase;
+        float white;
+        u32 layerWide;
+        u32 pad;
+    };
+
+    struct MetalTexture {
+        id<MTLTexture> texture = nil;
+        id<MTLCommandBuffer> lastUse = nil;
+        u32 flags = DecodeLinear;
+        bool opaque = false;
+        u64 frame = 0;
+        u32 slot = 0;
+    };
 
     struct MetalRenderer;
+    struct MetalImage;
 
     struct PollMetal final: public plt::TimerCallback {
         MetalRenderer* renderer;
@@ -53,16 +133,16 @@ namespace {
     };
 
     struct MetalShader final: RenderShader {
-        id<MTLFunction> fragment = nil;
-        id<MTLRenderPipelineState> pipeline = nil;
-        id<MTLRenderPipelineState> readPipeline = nil;
-        id<MTLComputePipelineState> kernel = nil;
-        u32 tile = 0;
+        MetalRenderer* renderer = nullptr;
+        id<MTLLibrary> library = nil;
+        id<MTLComputePipelineState> pipelines[Outputs] = {};
+
+        id<MTLComputePipelineState> pipeline(u32 output);
     };
 
     struct MetalImage final: RenderImage {
         MetalRenderer* renderer = nullptr;
-        id<MTLTexture> texture = nil;
+        MetalTexture texture;
         PixelLayout layout = PixelLayout::Rgba8;
         bool hdr = false;
         u32 width = 0;
@@ -77,6 +157,8 @@ namespace {
         Runable* retired = nullptr;
         bool hostImported = false;
         bool dirty = false;
+        u64 frame = 0;
+        u32 layer = 0;
 
         ~MetalImage() noexcept;
         void prepare() override;
@@ -85,13 +167,18 @@ namespace {
         void read(int x0, int y0, int x1, int y1, ImagePixels& out) override;
         void shadeWith(RenderShader& with) override;
         void readShaded(int x0, int y0, int x1, int y1, ImagePixels& out);
-        void readKernel(int x0, int y0, int x1, int y1, ImagePixels& out);
     };
 
-    struct ImageDraw {
+    struct Layer {
         MetalImage* image;
-        ImVec2 lo;
-        ImVec2 hi;
+        float lo[2];
+        float hi[2];
+    };
+
+    struct LayerDraw {
+        MetalImage* image;
+        float lo[2];
+        float hi[2];
     };
 
     struct Flight {
@@ -100,14 +187,63 @@ namespace {
         explicit Flight(const Vector<MetalImage*>& drawn);
     };
 
+    static void drawLayer(const ImDrawList*, const ImDrawCmd*) {
+    }
+
+    float srgbTable[256];
+
+    struct Tiles {
+        Vector<Header> headers;
+        Vector<u32> list;
+        Vector<Op> ops;
+        Vector<Triangle> triangles;
+        Vector<u32> tiles;
+        Vector<u32> programs;
+        Vector<MetalTexture*> textures;
+        Vector<MetalImage*> layers;
+        Vector<u32> base;
+        Vector<float> color;
+        Vector<u32> head;
+        Vector<u32> tail;
+        Vector<u32> count;
+        Vector<u32> layered;
+        Vector<u32> nodes;
+        u32 width = 0;
+        u32 height = 0;
+        u32 tilesX = 0;
+        u32 tilesY = 0;
+        bool wide = false;
+        u64 frame = 0;
+        id<MTLCommandBuffer> serial = nil;
+        float scale[2] = {};
+        float translate[2] = {};
+        float half[2] = {};
+        float fit[2] = {};
+        float offset[2] = {};
+        float zoom[2] = {};
+        ImTextureID atlas = ImTextureID_Invalid;
+        ImVec2 white = {};
+
+        void compose(const ImDrawData* draw, const Vector<Layer>& underlays, u32 width, u32 height, bool wide, u64 frame, id<MTLCommandBuffer> serial, const float (&clear)[4]);
+        void reset(u32 width, u32 height);
+        i64 snap(float pos, int axis) const;
+        void place(const Op& op, u32 index, const i32 (&box)[4], bool fills, bool opaque);
+        void cover(u32 tile, const Op& op, u32 index, bool opaque);
+        void append(u32 tile, u32 entry);
+        u32 slot(MetalTexture* texture);
+        u32 layer(MetalImage* image);
+        void addLayer(MetalImage* image, const float (&lo)[2], const float (&hi)[2], const i32 (&clip)[4]);
+        void addCommand(const ImDrawList& list, const ImDrawCmd& command);
+        void finish();
+    };
+
     struct MetalRenderer final: Renderer {
         plt::Window* host = nullptr;
         plt::LoopWake* wake = nullptr;
         CAMetalDisplayLink* displayLink = nil;
         ImMetalDisplayTarget* target = nil;
         Vector<MetalImage*> drawn;
-        Vector<ImageDraw> underlays;
-        Vector<ImageDraw> kernelDraws;
+        Vector<Layer> underlays;
         SmallObjAllocator* smallObjects = nullptr;
         Channel* landed = nullptr;
         bool waiting = false;
@@ -116,15 +252,14 @@ namespace {
         id<MTLDevice> device = nil;
         id<MTLCommandQueue> queue = nil;
         id<CAMetalDrawable> drawable = nil;
-        MTLRenderPassDescriptor* pass = nil;
         id<MTLCommandBuffer> last = nil;
-        id<MTLRenderCommandEncoder> encoder = nil;
-        id<MTLRenderPipelineState> uiPipeline = nil;
-        id<MTLRenderPipelineState> imagePipeline = nil;
-        id<MTLLibrary> shadeLibrary = nil;
-        bool hdr = false;
+        id<MTLLibrary> plainLibrary = nil;
+        id<MTLComputePipelineState> plain[Outputs] = {};
+        bool edr = false;
+        bool wide = false;
         float sdrWhiteNits = 203.f;
-        ImDrawData* drawing = nullptr;
+        u64 frames = 0;
+        Tiles tiles;
 
         bool beginFrame(u32 width, u32 height) override;
         void drawableReady(id<CAMetalDrawable> value);
@@ -140,16 +275,12 @@ namespace {
         RenderImage* bind(ObjPool& pool, u32 width, u32 height, const void* data, size_t size, size_t stride, Runable& retired) override;
         RenderShader* compileShader(ObjPool& pool, const void* code, size_t size) override;
         RenderShader* compileKernel(ObjPool& pool, const void* code, size_t size, u32 tile) override;
-        id<MTLFunction> mainFunction(const void* code, size_t size);
-        void runKernels(id<MTLCommandBuffer> command);
-        RenderImage* shade(ObjPool& pool, RenderShader& shader, u32 width, u32 height, const void* data, size_t size, Runable& retired) override;
-        id<MTLRenderPipelineState> shadePipeline(MetalShader& shader, MTLPixelFormat format);
-        void setupHdr();
-        void drawHdr(ImDrawData& draw);
-        bool clip(const ImDrawCmd& command);
-        void drawImage(const ImageDraw& image, const ImDrawCmd& command);
-        void drawShaded(const ImageDraw& image);
-        void drawUnderlays(ImDrawData& draw);
+        RenderImage* shade(ObjPool& pool, RenderShader& shader, u32 width, u32 height, const void* data, size_t size, bool hdr, Runable& retired) override;
+        id<MTLLibrary> library(NSString* source);
+        id<MTLComputePipelineState> pipeline(id<MTLLibrary> library, u32 output);
+        void updateTextures(ImDrawData* draw);
+        void encode(id<MTLCommandBuffer> command, id<MTLTexture> target, u32 output);
+        void setMode(bool wide);
     };
 
     static void checkCommand(id<MTLCommandBuffer> command) {
@@ -158,64 +289,774 @@ namespace {
         }
     }
 
-    static void drawImage(const ImDrawList*, const ImDrawCmd* command) {
-        const ImageDraw& draw = *(const ImageDraw*)command->UserCallbackData;
-        draw.image->renderer->drawImage(draw, *command);
-    }
-
-    static constexpr const char* shadeShaders = R"metal(
+    static constexpr const char* composeSource = R"metal(
 #include <metal_stdlib>
 using namespace metal;
-struct ShadeOut {
-    float4 position [[position]];
-    float2 uv [[user(locn0)]];
-};
-vertex ShadeOut shadeVertex(uint index [[vertex_id]], constant float4& transform [[buffer(0)]], constant float4& rect [[buffer(1)]]) {
-    const float2 corners[] = {float2(0,0), float2(1,0), float2(1,1), float2(0,0), float2(1,1), float2(0,1)};
-    float2 uv = corners[index];
-    return {float4(mix(rect.xy, rect.zw, uv) * transform.xy + transform.zw, 0, 1), uv};
-}
-)metal";
 
-    static constexpr const char* hdrShaders = R"metal(
-#include <metal_stdlib>
-using namespace metal;
-struct Vertex {
-    float2 position [[attribute(0)]];
-    float2 uv [[attribute(1)]];
-    float4 color [[attribute(2)]];
-};
-struct Fragment {
-    float4 position [[position]];
-    float2 uv;
+#ifndef GROUP
+#define GROUP 8
+#endif
+
+constant int OUTPUT [[function_constant(0)]];
+constant bool WIDE [[function_constant(1)]];
+
+constant int TILE = 24;
+constant uint NONE = 0xffffffffu;
+constant uint FILL = 0x80000000u;
+constant uint OP_RECT = 0u;
+constant uint OP_TEXTURE = 1u;
+constant uint OP_TRIANGLE = 2u;
+constant uint OP_LAYER = 3u;
+constant uint DECODE = 3u;
+constant uint DECODE_SRGB = 1u;
+constant uint DECODE_PQ = 2u;
+constant uint SOURCE_WIDE = 4u;
+constant uint SOLID = 8u;
+
+struct Header {
+    uint base;
+    uint start;
+    uint count;
+    uint pad;
     float4 color;
 };
-vertex Fragment uiVertex(Vertex v [[stage_in]], constant float4& transform [[buffer(1)]]) {
-    return {float4(v.position * transform.xy + transform.zw, 0, 1), v.uv, v.color};
-}
-float3 srgbToLinear(float3 c) {
-    return select(pow((c + 0.055) / 1.055, float3(2.4)), c / 12.92, c <= 0.04045);
-}
-float3 bt709ToBt2020(float3 c) {
+
+struct Op {
+    uint kind;
+    uint index;
+    uint flags;
+    uint pad;
+    int4 rect;
+    float4 uv;
+    float4 map;
+    float4 color;
+};
+
+struct Triangle {
+    int4 edges[3];
+    float4 colors[3];
+    float2 uv[3];
+    uint texture;
+    uint flags;
+    int4 clip;
+    long offset[3];
+    long area;
+};
+
+struct Frame {
+    int2 size;
+    uint tilesX;
+    uint first;
+    uint phase;
+    float white;
+    uint layerWide;
+    uint pad;
+};
+
+struct Textures {
+    array<texture2d<float>, 1024> items;
+};
+
+static float3 widen(float3 c) {
     return float3x3(float3(0.627404, 0.069097, 0.016391), float3(0.329283, 0.919540, 0.088013), float3(0.043313, 0.011362, 0.895595)) * c;
 }
-fragment float4 uiFragment(Fragment v [[stage_in]], texture2d<float> image [[texture(0)]]) {
-    constexpr sampler sampled(filter::linear, address::clamp_to_edge);
-    float4 pixel = image.sample(sampled, v.uv);
-    return float4(bt709ToBt2020(srgbToLinear(pixel.rgb) * srgbToLinear(v.color.rgb)), pixel.a * v.color.a);
+
+static float3 narrow(float3 c) {
+    return float3x3(float3(1.660491, -0.124550, -0.018151), float3(-0.587641, 1.132900, -0.100579), float3(-0.072850, -0.008349, 1.118730)) * c;
 }
-vertex Fragment imageVertex(uint index [[vertex_id]], constant float4& transform [[buffer(0)]], constant float4& rect [[buffer(1)]]) {
-    const float2 corners[] = {float2(0,0), float2(1,0), float2(1,1), float2(0,0), float2(1,1), float2(0,1)};
-    float2 uv = corners[index];
-    return {float4(mix(rect.xy, rect.zw, uv) * transform.xy + transform.zw, 0, 1), uv, float4(1)};
+
+static float3 toFrame(float3 c, bool wide) {
+    if (WIDE) {
+        return wide ? c : widen(c);
+    }
+
+    return wide ? clamp(narrow(c), 0.0, 1.0) : c;
 }
-fragment float4 imageFragment(Fragment v [[stage_in]], texture2d<float> image [[texture(0)]], constant float& white [[buffer(0)]]) {
-    constexpr sampler sampled(filter::linear, address::clamp_to_edge);
-    float3 p = pow(max(image.sample(sampled, v.uv).rgb, 0.0), float3(32.0 / 2523.0));
-    float3 nits = pow(max(p - 3424.0 / 4096.0, 0.0) / (2413.0 / 128.0 - 2392.0 / 128.0 * p), float3(16384.0 / 2610.0)) * 10000.0;
-    return float4(nits / white, 1);
+
+static float3 srgbDecode(float3 c) {
+    return select(pow((c + 0.055) / 1.055, float3(2.4)), c / 12.92, c <= 0.04045);
+}
+
+static float3 srgbEncode(float3 c) {
+    return select(1.055 * pow(c, float3(1.0 / 2.4)) - 0.055, c * 12.92, c <= 0.0031308);
+}
+
+static float3 pqDecode(float3 e) {
+    float3 p = pow(max(e, 0.0), float3(32.0 / 2523.0));
+
+    return pow(max(p - 0.8359375, 0.0) / (18.8515625 - 18.6875 * p), float3(16384.0 / 2610.0)) * 10000.0;
+}
+
+static float noise(int2 pixel, constant Frame& frame) {
+    float2 at = float2(pixel) + 0.5 + 5.588238 * float(frame.phase);
+    float inner = at.x * 0.06711056 + at.y * 0.00583715;
+
+    return fract(52.9829189 * fract(inner)) - 0.5;
+}
+
+static float3 encode(float3 c, int2 pixel, constant Frame& frame) {
+    if (OUTPUT == 0) {
+        return srgbEncode(clamp(c, 0.0, 1.0)) + noise(pixel, frame) / 255.0;
+    }
+
+    return c;
+}
+
+static float4 sampled(constant Textures& textures, uint index, uint flags, float2 at, constant Frame& frame) {
+    constexpr sampler linear(filter::linear, address::clamp_to_edge);
+    float4 s = textures.items[index].sample(linear, at, level(0.0));
+    uint decode = flags & DECODE;
+
+    if (decode == DECODE_SRGB) {
+        s.rgb = srgbDecode(s.rgb);
+    } else if (decode == DECODE_PQ) {
+        s.rgb = pqDecode(s.rgb) / frame.white;
+    }
+
+    s.rgb = toFrame(s.rgb, (flags & SOURCE_WIDE) != 0u);
+
+    return s;
+}
+
+static float4 over(float4 src, float4 acc) {
+    return float4(src.rgb * src.a, src.a) + acc * (1.0 - src.a);
+}
+
+kernel void compose(device const Header* headers [[buffer(0)]], device const uint* list [[buffer(1)]], device const Op* ops [[buffer(2)]], device const Triangle* triangles [[buffer(3)]], device const uint* tiles [[buffer(4)]], constant Frame& frame [[buffer(5)]], constant Textures& textures [[buffer(6)]],
+#ifdef LAYER
+    const device uint* words [[buffer(7)]],
+#endif
+    texture2d<float, access::write> target [[texture(0)]], uint3 group [[threadgroup_position_in_grid]], uint3 inside [[thread_position_in_threadgroup]]) {
+    const uint across = uint(TILE / GROUP);
+    uint tile = tiles[frame.first + group.x];
+    int2 origin = int2(int(tile % frame.tilesX), int(tile / frame.tilesX)) * TILE;
+    int2 corner = origin + int2(int(group.y % across), int(group.y / across)) * GROUP;
+    int2 local = int2(inside.xy);
+    int2 pixel = corner + local;
+    float2 centre = float2(pixel) + 0.5;
+    Header h = headers[tile];
+    float4 shown = float4(0.0);
+
+#ifdef LAYER
+    LAYER_SHARED
+    shown = LAYER_CALL(inside.xy, origin, words);
+    shown.rgb = toFrame(shown.rgb, frame.layerWide != 0u);
+#endif
+
+    if (pixel.x >= frame.size.x || pixel.y >= frame.size.y) {
+        return;
+    }
+
+    float4 acc = h.color;
+
+    if (h.base != NONE) {
+        Op b = ops[h.base];
+        float4 src = shown;
+
+        if (b.kind != OP_LAYER) {
+            src = b.color * sampled(textures, b.index, b.flags, mix(b.uv.xy, b.uv.zw, (centre - b.map.xy) * b.map.zw), frame);
+        }
+
+        acc = h.color + float4(src.rgb * src.a, src.a) * (1.0 - h.color.a);
+    }
+
+    for (uint i = 0u; i < h.count; i++) {
+        uint entry = list[h.start + i];
+        Op op = ops[entry & ~FILL];
+
+        if ((entry & FILL) != 0u) {
+            acc = over(op.color, acc);
+            continue;
+        }
+
+        if (op.kind == OP_TRIANGLE) {
+            Triangle t = triangles[op.index];
+            long cx = long(corner.x * 256 + 128);
+            long cy = long(corner.y * 256 + 128);
+            float area = float(t.area);
+            float b[3];
+            bool covered = pixel.x >= t.clip.x && pixel.y >= t.clip.y && pixel.x < t.clip.z && pixel.y < t.clip.w;
+
+            for (int k = 0; k < 3; k++) {
+                long start = long(t.edges[k].x) * cx + long(t.edges[k].y) * cy + t.offset[k];
+                long need = -start;
+                long whole = (need + (need > 0 ? 255l : 0l)) / 256l;
+                int threshold = int(whole < -2147483647l ? -2147483647l : whole > 2147483647l ? 2147483647l : whole);
+                int step = t.edges[k].x * local.x + t.edges[k].y * local.y;
+
+                covered = covered && step >= threshold;
+                b[k] = (float(start + long(t.edges[k].z)) + 256.0 * float(step)) / area;
+            }
+
+            if (!covered) {
+                continue;
+            }
+
+            float b0 = 1.0 - b[1] - b[2];
+            float4 src = b0 * t.colors[0] + b[1] * t.colors[1] + b[2] * t.colors[2];
+
+            if ((t.flags & SOLID) == 0u) {
+                src *= sampled(textures, t.texture, t.flags, b0 * t.uv[0] + b[1] * t.uv[1] + b[2] * t.uv[2], frame);
+            }
+
+            acc = over(src, acc);
+            continue;
+        }
+
+        if (pixel.x < op.rect.x || pixel.y < op.rect.y || pixel.x >= op.rect.z || pixel.y >= op.rect.w) {
+            continue;
+        }
+
+        if (op.kind == OP_RECT) {
+            acc = over(op.color, acc);
+        } else if (op.kind == OP_TEXTURE) {
+            acc = over(op.color * sampled(textures, op.index, op.flags, mix(op.uv.xy, op.uv.zw, (centre - op.map.xy) * op.map.zw), frame), acc);
+        } else if (op.kind == OP_LAYER) {
+            acc = over(shown, acc);
+        }
+    }
+
+    if (OUTPUT == 2) {
+        target.write(acc.a > 0.0 ? float4(acc.rgb / acc.a, acc.a) : float4(0.0), uint2(pixel));
+    } else {
+        target.write(float4(encode(acc.rgb, pixel, frame), 1.0), uint2(pixel));
+    }
 }
 )metal";
+
+    static i64 nearest(float x) {
+        volatile float magic = 12582912.f;
+
+        return (i64)((x + magic) - magic);
+    }
+
+    static i32 firstPixel(i64 fixed) {
+        i64 v = fixed - 128;
+
+        return (i32)(v >= 0 ? (v + 255) / 256 : -((-v) / 256));
+    }
+
+    static void edge(const i64 (&a)[2], const i64 (&b)[2], i32 (&out)[4], i64& offset) {
+        i64 dx = b[0] - a[0];
+        i64 dy = b[1] - a[1];
+        bool topLeft = (dy == 0 && dx > 0) || dy < 0;
+
+        out[0] = (i32)-dy;
+        out[1] = (i32)dx;
+        out[2] = topLeft ? 0 : 1;
+        out[3] = 0;
+        offset = dy * a[0] - dx * a[1] - (topLeft ? 0 : 1);
+    }
+
+    static void linearColor(u32 col, bool wide, float (&out)[4]) {
+        float r = srgbTable[col & 255u];
+        float g = srgbTable[(col >> 8) & 255u];
+        float b = srgbTable[(col >> 16) & 255u];
+
+        if (wide) {
+            out[0] = 0.627404f * r + 0.329283f * g + 0.043313f * b;
+            out[1] = 0.069097f * r + 0.919540f * g + 0.011362f * b;
+            out[2] = 0.016391f * r + 0.088013f * g + 0.895595f * b;
+        } else {
+            out[0] = r;
+            out[1] = g;
+            out[2] = b;
+        }
+
+        out[3] = (float)(col >> 24) / 255.f;
+    }
+
+    static bool opaquePixels(const u8* rgba, size_t pitch, u32 w, u32 h) {
+        for (u32 y = 0; y < h; y++) {
+            for (u32 x = 0; x < w; x++) {
+                if (rgba[(size_t)y * pitch + (size_t)x * 4 + 3] != 255) {
+                    return false;
+                }
+            }
+        }
+
+        return true;
+    }
+}
+
+void Tiles::reset(u32 w, u32 h) {
+    width = w;
+    height = h;
+    tilesX = (w + composeTile - 1) / composeTile;
+    tilesY = (h + composeTile - 1) / composeTile;
+
+    u32 n = tilesX * tilesY;
+
+    base.zero(n);
+    head.zero(n);
+    tail.zero(n);
+    count.zero(n);
+    layered.zero(n);
+    color.zero((size_t)n * 4);
+    memset(base.mutData(), 0xff, n * sizeof(u32));
+    memset(head.mutData(), 0xff, n * sizeof(u32));
+    memset(tail.mutData(), 0xff, n * sizeof(u32));
+    memset(layered.mutData(), 0xff, n * sizeof(u32));
+    nodes.clear();
+    ops.clear();
+    triangles.clear();
+    textures.clear();
+    layers.clear();
+    list.clear();
+    tiles.clear();
+    programs.clear();
+    headers.clear();
+}
+
+i64 Tiles::snap(float pos, int axis) const {
+    return nearest(((pos * scale[axis] + translate[axis]) * half[axis] + half[axis]) * 256.f);
+}
+
+u32 Tiles::slot(MetalTexture* texture) {
+    if (texture->frame != frame) {
+        if (textures.length() == composeTextures) {
+            fail(StringView(u8"a frame draws more textures than the compositor binds"));
+        }
+
+        texture->frame = frame;
+        texture->slot = (u32)textures.length();
+        texture->lastUse = serial;
+        textures.pushBack(texture);
+    }
+
+    return texture->slot;
+}
+
+u32 Tiles::layer(MetalImage* image) {
+    if (image->frame != frame) {
+        image->frame = frame;
+        image->layer = (u32)layers.length();
+        layers.pushBack(image);
+    }
+
+    return image->layer;
+}
+
+void Tiles::append(u32 tile, u32 entry) {
+    u32 node = (u32)(nodes.length() / 2);
+
+    nodes.pushBack(entry);
+    nodes.pushBack(composeNone);
+
+    if (tail[tile] == composeNone) {
+        head.mut(tile) = node;
+    } else {
+        nodes.mut(tail[tile] * 2 + 1) = node;
+    }
+
+    tail.mut(tile) = node;
+    count.mut(tile)++;
+}
+
+void Tiles::cover(u32 tile, const Op& op, u32 index, bool opaque) {
+    float* c = color.mutData() + (size_t)tile * 4;
+
+    if (opaque) {
+        head.mut(tile) = composeNone;
+        tail.mut(tile) = composeNone;
+        count.mut(tile) = 0;
+
+        if (op.kind == OpRect) {
+            base.mut(tile) = composeNone;
+            c[0] = op.color[0];
+            c[1] = op.color[1];
+            c[2] = op.color[2];
+            c[3] = 1.f;
+        } else {
+            base.mut(tile) = index;
+            c[0] = c[1] = c[2] = c[3] = 0.f;
+        }
+
+        return;
+    }
+
+    if (count[tile]) {
+        append(tile, index | composeFill);
+
+        return;
+    }
+
+    float a = op.color[3];
+
+    for (int k = 0; k < 3; k++) {
+        c[k] = op.color[k] * a + c[k] * (1.f - a);
+    }
+
+    c[3] = a + c[3] * (1.f - a);
+}
+
+void Tiles::place(const Op& op, u32 index, const i32 (&box)[4], bool fills, bool opaque) {
+    if (box[2] <= box[0] || box[3] <= box[1]) {
+        return;
+    }
+
+    i32 tile = (i32)composeTile;
+    i32 lastX = (i32)tilesX - 1;
+    i32 lastY = (i32)tilesY - 1;
+    i32 tx0 = box[0] / tile;
+    i32 ty0 = box[1] / tile;
+    i32 tx1 = (box[2] - 1) / tile;
+    i32 ty1 = (box[3] - 1) / tile;
+    i32 fx0 = (box[0] + tile - 1) / tile;
+    i32 fy0 = (box[1] + tile - 1) / tile;
+    i32 fx1 = box[2] >= (i32)width ? lastX : box[2] / tile - 1;
+    i32 fy1 = box[3] >= (i32)height ? lastY : box[3] / tile - 1;
+
+    tx1 = tx1 > lastX ? lastX : tx1;
+    ty1 = ty1 > lastY ? lastY : ty1;
+
+    for (i32 ty = ty0; ty <= ty1; ty++) {
+        bool inside = fills && ty >= fy0 && ty <= fy1;
+
+        for (i32 tx = tx0; tx <= tx1; tx++) {
+            u32 at = (u32)ty * tilesX + (u32)tx;
+
+            if (inside && tx >= fx0 && tx <= fx1) {
+                cover(at, op, index, opaque);
+            } else {
+                append(at, index);
+            }
+
+            if (op.kind == OpLayer) {
+                layered.mut(at) = op.index;
+            }
+        }
+    }
+}
+
+void Tiles::addLayer(MetalImage* image, const float (&lo)[2], const float (&hi)[2], const i32 (&clip)[4]) {
+    i64 x0 = snap(lo[0], 0);
+    i64 y0 = snap(lo[1], 1);
+    i64 x1 = snap(hi[0], 0);
+    i64 y1 = snap(hi[1], 1);
+    i32 box[4] = {firstPixel(x0 < x1 ? x0 : x1), firstPixel(y0 < y1 ? y0 : y1), firstPixel(x0 < x1 ? x1 : x0), firstPixel(y0 < y1 ? y1 : y0)};
+
+    for (int k = 0; k < 2; k++) {
+        box[k] = box[k] < clip[k] ? clip[k] : box[k];
+        box[k + 2] = box[k + 2] > clip[k + 2] ? clip[k + 2] : box[k + 2];
+    }
+
+    Op op{};
+
+    op.kind = OpLayer;
+    op.index = layer(image);
+    memcpy(op.rect, box, sizeof(box));
+
+    for (int k = 0; k < 4; k++) {
+        op.color[k] = 1.f;
+    }
+
+    ops.pushBack(op);
+    place(op, (u32)ops.length() - 1, box, false, false);
+}
+
+void Tiles::addCommand(const ImDrawList& list, const ImDrawCmd& command) {
+    float x0 = (command.ClipRect.x - offset[0]) * zoom[0];
+    float y0 = (command.ClipRect.y - offset[1]) * zoom[1];
+    float x1 = (command.ClipRect.z - offset[0]) * zoom[0];
+    float y1 = (command.ClipRect.w - offset[1]) * zoom[1];
+
+    x0 = x0 < 0.f ? 0.f : x0;
+    y0 = y0 < 0.f ? 0.f : y0;
+    x1 = x1 > fit[0] ? fit[0] : x1;
+    y1 = y1 > fit[1] ? fit[1] : y1;
+
+    if (x1 <= x0 || y1 <= y0) {
+        return;
+    }
+
+    i32 clip[4] = {(i32)x0, (i32)y0, (i32)x0 + (i32)(u32)(x1 - x0), (i32)y0 + (i32)(u32)(y1 - y0)};
+
+    if (command.UserCallback) {
+        if (command.UserCallback == drawLayer) {
+            const LayerDraw& draw = *(const LayerDraw*)command.UserCallbackData;
+
+            addLayer(draw.image, draw.lo, draw.hi, clip);
+        }
+
+        return;
+    }
+
+    ImTextureID id = command.GetTexID();
+    MetalTexture* texture = (MetalTexture*)(uintptr_t)id;
+
+    if (!texture) {
+        fail(StringView(u8"an interface draw has no texture"));
+    }
+
+    u32 at = slot(texture);
+    const ImDrawVert* vertices = list.VtxBuffer.Data + command.VtxOffset;
+    const ImDrawIdx* indices = list.IdxBuffer.Data + command.IdxOffset;
+    bool atlas = id == this->atlas;
+
+    for (u32 e = 0; e < command.ElemCount; e += 3) {
+        const ImDrawIdx* index = indices + e;
+
+        if (e + 3 < command.ElemCount && index[3] == index[0] && index[4] == index[2]) {
+            const ImDrawVert* v[4] = {&vertices[index[0]], &vertices[index[1]], &vertices[index[2]], &vertices[index[5]]};
+            bool rect = v[0]->pos.y == v[1]->pos.y && v[1]->pos.x == v[2]->pos.x && v[2]->pos.y == v[3]->pos.y && v[3]->pos.x == v[0]->pos.x;
+
+            rect = rect && v[0]->uv.y == v[1]->uv.y && v[1]->uv.x == v[2]->uv.x && v[2]->uv.y == v[3]->uv.y && v[3]->uv.x == v[0]->uv.x;
+            rect = rect && v[0]->col == v[1]->col && v[0]->col == v[2]->col && v[0]->col == v[3]->col;
+
+            if (rect) {
+                i64 fx0 = snap(v[0]->pos.x, 0);
+                i64 fx1 = snap(v[2]->pos.x, 0);
+                i64 fy0 = snap(v[0]->pos.y, 1);
+                i64 fy1 = snap(v[2]->pos.y, 1);
+                float u0 = v[0]->uv.x;
+                float u1 = v[2]->uv.x;
+                float w0 = v[0]->uv.y;
+                float w1 = v[2]->uv.y;
+
+                if (fx0 > fx1) {
+                    i64 t = fx0;
+                    float q = u0;
+
+                    fx0 = fx1;
+                    fx1 = t;
+                    u0 = u1;
+                    u1 = q;
+                }
+
+                if (fy0 > fy1) {
+                    i64 t = fy0;
+                    float q = w0;
+
+                    fy0 = fy1;
+                    fy1 = t;
+                    w0 = w1;
+                    w1 = q;
+                }
+
+                i32 box[4] = {firstPixel(fx0), firstPixel(fy0), firstPixel(fx1), firstPixel(fy1)};
+
+                box[0] = box[0] < clip[0] ? clip[0] : box[0];
+                box[1] = box[1] < clip[1] ? clip[1] : box[1];
+                box[2] = box[2] > clip[2] ? clip[2] : box[2];
+                box[3] = box[3] > clip[3] ? clip[3] : box[3];
+                e += 3;
+
+                if (box[2] <= box[0] || box[3] <= box[1]) {
+                    continue;
+                }
+
+                Op op{};
+                bool solid = atlas && u0 == u1 && w0 == w1 && u0 == white.x && w0 == white.y;
+
+                op.kind = solid ? OpRect : OpTexture;
+                op.index = at;
+                op.flags = texture->flags;
+                linearColor(v[0]->col, wide, op.color);
+                memcpy(op.rect, box, sizeof(box));
+                op.uv[0] = u0;
+                op.uv[1] = w0;
+                op.uv[2] = u1;
+                op.uv[3] = w1;
+                op.map[0] = (float)fx0 * (1.f / 256.f);
+                op.map[1] = (float)fy0 * (1.f / 256.f);
+                op.map[2] = fx1 > fx0 ? 256.f / (float)(fx1 - fx0) : 0.f;
+                op.map[3] = fy1 > fy0 ? 256.f / (float)(fy1 - fy0) : 0.f;
+
+                bool opaque = (v[0]->col >> 24) == 255u && (solid || texture->opaque);
+
+                ops.pushBack(op);
+                place(op, (u32)ops.length() - 1, box, solid || opaque, opaque);
+                continue;
+            }
+        }
+
+        const ImDrawVert* v[3] = {&vertices[index[0]], &vertices[index[1]], &vertices[index[2]]};
+        i64 q0[3][2];
+
+        for (int k = 0; k < 3; k++) {
+            q0[k][0] = snap(v[k]->pos.x, 0);
+            q0[k][1] = snap(v[k]->pos.y, 1);
+        }
+
+        i64 area = (q0[1][0] - q0[0][0]) * (q0[2][1] - q0[0][1]) - (q0[1][1] - q0[0][1]) * (q0[2][0] - q0[0][0]);
+
+        if (area == 0) {
+            continue;
+        }
+
+        int order[3] = {0, 1, 2};
+
+        if (area < 0) {
+            order[1] = 2;
+            order[2] = 1;
+            area = -area;
+        }
+
+        Triangle t{};
+        i64 q[3][2];
+
+        for (int k = 0; k < 3; k++) {
+            q[k][0] = q0[order[k]][0];
+            q[k][1] = q0[order[k]][1];
+            t.uv[k][0] = v[order[k]]->uv.x;
+            t.uv[k][1] = v[order[k]]->uv.y;
+            linearColor(v[order[k]]->col, wide, t.colors[k]);
+        }
+
+        edge(q[1], q[2], t.edges[0], t.offset[0]);
+        edge(q[2], q[0], t.edges[1], t.offset[1]);
+        edge(q[0], q[1], t.edges[2], t.offset[2]);
+        t.area = area;
+        t.texture = at;
+
+        bool solid = atlas && t.uv[0][0] == white.x && t.uv[1][0] == white.x && t.uv[2][0] == white.x && t.uv[0][1] == white.y && t.uv[1][1] == white.y && t.uv[2][1] == white.y;
+
+        t.flags = texture->flags | (solid ? Solid : 0);
+        memcpy(t.clip, clip, sizeof(clip));
+
+        i64 lo[2];
+        i64 hi[2];
+
+        for (int d = 0; d < 2; d++) {
+            lo[d] = hi[d] = q[0][d];
+
+            for (int k = 1; k < 3; k++) {
+                lo[d] = q[k][d] < lo[d] ? q[k][d] : lo[d];
+                hi[d] = q[k][d] > hi[d] ? q[k][d] : hi[d];
+            }
+        }
+
+        i32 box[4] = {firstPixel(lo[0]), firstPixel(lo[1]), firstPixel(hi[0] + 1), firstPixel(hi[1] + 1)};
+
+        box[0] = box[0] < clip[0] ? clip[0] : box[0];
+        box[1] = box[1] < clip[1] ? clip[1] : box[1];
+        box[2] = box[2] > clip[2] ? clip[2] : box[2];
+        box[3] = box[3] > clip[3] ? clip[3] : box[3];
+
+        if (box[2] <= box[0] || box[3] <= box[1]) {
+            continue;
+        }
+
+        Op op{};
+
+        op.kind = OpTriangle;
+        op.index = (u32)triangles.length();
+        memcpy(op.rect, box, sizeof(box));
+        triangles.pushBack(t);
+        ops.pushBack(op);
+        place(op, (u32)ops.length() - 1, box, false, false);
+    }
+}
+
+void Tiles::finish() {
+    u32 n = tilesX * tilesY;
+    u32 programCount = (u32)layers.length() + 1;
+    Vector<u32> sizes;
+
+    headers.zero(n);
+    sizes.zero(programCount);
+
+    for (u32 i = 0; i < n; i++) {
+        Header& h = headers.mut(i);
+        u32 start = (u32)list.length();
+
+        h.base = base[i];
+        h.start = start;
+        memcpy(h.color, color.data() + (size_t)i * 4, sizeof(h.color));
+
+        for (u32 node = head[i]; node != composeNone; node = nodes[node * 2 + 1]) {
+            u32 entry = nodes[node * 2];
+            const Op& op = ops[entry & ~composeFill];
+
+            if (op.kind == OpLayer && op.index != layered[i]) {
+                continue;
+            }
+
+            list.pushBack(entry);
+        }
+
+        h.count = (u32)list.length() - start;
+        sizes.mut(layered[i] == composeNone ? 0 : layered[i] + 1)++;
+    }
+
+    programs.zero((size_t)programCount * 2);
+
+    u32 first = 0;
+
+    for (u32 p = 0; p < programCount; p++) {
+        programs.mut(p * 2) = first;
+        programs.mut(p * 2 + 1) = 0;
+        first += sizes[p];
+    }
+
+    tiles.zero(n);
+
+    for (u32 i = 0; i < n; i++) {
+        u32 p = layered[i] == composeNone ? 0 : layered[i] + 1;
+
+        tiles.mut(programs[p * 2] + programs[p * 2 + 1]) = i;
+        programs.mut(p * 2 + 1)++;
+    }
+}
+
+void Tiles::compose(const ImDrawData* draw, const Vector<Layer>& underlays, u32 w, u32 h, bool wideFrame, u64 mark, id<MTLCommandBuffer> serialNow, const float (&clear)[4]) {
+    reset(w, h);
+    wide = wideFrame;
+    frame = mark;
+    serial = serialNow;
+
+    for (u32 i = 0; i < tilesX * tilesY; i++) {
+        float* c = color.mutData() + (size_t)i * 4;
+
+        c[0] = clear[0] * clear[3];
+        c[1] = clear[1] * clear[3];
+        c[2] = clear[2] * clear[3];
+        c[3] = clear[3];
+    }
+
+    float size[2] = {(float)w, (float)h};
+    float position[2] = {0.f, 0.f};
+    float framebuffer[2] = {1.f, 1.f};
+
+    if (draw && draw->DisplaySize.x > 0.f && draw->DisplaySize.y > 0.f) {
+        size[0] = draw->DisplaySize.x;
+        size[1] = draw->DisplaySize.y;
+        position[0] = draw->DisplayPos.x;
+        position[1] = draw->DisplayPos.y;
+        framebuffer[0] = draw->FramebufferScale.x;
+        framebuffer[1] = draw->FramebufferScale.y;
+        atlas = ImGui::GetIO().Fonts->TexRef.GetTexID();
+        white = ImGui::GetIO().Fonts->TexUvWhitePixel;
+    }
+
+    for (int k = 0; k < 2; k++) {
+        float pixels = size[k] * framebuffer[k];
+        float target = k ? (float)h : (float)w;
+
+        scale[k] = 2.f / size[k];
+        translate[k] = -1.f - position[k] * scale[k];
+        half[k] = pixels * 0.5f;
+        offset[k] = position[k];
+        zoom[k] = framebuffer[k];
+        fit[k] = pixels < target ? pixels : target;
+    }
+
+    i32 whole[4] = {0, 0, (i32)w, (i32)h};
+
+    for (const Layer& under : underlays) {
+        addLayer(under.image, under.lo, under.hi, whole);
+    }
+
+    if (draw) {
+        for (const ImDrawList* list : draw->CmdLists) {
+            for (const ImDrawCmd& command : list->CmdBuffer) {
+                addCommand(*list, command);
+            }
+        }
+    }
+
+    finish();
 }
 
 SurfaceImage::~SurfaceImage() noexcept {
@@ -267,6 +1108,7 @@ MetalImage::~MetalImage() noexcept {
         STD_INSIST(image != this);
     }
     [lastUse waitUntilCompleted];
+    [texture.lastUse waitUntilCompleted];
 }
 
 void MetalImage::prepare() {
@@ -277,8 +1119,8 @@ void MetalImage::prepare() {
         dirty = true;
     } else if (source) {
         if (!hostImported) {
-            for (size_t y = 0; y < texture.height; y++) {
-                memcpy((u8*)buffer.contents + y * bufferStride, (const u8*)source + y * sourceStride, texture.width * 4);
+            for (size_t y = 0; y < height; y++) {
+                memcpy((u8*)buffer.contents + y * bufferStride, (const u8*)source + y * sourceStride, (size_t)width * 4);
             }
         }
         dirty = true;
@@ -297,21 +1139,17 @@ void MetalImage::underlay(ImVec2 lo, ImVec2 hi) {
         fail(StringView(u8"only a shaded image goes under the interface"));
     }
     renderer->drawn.pushBack(this);
-    (shader->tile ? renderer->kernelDraws : renderer->underlays).pushBack(ImageDraw{this, lo, hi});
+    renderer->underlays.pushBack(Layer{this, {lo.x, lo.y}, {hi.x, hi.y}});
 }
 
 void MetalImage::draw(ImDrawList& list, ImVec2 lo, ImVec2 hi) {
-    if (shader && shader->tile) {
-        fail(StringView(u8"a kernel image only goes under the interface"));
-    }
     renderer->drawn.pushBack(this);
-    if (hdr || shader) {
-        ImageDraw draw{this, lo, hi};
-        list.AddCallback(drawImage, &draw, sizeof(draw));
-        list.AddCallback(ImDrawCallback_ResetRenderState, nullptr);
-    } else {
-        list.AddImage(ImTextureRef((ImTextureID)(__bridge void*)texture), lo, hi);
+    if (shader) {
+        LayerDraw layer{this, {lo.x, lo.y}, {hi.x, hi.y}};
+        list.AddCallback(drawLayer, &layer, sizeof(layer));
+        return;
     }
+    list.AddImage(ImTextureRef((ImTextureID)(uintptr_t)&texture), lo, hi);
 }
 
 void MetalImage::read(int x0, int y0, int x1, int y1, ImagePixels& out) {
@@ -320,203 +1158,237 @@ void MetalImage::read(int x0, int y0, int x1, int y1, ImagePixels& out) {
         readShaded(x0, y0, x1, y1, out);
         return;
     }
-    checkImageRegion((u32)texture.width, (u32)texture.height, x0, y0, x1, y1);
+    checkImageRegion((u32)texture.texture.width, (u32)texture.texture.height, x0, y0, x1, y1);
     @autoreleasepool {
-        u32 width = (u32)(x1 - x0);
-        u32 height = (u32)(y1 - y0);
-        size_t stride = ((size_t)width * 4 + 255) & ~(size_t)255;
-        id<MTLBuffer> buffer = [renderer->device newBufferWithLength:stride * height options:MTLResourceStorageModeShared];
+        u32 w = (u32)(x1 - x0);
+        u32 h = (u32)(y1 - y0);
+        size_t stride = ((size_t)w * 4 + 255) & ~(size_t)255;
+        id<MTLBuffer> readback = [renderer->device newBufferWithLength:stride * h options:MTLResourceStorageModeShared];
         id<MTLCommandBuffer> command = [renderer->queue commandBuffer];
         id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
-        if (!buffer || !command || !blit) {
+        if (!readback || !command || !blit) {
             fail(StringView(u8"cannot allocate Metal readback"));
         }
-        [blit copyFromTexture:texture sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(x0, y0, 0) sourceSize:MTLSizeMake(width, height, 1) toBuffer:buffer destinationOffset:0 destinationBytesPerRow:stride destinationBytesPerImage:stride * height];
+        [blit copyFromTexture:texture.texture sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(x0, y0, 0) sourceSize:MTLSizeMake(w, h, 1) toBuffer:readback destinationOffset:0 destinationBytesPerRow:stride destinationBytesPerImage:stride * h];
         [blit endEncoding];
         [command commit];
         [command waitUntilCompleted];
         checkCommand(command);
         checkCommand(renderer->last);
-        unpackPixels(buffer.contents, width, height, stride, layout, out);
+        unpackPixels(readback.contents, w, h, stride, layout, out);
+    }
+}
+
+void MetalImage::readShaded(int x0, int y0, int x1, int y1, ImagePixels& out) {
+    @autoreleasepool {
+        u32 w = (u32)(x1 - x0);
+        u32 h = (u32)(y1 - y0);
+        const float clear[4] = {0.f, 0.f, 0.f, 0.f};
+        Vector<Layer> whole;
+        MTLTextureDescriptor* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float width:width height:height mipmapped:NO];
+        descriptor.storageMode = MTLStorageModePrivate;
+        descriptor.usage = MTLTextureUsageShaderWrite;
+        id<MTLTexture> target = [renderer->device newTextureWithDescriptor:descriptor];
+        size_t stride = ((size_t)w * 8 + 255) & ~(size_t)255;
+        id<MTLBuffer> readback = [renderer->device newBufferWithLength:stride * h options:MTLResourceStorageModeShared];
+        id<MTLCommandBuffer> command = [renderer->queue commandBuffer];
+        if (!target || !readback || !command) {
+            fail(StringView(u8"cannot allocate Metal readback"));
+        }
+        whole.pushBack(Layer{this, {0.f, 0.f}, {(float)width, (float)height}});
+        renderer->tiles.compose(nullptr, whole, width, height, hdr, ++renderer->frames, command, clear);
+        renderer->encode(command, target, hdr ? OutputWideLinear : OutputLinear);
+        id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
+        [blit copyFromTexture:target sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(x0, y0, 0) sourceSize:MTLSizeMake(w, h, 1) toBuffer:readback destinationOffset:0 destinationBytesPerRow:stride destinationBytesPerImage:stride * h];
+        [blit endEncoding];
+        [command commit];
+        [command waitUntilCompleted];
+        checkCommand(command);
+        unpackPixels(readback.contents, w, h, stride, PixelLayout::Rgba16f, out);
+    }
+}
+
+id<MTLLibrary> MetalRenderer::library(NSString* source) {
+    NSError* error = nil;
+    MTLCompileOptions* options = [[MTLCompileOptions alloc] init];
+    options.languageVersion = MTLLanguageVersion3_0;
+    id<MTLLibrary> made = [device newLibraryWithSource:source options:options error:&error];
+    if (!made) {
+        fail(StringView(StringBuilder() << StringView(u8"Metal compositor: ") << StringView(error ? error.localizedDescription.UTF8String : "no library")));
+    }
+    return made;
+}
+
+id<MTLComputePipelineState> MetalRenderer::pipeline(id<MTLLibrary> from, u32 output) {
+    MTLFunctionConstantValues* constants = [[MTLFunctionConstantValues alloc] init];
+    int encoding = output == OutputSrgb ? 0 : 2;
+    bool wideOutput = output == OutputWideLinear;
+    NSError* error = nil;
+    [constants setConstantValue:&encoding type:MTLDataTypeInt atIndex:0];
+    [constants setConstantValue:&wideOutput type:MTLDataTypeBool atIndex:1];
+    id<MTLFunction> function = [from newFunctionWithName:@"compose" constantValues:constants error:&error];
+    if (!function) {
+        fail(StringView(StringBuilder() << StringView(u8"Metal compositor function: ") << StringView(error ? error.localizedDescription.UTF8String : "missing")));
+    }
+    id<MTLComputePipelineState> made = [device newComputePipelineStateWithFunction:function error:&error];
+    if (!made) {
+        fail(StringView(StringBuilder() << StringView(u8"Metal compositor pipeline: ") << StringView(error ? error.localizedDescription.UTF8String : "missing")));
+    }
+    return made;
+}
+
+id<MTLComputePipelineState> MetalShader::pipeline(u32 output) {
+    if (!pipelines[output]) {
+        pipelines[output] = renderer->pipeline(library, output);
+        if (pipelines[output].maxTotalThreadsPerThreadgroup < (NSUInteger)composeTile * composeTile) {
+            fail(StringView(u8"Metal kernel does not fit a threadgroup"));
+        }
+    }
+    return pipelines[output];
+}
+
+void MetalRenderer::encode(id<MTLCommandBuffer> command, id<MTLTexture> target, u32 output) {
+    const Tiles& t = tiles;
+    id<MTLComputeCommandEncoder> compute = [command computeCommandEncoder];
+    if (!compute) {
+        fail(StringView(u8"cannot begin the Metal compositor"));
+    }
+    const void* sources[5] = {t.headers.data(), t.list.data(), t.ops.data(), t.triangles.data(), t.tiles.data()};
+    size_t sizes[5] = {t.headers.length() * sizeof(Header), t.list.length() * sizeof(u32), t.ops.length() * sizeof(Op), t.triangles.length() * sizeof(Triangle), t.tiles.length() * sizeof(u32)};
+    for (NSUInteger i = 0; i < 5; i++) {
+        id<MTLBuffer> buffer = sizes[i] ? [device newBufferWithBytes:sources[i] length:sizes[i] options:MTLResourceStorageModeShared] : [device newBufferWithLength:16 options:MTLResourceStorageModeShared];
+        if (!buffer) {
+            fail(StringView(u8"cannot allocate the Metal compositor's buffers"));
+        }
+        [compute setBuffer:buffer offset:0 atIndex:i];
+    }
+    id<MTLBuffer> textures = [device newBufferWithLength:(t.textures.length() ? t.textures.length() : 1) * sizeof(MTLResourceID) options:MTLResourceStorageModeShared];
+    if (!textures) {
+        fail(StringView(u8"cannot allocate the Metal compositor's textures"));
+    }
+    MTLResourceID* ids = (MTLResourceID*)textures.contents;
+    for (size_t i = 0; i < t.textures.length(); i++) {
+        ids[i] = t.textures[i]->texture.gpuResourceID;
+        [compute useResource:t.textures[i]->texture usage:MTLResourceUsageRead];
+    }
+    [compute setBuffer:textures offset:0 atIndex:6];
+    [compute setTexture:target atIndex:0];
+    Push push{{(i32)target.width, (i32)target.height}, t.tilesX, 0, (u32)(frames % 4096), sdrWhiteNits, 0, 0};
+    for (u32 p = 0; p * 2 < t.programs.length(); p++) {
+        u32 count = t.programs[p * 2 + 1];
+        if (!count) {
+            continue;
+        }
+        push.first = t.programs[p * 2];
+        if (p == 0) {
+            if (!plain[output]) {
+                plain[output] = pipeline(plainLibrary, output);
+            }
+            push.layerWide = 0;
+            [compute setComputePipelineState:plain[output]];
+            [compute setBytes:&push length:sizeof(push) atIndex:5];
+            [compute dispatchThreadgroups:MTLSizeMake(count, (composeTile / composeGroup) * (composeTile / composeGroup), 1) threadsPerThreadgroup:MTLSizeMake(composeGroup, composeGroup, 1)];
+            continue;
+        }
+        MetalImage* image = t.layers[p - 1];
+        push.layerWide = image->hdr ? 1u : 0u;
+        [compute setComputePipelineState:image->shader->pipeline(output)];
+        [compute setBuffer:image->buffer offset:0 atIndex:7];
+        [compute setBytes:&push length:sizeof(push) atIndex:5];
+        [compute dispatchThreadgroups:MTLSizeMake(count, 1, 1) threadsPerThreadgroup:MTLSizeMake(composeTile, composeTile, 1)];
+    }
+    [compute endEncoding];
+}
+
+void MetalRenderer::updateTextures(ImDrawData* draw) {
+    if (!draw->Textures) {
+        return;
+    }
+    for (ImTextureData* data : *draw->Textures) {
+        if (data->Status == ImTextureStatus_WantCreate) {
+            if (data->Format != ImTextureFormat_RGBA32) {
+                fail(StringView(u8"the interface asks for a texture format the renderer does not draw"));
+            }
+            MetalTexture* texture = smallObjects->make<MetalTexture>();
+            MTLTextureDescriptor* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm_sRGB width:(NSUInteger)data->Width height:(NSUInteger)data->Height mipmapped:NO];
+            descriptor.storageMode = MTLStorageModeManaged;
+            descriptor.usage = MTLTextureUsageShaderRead;
+            texture->texture = [device newTextureWithDescriptor:descriptor];
+            if (!texture->texture) {
+                fail(StringView(u8"cannot allocate an interface texture"));
+            }
+            [texture->texture replaceRegion:MTLRegionMake2D(0, 0, (NSUInteger)data->Width, (NSUInteger)data->Height) mipmapLevel:0 withBytes:data->GetPixels() bytesPerRow:(NSUInteger)data->GetPitch()];
+            texture->opaque = opaquePixels((const u8*)data->GetPixels(), (size_t)data->GetPitch(), (u32)data->Width, (u32)data->Height);
+            data->BackendUserData = texture;
+            data->SetTexID((ImTextureID)(uintptr_t)texture);
+            data->SetStatus(ImTextureStatus_OK);
+        } else if (data->Status == ImTextureStatus_WantUpdates) {
+            MetalTexture* texture = (MetalTexture*)data->BackendUserData;
+            [texture->lastUse waitUntilCompleted];
+            for (const ImTextureRect& rect : data->Updates) {
+                [texture->texture replaceRegion:MTLRegionMake2D(rect.x, rect.y, rect.w, rect.h) mipmapLevel:0 withBytes:data->GetPixelsAt(rect.x, rect.y) bytesPerRow:(NSUInteger)data->GetPitch()];
+            }
+            if (data->Updates.empty()) {
+                const ImTextureRect& rect = data->UpdateRect;
+                [texture->texture replaceRegion:MTLRegionMake2D(rect.x, rect.y, rect.w, rect.h) mipmapLevel:0 withBytes:data->GetPixelsAt(rect.x, rect.y) bytesPerRow:(NSUInteger)data->GetPitch()];
+            }
+            texture->opaque = opaquePixels((const u8*)data->GetPixels(), (size_t)data->GetPitch(), (u32)data->Width, (u32)data->Height);
+            data->SetStatus(ImTextureStatus_OK);
+        } else if (data->Status == ImTextureStatus_WantDestroy && data->UnusedFrames >= (int)drawables) {
+            MetalTexture* texture = (MetalTexture*)data->BackendUserData;
+            [texture->lastUse waitUntilCompleted];
+            smallObjects->release(texture);
+            data->BackendUserData = nullptr;
+            data->SetTexID(ImTextureID_Invalid);
+            data->SetStatus(ImTextureStatus_Destroyed);
+        }
     }
 }
 
 RenderImage* MetalRenderer::upload(ObjPool& pool, u32 width, u32 height, const void* rgba, bool imageHdr) {
     checkImageSize(width, height, maxTextureSide());
-    if (!rgba || (imageHdr && !hdr)) {
+    if (!rgba) {
         fail(StringView(u8"invalid renderer image source"));
     }
     @autoreleasepool {
         MetalImage* image = pool.make<MetalImage>();
         image->renderer = this;
         image->hdr = imageHdr;
-        MTLTextureDescriptor* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:width height:height mipmapped:NO];
+        image->width = width;
+        image->height = height;
+        MTLTextureDescriptor* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:imageHdr ? MTLPixelFormatRGBA8Unorm : MTLPixelFormatRGBA8Unorm_sRGB width:width height:height mipmapped:NO];
         descriptor.storageMode = MTLStorageModeManaged;
         descriptor.usage = MTLTextureUsageShaderRead;
-        image->texture = [device newTextureWithDescriptor:descriptor];
-        if (!image->texture) {
+        image->texture.texture = [device newTextureWithDescriptor:descriptor];
+        if (!image->texture.texture) {
             fail(StringView(u8"cannot allocate Metal image"));
         }
-        [image->texture replaceRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0 withBytes:rgba bytesPerRow:(size_t)width * 4];
+        image->texture.flags = imageHdr ? DecodePq | SourceWide : DecodeLinear;
+        image->texture.opaque = opaquePixels((const u8*)rgba, (size_t)width * 4, width, height);
+        [image->texture.texture replaceRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0 withBytes:rgba bytesPerRow:(size_t)width * 4];
         return image;
     }
 }
 
 RenderImage* MetalRenderer::import(ObjPool& pool, SharedImage& shared, bool imageHdr) {
     SurfaceImage& source = static_cast<SurfaceImage&>(shared);
-    if (imageHdr && !hdr) {
-        fail(StringView(u8"HDR image needs an HDR renderer"));
-    }
     @autoreleasepool {
         MetalImage* image = pool.make<MetalImage>();
         image->renderer = this;
         image->hdr = imageHdr;
         image->layout = source.layout;
+        image->width = source.width;
+        image->height = source.height;
         MTLTextureDescriptor* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:source.format width:source.width height:source.height mipmapped:NO];
         descriptor.storageMode = MTLStorageModeManaged;
         descriptor.usage = MTLTextureUsageShaderRead;
-        image->texture = [device newTextureWithDescriptor:descriptor iosurface:source.surface plane:0];
-        if (!image->texture) {
+        image->texture.texture = [device newTextureWithDescriptor:descriptor iosurface:source.surface plane:0];
+        if (!image->texture.texture) {
             fail(StringView(u8"cannot import IOSurface into Metal"));
         }
+        image->texture.flags = imageHdr ? DecodePq | SourceWide : DecodeSrgb;
         return image;
     }
-}
-
-void MetalRenderer::setupHdr() {
-    NSError* error = nil;
-    id<MTLLibrary> library = [device newLibraryWithSource:[NSString stringWithUTF8String:hdrShaders] options:nil error:&error];
-    if (!library) {
-        fail(StringView(StringBuilder() << StringView(u8"Metal HDR shaders: ") << StringView(error.localizedDescription.UTF8String)));
-    }
-    MTLRenderPipelineDescriptor* descriptor = [[MTLRenderPipelineDescriptor alloc] init];
-    descriptor.vertexFunction = [library newFunctionWithName:@"uiVertex"];
-    descriptor.fragmentFunction = [library newFunctionWithName:@"uiFragment"];
-    MTLVertexDescriptor* vertex = [[MTLVertexDescriptor alloc] init];
-    vertex.attributes[0].format = MTLVertexFormatFloat2;
-    vertex.attributes[0].offset = offsetof(ImDrawVert, pos);
-    vertex.attributes[1].format = MTLVertexFormatFloat2;
-    vertex.attributes[1].offset = offsetof(ImDrawVert, uv);
-    vertex.attributes[2].format = MTLVertexFormatUChar4Normalized;
-    vertex.attributes[2].offset = offsetof(ImDrawVert, col);
-    vertex.layouts[0].stride = sizeof(ImDrawVert);
-    descriptor.vertexDescriptor = vertex;
-    MTLRenderPipelineColorAttachmentDescriptor* color = descriptor.colorAttachments[0];
-    color.pixelFormat = MTLPixelFormatRGBA16Float;
-    color.blendingEnabled = YES;
-    color.sourceRGBBlendFactor = MTLBlendFactorSourceAlpha;
-    color.destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
-    color.sourceAlphaBlendFactor = MTLBlendFactorOne;
-    color.destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
-    uiPipeline = [device newRenderPipelineStateWithDescriptor:descriptor error:&error];
-    if (!uiPipeline) {
-        fail(StringView(StringBuilder() << StringView(u8"Metal HDR UI pipeline: ") << StringView(error.localizedDescription.UTF8String)));
-    }
-    descriptor.vertexDescriptor = nil;
-    descriptor.vertexFunction = [library newFunctionWithName:@"imageVertex"];
-    descriptor.fragmentFunction = [library newFunctionWithName:@"imageFragment"];
-    color.blendingEnabled = NO;
-    imagePipeline = [device newRenderPipelineStateWithDescriptor:descriptor error:&error];
-    if (!imagePipeline) {
-        fail(StringView(StringBuilder() << StringView(u8"Metal HDR image pipeline: ") << StringView(error.localizedDescription.UTF8String)));
-    }
-}
-
-bool MetalRenderer::clip(const ImDrawCmd& command) {
-    ImVec2 offset = drawing->DisplayPos;
-    ImVec2 scale = drawing->FramebufferScale;
-    float x0 = fmaxf(0, (command.ClipRect.x - offset.x) * scale.x);
-    float y0 = fmaxf(0, (command.ClipRect.y - offset.y) * scale.y);
-    float x1 = fminf((float)drawable.texture.width, (command.ClipRect.z - offset.x) * scale.x);
-    float y1 = fminf((float)drawable.texture.height, (command.ClipRect.w - offset.y) * scale.y);
-    if (x1 <= x0 || y1 <= y0 || (NSUInteger)x1 <= (NSUInteger)x0 || (NSUInteger)y1 <= (NSUInteger)y0) {
-        return false;
-    }
-    [encoder setScissorRect:MTLScissorRect{(NSUInteger)x0, (NSUInteger)y0, (NSUInteger)x1 - (NSUInteger)x0, (NSUInteger)y1 - (NSUInteger)y0}];
-    return true;
-}
-
-void MetalRenderer::drawImage(const ImageDraw& image, const ImDrawCmd& command) {
-    if (!clip(command)) {
-        return;
-    }
-    drawShaded(image);
-}
-
-void MetalRenderer::drawUnderlays(ImDrawData& draw) {
-    if (underlays.empty()) {
-        return;
-    }
-    drawing = &draw;
-    [encoder setViewport:MTLViewport{0, 0, (double)drawable.texture.width, (double)drawable.texture.height, 0, 1}];
-    [encoder setScissorRect:MTLScissorRect{0, 0, drawable.texture.width, drawable.texture.height}];
-    for (const ImageDraw& image : underlays) {
-        drawShaded(image);
-    }
-    underlays.clear();
-    drawing = nullptr;
-}
-
-void MetalRenderer::drawShaded(const ImageDraw& image) {
-    float transform[] = {2.f / drawing->DisplaySize.x, -2.f / drawing->DisplaySize.y, -1.f - 2.f * drawing->DisplayPos.x / drawing->DisplaySize.x, 1.f + 2.f * drawing->DisplayPos.y / drawing->DisplaySize.y};
-    float rect[] = {image.lo.x, image.lo.y, image.hi.x, image.hi.y};
-    [encoder setVertexBytes:transform length:sizeof(transform) atIndex:0];
-    [encoder setVertexBytes:rect length:sizeof(rect) atIndex:1];
-    if (MetalShader* shader = image.image->shader) {
-        [encoder setRenderPipelineState:shader->pipeline];
-        [encoder setFragmentBuffer:image.image->buffer offset:0 atIndex:0];
-        [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
-        return;
-    }
-    [encoder setRenderPipelineState:imagePipeline];
-    [encoder setFragmentBytes:&sdrWhiteNits length:sizeof(sdrWhiteNits) atIndex:0];
-    [encoder setFragmentTexture:image.image->texture atIndex:0];
-    [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
-}
-
-void MetalRenderer::drawHdr(ImDrawData& draw) {
-    if (draw.Textures) {
-        for (ImTextureData* texture : *draw.Textures) {
-            if (texture->Status != ImTextureStatus_OK) {
-                ImGui_ImplMetal_UpdateTexture(texture);
-            }
-        }
-    }
-    if (draw.DisplaySize.x <= 0 || draw.DisplaySize.y <= 0) {
-        return;
-    }
-    drawing = &draw;
-    [encoder setCullMode:MTLCullModeNone];
-    [encoder setViewport:MTLViewport{0, 0, (double)drawable.texture.width, (double)drawable.texture.height, 0, 1}];
-    float transform[] = {2.f / draw.DisplaySize.x, -2.f / draw.DisplaySize.y, -1.f - 2.f * draw.DisplayPos.x / draw.DisplaySize.x, 1.f + 2.f * draw.DisplayPos.y / draw.DisplaySize.y};
-    for (const ImDrawList* list : draw.CmdLists) {
-        id<MTLBuffer> vertices = nil;
-        id<MTLBuffer> indices = nil;
-        if (list->VtxBuffer.Size && list->IdxBuffer.Size) {
-            vertices = [device newBufferWithBytes:list->VtxBuffer.Data length:(size_t)list->VtxBuffer.Size * sizeof(ImDrawVert) options:MTLResourceStorageModeShared];
-            indices = [device newBufferWithBytes:list->IdxBuffer.Data length:(size_t)list->IdxBuffer.Size * sizeof(ImDrawIdx) options:MTLResourceStorageModeShared];
-            if (!vertices || !indices) {
-                fail(StringView(u8"cannot allocate Metal HDR draw buffers"));
-            }
-        }
-        for (const ImDrawCmd& command : list->CmdBuffer) {
-            if (command.UserCallback) {
-                if (command.UserCallback != ImDrawCallback_ResetRenderState) {
-                    command.UserCallback(list, &command);
-                }
-                continue;
-            }
-            if (!command.ElemCount || !clip(command)) {
-                continue;
-            }
-            [encoder setRenderPipelineState:uiPipeline];
-            [encoder setVertexBuffer:vertices offset:command.VtxOffset * sizeof(ImDrawVert) atIndex:0];
-            [encoder setVertexBytes:transform length:sizeof(transform) atIndex:1];
-            [encoder setFragmentTexture:(__bridge id<MTLTexture>)(void*)(uintptr_t)command.GetTexID() atIndex:0];
-            [encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:command.ElemCount indexType:sizeof(ImDrawIdx) == 2 ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32 indexBuffer:indices indexBufferOffset:command.IdxOffset * sizeof(ImDrawIdx)];
-        }
-    }
-    drawing = nullptr;
 }
 
 @implementation ImMetalDisplayTarget
@@ -583,18 +1455,37 @@ bool MetalRenderer::beginFrame(u32 width, u32 height) {
             displayLink.paused = NO;
             return false;
         }
-        pass = [MTLRenderPassDescriptor renderPassDescriptor];
-        pass.colorAttachments[0].texture = drawable.texture;
-        pass.colorAttachments[0].loadAction = MTLLoadActionClear;
-        pass.colorAttachments[0].storeAction = MTLStoreActionStore;
-        pass.colorAttachments[0].clearColor = MTLClearColorMake(0.1, 0.1, 0.1, 1.0);
-        ImGui_ImplMetal_NewFrame(pass);
         return true;
     }
 }
 
+void MetalRenderer::setMode(bool want) {
+    CGColorSpaceRef color = CGColorSpaceCreateWithName(want ? kCGColorSpaceExtendedLinearITUR_2020 : kCGColorSpaceSRGB);
+    if (!color) {
+        fail(StringView(u8"cannot create Metal color space"));
+    }
+    layer.pixelFormat = want ? MTLPixelFormatRGBA16Float : MTLPixelFormatBGRA8Unorm;
+    layer.colorspace = color;
+    layer.wantsExtendedDynamicRangeContent = want;
+    CGColorSpaceRelease(color);
+    wide = want;
+}
+
 bool MetalRenderer::endFrame(ImDrawData* draw) {
     @autoreleasepool {
+        bool want = false;
+        updateTextures(draw);
+        for (const MetalImage* image : drawn) {
+            want = want || image->hdr;
+        }
+        want = want && edr;
+        if (want != wide) {
+            setMode(want);
+            drawable = [layer nextDrawable];
+            if (!drawable) {
+                fail(StringView(u8"Metal gives no drawable in the frame's new mode"));
+            }
+        }
         id<MTLCommandBuffer> command = [queue commandBuffer];
         if (!command) {
             fail(StringView(u8"cannot begin Metal command buffer"));
@@ -607,7 +1498,7 @@ bool MetalRenderer::endFrame(ImDrawData* draw) {
                 if (!blit) {
                     fail(StringView(u8"cannot begin Metal image upload"));
                 }
-                [blit copyFromBuffer:image->buffer sourceOffset:0 sourceBytesPerRow:image->bufferStride sourceBytesPerImage:image->bufferStride * image->texture.height sourceSize:MTLSizeMake(image->texture.width, image->texture.height, 1) toTexture:image->texture destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+                [blit copyFromBuffer:image->buffer sourceOffset:0 sourceBytesPerRow:image->bufferStride sourceBytesPerImage:image->bufferStride * image->height sourceSize:MTLSizeMake(image->width, image->height, 1) toTexture:image->texture.texture destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
                 [blit endEncoding];
                 image->dirty = false;
             }
@@ -615,21 +1506,10 @@ bool MetalRenderer::endFrame(ImDrawData* draw) {
         }
         Flight* flight = smallObjects->make<Flight>(drawn);
         drawn.clear();
-        runKernels(command);
-        encoder = [command renderCommandEncoderWithDescriptor:pass];
-        if (!encoder) {
-            fail(StringView(u8"cannot begin Metal frame"));
-        }
-        drawUnderlays(*draw);
-        if (hdr) {
-            drawHdr(*draw);
-        } else {
-            drawing = draw;
-            ImGui_ImplMetal_RenderDrawData(draw, command, encoder);
-            drawing = nullptr;
-        }
-        [encoder endEncoding];
-        encoder = nil;
+        const float clear[4] = {srgbTable[25], srgbTable[25], srgbTable[25], 1.f};
+        tiles.compose(draw, underlays, (u32)drawable.texture.width, (u32)drawable.texture.height, wide, ++frames, command, clear);
+        underlays.clear();
+        encode(command, drawable.texture, wide ? OutputWideLinear : OutputSrgb);
         Channel* done = landed;
         plt::LoopWake* completed = wake;
         [command addCompletedHandler:^(id<MTLCommandBuffer>) {
@@ -640,36 +1520,8 @@ bool MetalRenderer::endFrame(ImDrawData* draw) {
         [command commit];
         last = command;
         drawable = nil;
-        pass = nil;
     }
     return true;
-}
-
-void MetalRenderer::runKernels(id<MTLCommandBuffer> command) {
-    if (kernelDraws.empty()) {
-        return;
-    }
-    id<MTLRenderCommandEncoder> clear = [command renderCommandEncoderWithDescriptor:pass];
-    if (!clear) {
-        fail(StringView(u8"cannot clear the Metal frame"));
-    }
-    [clear endEncoding];
-    id<MTLComputeCommandEncoder> compute = [command computeCommandEncoder];
-    if (!compute) {
-        fail(StringView(u8"cannot begin Metal kernels"));
-    }
-    for (const ImageDraw& kernel : kernelDraws) {
-        MetalShader& shader = *kernel.image->shader;
-        NSUInteger width = (NSUInteger)(kernel.hi.x - kernel.lo.x);
-        NSUInteger height = (NSUInteger)(kernel.hi.y - kernel.lo.y);
-        [compute setComputePipelineState:shader.kernel];
-        [compute setBuffer:kernel.image->buffer offset:0 atIndex:0];
-        [compute setTexture:drawable.texture atIndex:0];
-        [compute dispatchThreadgroups:MTLSizeMake((width + shader.tile - 1) / shader.tile, (height + shader.tile - 1) / shader.tile, 1) threadsPerThreadgroup:MTLSizeMake(shader.tile, shader.tile, 1)];
-    }
-    [compute endEncoding];
-    kernelDraws.clear();
-    pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
 }
 
 RenderImage* MetalRenderer::bind(ObjPool& pool, u32 width, u32 height, const void* data, size_t size, size_t stride, Runable& retired) {
@@ -683,6 +1535,8 @@ RenderImage* MetalRenderer::bind(ObjPool& pool, u32 width, u32 height, const voi
         image->source = data;
         image->sourceStride = stride;
         image->retired = &retired;
+        image->width = width;
+        image->height = height;
         size_t page = (size_t)getpagesize();
         if ((uintptr_t)data % page == 0 && size % page == 0 && stride % 256 == 0) {
             image->buffer = [device newBufferWithBytesNoCopy:const_cast<void*>(data) length:size options:MTLResourceStorageModeShared deallocator:nil];
@@ -692,82 +1546,42 @@ RenderImage* MetalRenderer::bind(ObjPool& pool, u32 width, u32 height, const voi
         if (!image->hostImported) {
             image->buffer = [device newBufferWithLength:image->bufferStride * height options:MTLResourceStorageModeShared];
         }
-        MTLTextureDescriptor* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:width height:height mipmapped:NO];
+        MTLTextureDescriptor* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm_sRGB width:width height:height mipmapped:NO];
         descriptor.storageMode = MTLStorageModePrivate;
         descriptor.usage = MTLTextureUsageShaderRead;
-        image->texture = [device newTextureWithDescriptor:descriptor];
-        if (!image->buffer || !image->texture) {
+        image->texture.texture = [device newTextureWithDescriptor:descriptor];
+        if (!image->buffer || !image->texture.texture) {
             fail(StringView(u8"cannot allocate bound Metal image"));
         }
         return image;
     }
 }
 
-id<MTLRenderPipelineState> MetalRenderer::shadePipeline(MetalShader& shader, MTLPixelFormat format) {
-    NSError* error = nil;
-    if (!shadeLibrary) {
-        shadeLibrary = [device newLibraryWithSource:[NSString stringWithUTF8String:shadeShaders] options:nil error:&error];
-        if (!shadeLibrary) {
-            fail(StringView(StringBuilder() << StringView(u8"Metal shade vertex: ") << StringView(error.localizedDescription.UTF8String)));
-        }
-    }
-    MTLRenderPipelineDescriptor* descriptor = [[MTLRenderPipelineDescriptor alloc] init];
-    descriptor.vertexFunction = [shadeLibrary newFunctionWithName:@"shadeVertex"];
-    descriptor.fragmentFunction = shader.fragment;
-    descriptor.colorAttachments[0].pixelFormat = format;
-    id<MTLRenderPipelineState> pipeline = [device newRenderPipelineStateWithDescriptor:descriptor error:&error];
-    if (!pipeline) {
-        fail(StringView(StringBuilder() << StringView(u8"Metal shade pipeline: ") << StringView(error.localizedDescription.UTF8String)));
-    }
-    return pipeline;
-}
-
-id<MTLFunction> MetalRenderer::mainFunction(const void* code, size_t size) {
+RenderShader* MetalRenderer::compileShader(ObjPool& pool, const void* code, size_t size) {
     if (!code || !size) {
         fail(StringView(u8"invalid shader code"));
     }
-    NSString* source = [[NSString alloc] initWithBytes:code length:size encoding:NSUTF8StringEncoding];
-    NSError* error = nil;
-    id<MTLLibrary> library = source ? [device newLibraryWithSource:source options:nil error:&error] : nil;
-    if (!library) {
-        fail(StringView(StringBuilder() << StringView(u8"Metal shader: ") << StringView(error ? error.localizedDescription.UTF8String : "not UTF-8")));
-    }
-    id<MTLFunction> function = [library newFunctionWithName:@"main0"];
-    if (!function) {
-        fail(StringView(u8"Metal shader has no main0"));
-    }
-    return function;
-}
-
-RenderShader* MetalRenderer::compileShader(ObjPool& pool, const void* code, size_t size) {
     @autoreleasepool {
+        NSString* layerSource = [[NSString alloc] initWithBytes:code length:size encoding:NSUTF8StringEncoding];
+        if (!layerSource) {
+            fail(StringView(u8"Metal shader: not UTF-8"));
+        }
         MetalShader* shader = pool.make<MetalShader>();
-        shader->fragment = mainFunction(code, size);
-        shader->pipeline = shadePipeline(*shader, hdr ? MTLPixelFormatRGBA16Float : layer.pixelFormat);
+        shader->renderer = this;
+        shader->library = library([NSString stringWithFormat:@"#define GROUP %u\n#define LAYER 1\n%@\n%s", composeTile, layerSource, composeSource]);
+        shader->pipeline(wide ? OutputWideLinear : OutputSrgb);
         return shader;
     }
 }
 
 RenderShader* MetalRenderer::compileKernel(ObjPool& pool, const void* code, size_t size, u32 tile) {
-    if (!tile) {
-        fail(StringView(u8"invalid kernel code"));
+    if (tile != composeTile) {
+        fail(StringView(u8"a kernel is not made for the compositor's tile"));
     }
-    @autoreleasepool {
-        NSError* error = nil;
-        MetalShader* shader = pool.make<MetalShader>();
-        shader->tile = tile;
-        shader->kernel = [device newComputePipelineStateWithFunction:mainFunction(code, size) error:&error];
-        if (!shader->kernel) {
-            fail(StringView(StringBuilder() << StringView(u8"Metal kernel pipeline: ") << StringView(error.localizedDescription.UTF8String)));
-        }
-        if (shader->kernel.maxTotalThreadsPerThreadgroup < (NSUInteger)tile * tile) {
-            fail(StringView(u8"Metal kernel does not fit a threadgroup"));
-        }
-        return shader;
-    }
+    return compileShader(pool, code, size);
 }
 
-RenderImage* MetalRenderer::shade(ObjPool& pool, RenderShader& shader, u32 width, u32 height, const void* data, size_t size, Runable& retired) {
+RenderImage* MetalRenderer::shade(ObjPool& pool, RenderShader& shader, u32 width, u32 height, const void* data, size_t size, bool imageHdr, Runable& retired) {
     checkImageSize(width, height, maxTextureSide());
     if (!data || !size || size % 4) {
         fail(StringView(u8"invalid shaded image source"));
@@ -776,6 +1590,7 @@ RenderImage* MetalRenderer::shade(ObjPool& pool, RenderShader& shader, u32 width
         MetalImage* image = pool.make<MetalImage>();
         image->renderer = this;
         image->layout = PixelLayout::Rgba16f;
+        image->hdr = imageHdr;
         image->width = width;
         image->height = height;
         image->source = data;
@@ -794,82 +1609,6 @@ RenderImage* MetalRenderer::shade(ObjPool& pool, RenderShader& shader, u32 width
             fail(StringView(u8"cannot allocate shaded Metal image"));
         }
         return image;
-    }
-}
-
-void MetalImage::readShaded(int x0, int y0, int x1, int y1, ImagePixels& out) {
-    if (shader->tile) {
-        readKernel(x0, y0, x1, y1, out);
-        return;
-    }
-    @autoreleasepool {
-        u32 w = (u32)(x1 - x0);
-        u32 h = (u32)(y1 - y0);
-        if (!shader->readPipeline) {
-            shader->readPipeline = renderer->shadePipeline(*shader, MTLPixelFormatRGBA16Float);
-        }
-        MTLTextureDescriptor* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float width:w height:h mipmapped:NO];
-        descriptor.storageMode = MTLStorageModePrivate;
-        descriptor.usage = MTLTextureUsageRenderTarget;
-        id<MTLTexture> target = [renderer->device newTextureWithDescriptor:descriptor];
-        size_t stride = ((size_t)w * 8 + 255) & ~(size_t)255;
-        id<MTLBuffer> readback = [renderer->device newBufferWithLength:stride * h options:MTLResourceStorageModeShared];
-        id<MTLCommandBuffer> command = [renderer->queue commandBuffer];
-        if (!target || !readback || !command) {
-            fail(StringView(u8"cannot allocate Metal readback"));
-        }
-        MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
-        pass.colorAttachments[0].texture = target;
-        pass.colorAttachments[0].loadAction = MTLLoadActionClear;
-        pass.colorAttachments[0].storeAction = MTLStoreActionStore;
-        id<MTLRenderCommandEncoder> encoder = [command renderCommandEncoderWithDescriptor:pass];
-        float transform[] = {2.f / (float)w, -2.f / (float)h, -1.f - 2.f * (float)x0 / (float)w, 1.f + 2.f * (float)y0 / (float)h};
-        float rect[] = {0.f, 0.f, (float)width, (float)height};
-        [encoder setRenderPipelineState:shader->readPipeline];
-        [encoder setViewport:MTLViewport{0, 0, (double)w, (double)h, 0, 1}];
-        [encoder setVertexBytes:transform length:sizeof(transform) atIndex:0];
-        [encoder setVertexBytes:rect length:sizeof(rect) atIndex:1];
-        [encoder setFragmentBuffer:buffer offset:0 atIndex:0];
-        [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
-        [encoder endEncoding];
-        id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
-        [blit copyFromTexture:target sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(w, h, 1) toBuffer:readback destinationOffset:0 destinationBytesPerRow:stride destinationBytesPerImage:stride * h];
-        [blit endEncoding];
-        [command commit];
-        [command waitUntilCompleted];
-        checkCommand(command);
-        unpackPixels(readback.contents, w, h, stride, PixelLayout::Rgba16f, out);
-    }
-}
-
-void MetalImage::readKernel(int x0, int y0, int x1, int y1, ImagePixels& out) {
-    @autoreleasepool {
-        u32 w = (u32)(x1 - x0);
-        u32 h = (u32)(y1 - y0);
-        u32 tile = shader->tile;
-        MTLTextureDescriptor* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float width:width height:height mipmapped:NO];
-        descriptor.storageMode = MTLStorageModePrivate;
-        descriptor.usage = MTLTextureUsageShaderWrite;
-        id<MTLTexture> target = [renderer->device newTextureWithDescriptor:descriptor];
-        size_t stride = ((size_t)w * 8 + 255) & ~(size_t)255;
-        id<MTLBuffer> readback = [renderer->device newBufferWithLength:stride * h options:MTLResourceStorageModeShared];
-        id<MTLCommandBuffer> command = [renderer->queue commandBuffer];
-        if (!target || !readback || !command) {
-            fail(StringView(u8"cannot allocate Metal readback"));
-        }
-        id<MTLComputeCommandEncoder> compute = [command computeCommandEncoder];
-        [compute setComputePipelineState:shader->kernel];
-        [compute setBuffer:buffer offset:0 atIndex:0];
-        [compute setTexture:target atIndex:0];
-        [compute dispatchThreadgroups:MTLSizeMake((width + tile - 1) / tile, (height + tile - 1) / tile, 1) threadsPerThreadgroup:MTLSizeMake(tile, tile, 1)];
-        [compute endEncoding];
-        id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
-        [blit copyFromTexture:target sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(x0, y0, 0) sourceSize:MTLSizeMake(w, h, 1) toBuffer:readback destinationOffset:0 destinationBytesPerRow:stride destinationBytesPerImage:stride * h];
-        [blit endEncoding];
-        [command commit];
-        [command waitUntilCompleted];
-        checkCommand(command);
-        unpackPixels(readback.contents, w, h, stride, PixelLayout::Rgba16f, out);
     }
 }
 
@@ -896,7 +1635,6 @@ Renderer* createMetalRenderer(ObjPool& pool, plt::Platform& platform, plt::Windo
     renderer->layer = (__bridge CAMetalLayer*)context.connection;
     renderer->window = (__bridge NSWindow*)context.window;
     renderer->device = MTLCreateSystemDefaultDevice();
-    renderer->hdr = options.hdr;
     renderer->sdrWhiteNits = options.sdrWhiteNits;
     if (renderer->device == nil) {
         fail(StringView(u8"no metal device"));
@@ -905,13 +1643,20 @@ Renderer* createMetalRenderer(ObjPool& pool, plt::Platform& platform, plt::Windo
     if (!renderer->queue) {
         fail(StringView(u8"cannot create Metal queue"));
     }
+    for (u32 i = 0; i < 256; i++) {
+        double c = i / 255.;
+        srgbTable[i] = (float)(c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4));
+    }
+    NSScreen* screen = renderer->window.screen ? renderer->window.screen : NSScreen.mainScreen;
+    renderer->edr = screen.maximumPotentialExtendedDynamicRangeColorComponentValue > 1.0;
     CAMetalLayer* layer = renderer->layer;
     layer.device = renderer->device;
-    layer.pixelFormat = options.hdr ? MTLPixelFormatRGBA16Float : MTLPixelFormatBGRA8Unorm;
     layer.framebufferOnly = NO;
     layer.maximumDrawableCount = drawables;
     layer.presentsWithTransaction = NO;
-    layer.wantsExtendedDynamicRangeContent = options.hdr;
+    renderer->setMode(false);
+    renderer->plainLibrary = renderer->library([NSString stringWithFormat:@"#define GROUP %u\n%s", composeGroup, composeSource]);
+    renderer->plain[OutputSrgb] = renderer->pipeline(renderer->plainLibrary, OutputSrgb);
     renderer->wake = platform.createLoopWake(pool, *pool.make<PollMetal>(renderer));
     renderer->smallObjects = SmallObjAllocator::create(&pool);
     renderer->landed = Channel::create(&pool, 64);
@@ -924,24 +1669,26 @@ Renderer* createMetalRenderer(ObjPool& pool, plt::Platform& platform, plt::Windo
     pooledGuard(pool, [renderer] {
         [renderer->displayLink invalidate];
     });
-    CGColorSpaceRef color = CGColorSpaceCreateWithName(options.hdr ? kCGColorSpaceExtendedLinearITUR_2020 : kCGColorSpaceSRGB);
-    if (!color) {
-        fail(StringView(u8"cannot create Metal color space"));
-    }
-    layer.colorspace = color;
-    CGColorSpaceRelease(color);
-    if (options.hdr) {
-        renderer->setupHdr();
-    }
-    if (!ImGui_ImplMetal_Init(renderer->device)) {
-        fail(StringView(u8"cannot initialize Metal ImGui backend"));
-    }
-    pooledGuard(pool, [renderer] {
-        [renderer->last waitUntilCompleted];
-        ImGui_ImplMetal_Shutdown();
-    });
+    ImGuiIO& io = ImGui::GetIO();
     ImGuiPlatformIO& pio = ImGui::GetPlatformIO();
+    io.BackendRendererName = "im_compose";
+    io.BackendFlags |= ImGuiBackendFlags_RendererHasVtxOffset | ImGuiBackendFlags_RendererHasTextures;
     pio.Renderer_TextureMaxWidth = (int)maxTextureSize;
     pio.Renderer_TextureMaxHeight = (int)maxTextureSize;
+    pooledGuard(pool, [renderer] {
+        [renderer->last waitUntilCompleted];
+        for (ImTextureData* data : ImGui::GetPlatformIO().Textures) {
+            MetalTexture* texture = (MetalTexture*)data->BackendUserData;
+            if (texture) {
+                renderer->smallObjects->release(texture);
+                data->BackendUserData = nullptr;
+                data->SetTexID(ImTextureID_Invalid);
+                data->SetStatus(ImTextureStatus_Destroyed);
+            }
+        }
+        ImGuiIO& shut = ImGui::GetIO();
+        shut.BackendRendererName = nullptr;
+        shut.BackendFlags &= ~(ImGuiBackendFlags_RendererHasVtxOffset | ImGuiBackendFlags_RendererHasTextures);
+    });
     return renderer;
 }

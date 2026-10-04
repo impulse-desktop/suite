@@ -9,7 +9,7 @@ namespace stl {
 
 struct VideoLayout;
 
-constexpr u32 kernelTile = 16;
+constexpr u32 kernelTile = 24;
 
 struct VideoShader {
     const VideoLayout* layout;
@@ -26,6 +26,7 @@ struct VideoShader {
     u32 dither;
     u32 phase;
     u32 origin[2];
+    u32 tile;
     double chroma[4];
     double decode[3][3];
     double bias[4];

@@ -246,7 +246,7 @@ def facts(case, layout, components, offsets, lines):
     red = case["format"][6:].index("r") if model == "bayer" else 0
     system = matrix["system"] if yuv else model
     W, H = case["source"]
-    words = [*offsets, *lines, W, H, -(-W >> sx), -(-H >> sy), *case["target"], case["dither"], case["phase"], 0, 0]
+    words = [*offsets, *lines, W, H, -(-W >> sx), -(-H >> sy), *case["target"], case["dither"], case["phase"], *case.get("origin", (0, 0)), case.get("tile", 16)]
     numbers = [2.0**-sx, 2.0**-sy, site[0] * ((1 << sx) - 1) * 2.0**-sx, site[1] * ((1 << sy) - 1) * 2.0**-sy]
     numbers += [value for row in decode for value in row] + bias + [red % 2, red // 2, kr, kb]
     numbers += curve + table(transfer.get("oetf")) + table(transfer.get("inverse"))

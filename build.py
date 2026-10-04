@@ -87,24 +87,22 @@ media = [pkg_config(name) for name in ("libavformat", "libavcodec", "libavutil",
 warning_flags = ["-Wall", "-Wextra", "-Werror", "-Wno-missing-field-initializers"]
 
 
-# shaders are named after the .cpp that creates their pipeline;
-# fullscreen.vert is the shared fullscreen-triangle vertex stage
+# the compositor of every frame, gpu/compose.comp: compose is its own tile
+# program in 8x8 groups; compose_layer is the host a video layer that
+# compile() makes is merged into, one 24x24 group a tile, its layer() empty
 shader_rules = []
-for shader, stage in [] if darwin else [
-    ("fullscreen", "vert"),
-    ("gpu_scene", "frag"),
-    ("gpu_image", "vert"),
-    ("gpu_image", "frag"),
-    ("gpu_output", "frag"),
+for shader, defines in [] if darwin else [
+    ("compose", []),
+    ("compose_layer", ["-DGROUP=24", "-DLAYER"]),
 ]:
     shader_rules.append(command(
-        name=f"shader_{shader}_{stage}",
-        inputs=[f"$(S)/gpu/{shader}.{stage}"],
-        outputs=[f"$(B)/shaders/{shader}_{stage}.spv.h"],
+        name=f"shader_{shader}",
+        inputs=["$(S)/gpu/compose.comp"],
+        outputs=[f"$(B)/shaders/{shader}_comp.spv.h"],
         descr='SH',
         cmd=[
-            "glslangValidator", "-V", f"$(S)/gpu/{shader}.{stage}",
-            "--variable-name", f"{shader}_{stage}_spv", "-o", f"$(B)/shaders/{shader}_{stage}.spv.h",
+            "glslangValidator", "--target-env", "vulkan1.1", "-V", *defines, "$(S)/gpu/compose.comp",
+            "--variable-name", f"{shader}_comp_spv", "-o", f"$(B)/shaders/{shader}_comp.spv.h",
         ],
     ))
 
@@ -121,13 +119,12 @@ video_codes = command(
 )
 
 
-# ImGui's core and the platform's renderer backend: Vulkan's, or Metal's,
-# under ARC as upstream builds it
+# ImGui's core; the compositors of renderer_vulkan.cpp and renderer_metal.mm
+# draw what it lists, so neither of its renderer backends is built
 imgui_core = [path for path in build.glob("$(S)/ext/imgui/*.cpp") if not path.endswith("imgui_impl_vulkan.cpp")]
 imgui = library(
     name="imgui",
-    srcs=[*imgui_core, "$(S)/ext/imgui/imgui_impl_metal.mm"] if darwin else [*imgui_core, "$(S)/ext/imgui/imgui_impl_vulkan.cpp"],
-    cflags=["-fobjc-arc"] if darwin else [],
+    srcs=imgui_core,
     deps=platform_deps,
 )
 
@@ -275,6 +272,15 @@ video_shader = program(
     srcs=["$(S)/dev/video_bench/emit.cpp", "$(S)/shader.cpp", "$(S)/error.cpp"],
     cflags=warning_flags,
     deps=[video_codes, libstd],
+)
+
+# dev/compositor dumps headless ImGui frames for the compositor bench
+compositor_dump = program(
+    name="compositor_dump",
+    output="$(B)/dev/compositor_dump",
+    srcs=["$(S)/dev/compositor/dump.cpp", "$(S)/error.cpp"],
+    cflags=warning_flags,
+    deps=[imgui, libstd],
 )
 
 imgui_frames_test = program(

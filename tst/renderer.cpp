@@ -190,11 +190,10 @@ int main(int argc, char** argv) {
         if (argc > 2 || (argc == 2 && StringView(argv[1]) != StringView(u8"--hdr"))) {
             fail(StringView(u8"usage: renderer_test [--pixels|--hdr]"));
         }
-        UiOptions options{64_d, 64_d};
-        options.renderer.hdr = argc > 1;
-        Ui& ui = *Ui::create(*pool, StringView(u8"renderer-test"), options);
+        bool hdr = argc > 1;
+        Ui& ui = *Ui::create(*pool, StringView(u8"renderer-test"), {64_d, 64_d});
         auto body = makeRunable([&] {
-            checkRenderer(*pool, ui, options.renderer.hdr);
+            checkRenderer(*pool, ui, hdr);
         });
         result = ui.run(body);
     } catch (...) {

@@ -1,4 +1,4 @@
-"""The renderer contract with PQ images and a linear HDR scene."""
+"""The renderer contract with PQ images, which make their frames HDR."""
 import os
 from pathlib import Path
 from session import Session
