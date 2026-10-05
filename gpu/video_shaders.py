@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 
-"""Renders the tables the player matches frames against and compiles its
-video shaders from: the storage layouts and the codes of H.273 in
-tables.py.
+"""Renders the tables the player matches frames against and shader.cpp
+compiles its video shaders from: the storage layouts and the codes of
+H.273 in tables.py.
 
   video_shaders.py codes HEADER
 """
@@ -64,7 +64,7 @@ def to_xyz(primaries):
 def tables():
     import tables as source
 
-    names = ("layouts", "systems", "shapes", "chains", "matrices", "transfers", "primaries", "outputs", "ranges", "locations")
+    names = ("layouts", "matrices", "transfers", "primaries", "outputs", "ranges", "locations")
     return SimpleNamespace(**{name: getattr(source, name.upper()) for name in names})
 
 

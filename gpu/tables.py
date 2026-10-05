@@ -6,19 +6,8 @@ exactly so ("endians" makes one entry of a little- and big-endian pair,
 the names without their suffix); "fields" names narrower formats stored
 in the same words, with their own shift and depth. The rest are the codes
 of H.273: matrices, transfers (each curve a power segment and a linear
-one, or a single power), primaries, chroma locations, and the chains a
-color system goes through to an output.
+one, or a single power), primaries and chroma locations.
 """
-
-SYSTEMS = {"yuv": ["linear", "cl", "ictcp"]}
-SHAPES = {"ictcp": ["pq", "hlg"]}
-CHAINS = {
-    "curve": [["same", "sdr"], ["same", "hdr"], ["convert", "sdr"], ["convert", "hdr"]],
-    "identity": [["same", "sdr"], ["same", "hdr"]],
-    "log": [["convert", "sdr"], ["convert", "hdr"]],
-    "pq": [["convert", "sdr"], ["same", "hdr"], ["convert", "hdr"]],
-    "hlg": [["convert", "sdr"], ["same", "hdr"], ["convert", "hdr"]],
-}
 
 MATRICES = {
     0: {"system": "linear", "toSignal": [[0, 0, 1], [1, 0, 0], [0, 1, 0]]},
