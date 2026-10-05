@@ -66,6 +66,7 @@ struct Ui {
     virtual ImTextureRef loadTexture(u32 width, u32 height, const void* rgba) = 0;
     virtual void releaseTexture(ImTextureRef texture) = 0;
     virtual u32 maxTextureSide() = 0;
+    virtual float refreshRate() = 0;
 
     virtual bool drawErrorPanel(stl::StringView message) = 0;
 

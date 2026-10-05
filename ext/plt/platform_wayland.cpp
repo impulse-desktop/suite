@@ -426,6 +426,7 @@ namespace {
         u32 outputName = 0;
         u32 outputWidth = 0;
         u32 outputHeight = 0;
+        u32 outputRefresh = 0;
         i32 outputScale = 1;
         Offer pendingClipboardOffer;
         Offer clipboardOffer;
@@ -995,11 +996,12 @@ namespace {
         .name = [](void*, struct wl_seat*, const char*) {},
     };
 
-    void outputMode(void* data, struct wl_output*, u32 flags, i32 width, i32 height, i32) {
+    void outputMode(void* data, struct wl_output*, u32 flags, i32 width, i32 height, i32 refresh) {
         PlatformImpl& platform = *(PlatformImpl*)(data);
         if (flags & WL_OUTPUT_MODE_CURRENT) {
             platform.outputWidth = width > 0 ? (u32)(width) : 0;
             platform.outputHeight = height > 0 ? (u32)(height) : 0;
+            platform.outputRefresh = refresh > 0 ? (u32)(refresh) : 0;
         }
     }
 
@@ -1618,6 +1620,7 @@ void PlatformImpl::globalRemoved(u32 name) {
         outputName = 0;
         outputWidth = 0;
         outputHeight = 0;
+        outputRefresh = 0;
         outputScale = 1;
         return;
     }
@@ -2878,6 +2881,7 @@ WindowInfo WindowImpl::info() const {
         .screenPixelWidth = platform.outputWidth,
         .screenPixelHeight = platform.outputHeight,
         .contentScale = (float)(scaleNumerator) / scaleDenominator,
+        .refreshRate = (float)(platform.outputRefresh) / 1000.0f,
         .focused = focused,
         .maximized = maximized,
         .fullscreen = fullscreen,

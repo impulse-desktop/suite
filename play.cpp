@@ -90,6 +90,30 @@ namespace {
         return message->messageKind() == T::kind ? static_cast<T*>(message) : nullptr;
     }
 
+    static void appendFixed(StringBuilder& out, double value, int decimals) {
+        i64 scale = 1;
+
+        for (int i = 0; i < decimals; i++) {
+            scale *= 10;
+        }
+
+        i64 units = (i64)llround(fabs(value) * (double)scale);
+
+        if (value < 0. && units) {
+            out << StringView(u8"-");
+        }
+
+        out << units / scale;
+
+        if (decimals) {
+            out << StringView(u8".");
+
+            for (i64 digit = scale / 10; digit > 0; digit /= 10) {
+                out << units % scale / digit % 10;
+            }
+        }
+    }
+
     struct Player;
 
     struct VideoImage final: public Runable {
@@ -296,6 +320,18 @@ namespace {
         bool clockRunning = false;
         bool clockLocked = false;
         i64 drawnSecond = -1;
+        bool blending = true;
+        bool describedVideo = false;
+        bool describedDisplay = false;
+        u64 statsAt = 0;
+        u32 statsDraws = 0;
+        u32 statsMixed = 0;
+        u32 statsShown = 0;
+        u32 statsDropped = 0;
+        u32 statsListed = 0;
+        double statsLow = 1.;
+        double statsHigh = 0.;
+        StringBuilder statsWeights;
         bool scrubbing = false;
         float scrub = 0.f;
         bool fullscreen = false;
@@ -328,6 +364,8 @@ namespace {
         void setClock(double base, bool running, u64 at);
         void keys();
         void draw();
+        void describeVideo(const Frame& frame);
+        void noteDraw(double weight, ImVec2 drawn);
     };
 
     struct CallScreen final: public plt::TimerCallback {
@@ -1648,6 +1686,7 @@ u64 Screen::present() {
             if (!waiting.empty() && waiting[0]->pts <= at) {
                 release(frame->image);
                 discard(frame);
+                statsDropped++;
             } else {
                 show(frame);
             }
@@ -1714,6 +1753,15 @@ void Screen::show(Frame* frame) {
 
     if (!frame->image->render && !frame->textured) {
         makeRender(frame->image);
+    }
+
+    if (frame->textured) {
+        statsShown++;
+
+        if (!describedVideo) {
+            describedVideo = true;
+            describeVideo(*frame);
+        }
     }
 
     player->ui->trace(StringView(StringBuilder() << StringView(u8"show generation=") << (i64)frame->generation << StringView(u8" position_ms=") << milliseconds(frame->pts)));
@@ -1966,6 +2014,104 @@ void Screen::setClock(double base, bool running, u64 at) {
     clockLocked = false;
 }
 
+void Screen::describeVideo(const Frame& frame) {
+    const Stream& stream = player->video->stream;
+    const AVStream* video = stream.format->streams[stream.index];
+    const AVFrame* source = frame.image->frame;
+    AVRational rate = video->avg_frame_rate.num ? video->avg_frame_rate : video->r_frame_rate;
+    double fps = rate.den ? av_q2d(rate) : 0.;
+    auto named = [](const char* name) {
+        return StringView(name ? name : "unknown");
+    };
+    StringBuilder text;
+
+    text << StringView(u8"im play: video ") << named(stream.codec->codec->name) << StringView(u8" ") << (i64)source->width << StringView(u8"x") << (i64)source->height << StringView(u8" ") << named(av_get_pix_fmt_name((AVPixelFormat)source->format)) << StringView(u8", ");
+    appendFixed(text, fps, 3);
+    text << StringView(u8" fps (a frame every ");
+    appendFixed(text, fps > 0. ? 1000. / fps : 0., 3);
+    text << StringView(u8" ms), time base ") << (i64)video->time_base.num << StringView(u8"/") << (i64)video->time_base.den << StringView(u8", ");
+    text << named(av_color_space_name(source->colorspace)) << StringView(u8"/") << named(av_color_transfer_name(source->color_trc)) << StringView(u8"/") << named(av_color_primaries_name(source->color_primaries)) << StringView(u8" ") << named(av_color_range_name(source->color_range));
+    text << StringView(u8"; blended as ") << (i64)frame.width << StringView(u8"x") << (i64)frame.height << StringView(u8" RGBA, no tone mapping");
+    sysE << StringView(text) << endL;
+}
+
+void Screen::noteDraw(double weight, ImVec2 drawn) {
+    u64 now = monotonicNowUs();
+
+    if (!clockRunning) {
+        statsAt = 0;
+
+        return;
+    }
+
+    if (!statsAt) {
+        statsAt = now;
+        statsDraws = 0;
+        statsMixed = 0;
+        statsShown = 0;
+        statsDropped = 0;
+        statsListed = 0;
+        statsLow = 1.;
+        statsHigh = 0.;
+        statsWeights.reset();
+
+        return;
+    }
+
+    statsDraws++;
+
+    if (weight >= 0.) {
+        if (statsListed < 20) {
+            statsWeights << StringView(u8" ");
+            appendFixed(statsWeights, weight, 2);
+            statsListed++;
+        }
+
+        if (blending && weight > 0. && weight < 1.) {
+            statsMixed++;
+            statsLow = fmin(statsLow, weight);
+            statsHigh = fmax(statsHigh, weight);
+        }
+    }
+
+    if (now - statsAt < 1000000) {
+        return;
+    }
+
+    double seconds = (double)(now - statsAt) / 1e6;
+    ImGuiIO& io = ImGui::GetIO();
+    StringBuilder text;
+
+    if (!describedDisplay) {
+        describedDisplay = true;
+        text << StringView(u8"im play: display ");
+        appendFixed(text, player->ui->refreshRate(), 2);
+        text << StringView(u8" Hz as the screen reports it, ");
+        appendFixed(text, statsDraws / seconds, 2);
+        text << StringView(u8" Hz drawn; window ") << (i64)(io.DisplaySize.x * io.DisplayFramebufferScale.x) << StringView(u8"x") << (i64)(io.DisplaySize.y * io.DisplayFramebufferScale.y);
+        text << StringView(u8" px, the video drawn at ") << (i64)(drawn.x * io.DisplayFramebufferScale.x) << StringView(u8"x") << (i64)(drawn.y * io.DisplayFramebufferScale.y) << StringView(u8" px");
+        sysE << StringView(text) << endL;
+        text.reset();
+    }
+
+    text << StringView(blending ? StringView(u8"im play: blending, ") : StringView(u8"im play: nearest frame, "));
+    appendFixed(text, seconds, 2);
+    text << StringView(u8" s: ") << (i64)statsDraws << StringView(u8" draws, ") << (i64)statsShown << StringView(u8" frames shown, ") << (i64)statsDropped << StringView(u8" dropped, ");
+    appendFixed(text, statsShown ? (double)statsDraws / statsShown : 0., 3);
+    text << StringView(u8" draws a frame; ") << (i64)statsMixed << StringView(u8" draws mixed");
+
+    if (statsMixed) {
+        text << StringView(u8" at weights ");
+        appendFixed(text, statsLow, 2);
+        text << StringView(u8"..");
+        appendFixed(text, statsHigh, 2);
+    }
+
+    text << StringView(u8"; weights in turn:") << StringView(statsWeights);
+    sysE << StringView(text) << endL;
+    statsAt = 0;
+}
+
 void Screen::keys() {
     double at = position(monotonicNowUs());
 
@@ -1988,6 +2134,12 @@ void Screen::keys() {
     if (ImGui::IsKeyPressed(ImGuiKey_F, false) || ImGui::IsKeyPressed(ImGuiKey_F11, false)) {
         fullscreen = !fullscreen;
         player->ui->requestFullscreen(fullscreen);
+    }
+
+    if (player->blend && ImGui::IsKeyPressed(ImGuiKey_B, false)) {
+        blending = !blending;
+        statsAt = 0;
+        sysE << StringView(blending ? StringView(u8"im play: blending the two frames around the clock") : StringView(u8"im play: showing the frame the clock is in")) << endL;
     }
 }
 
@@ -2038,9 +2190,11 @@ void Screen::draw() {
 
             dl->AddImage(shown->texture, p0, p1);
 
-            if (alpha > 0) {
+            if (blending && alpha > 0) {
                 dl->AddImage(next->texture, p0, p1, ImVec2(0, 0), ImVec2(1, 1), IM_COL32(255, 255, 255, alpha));
             }
+
+            noteDraw(next && next->textured && span > 0. ? fmin(fmax(weight, 0.), 1.) : -1., ImVec2(p1.x - p0.x, p1.y - p0.y));
 
             if (clockRunning) {
                 ui.requestFrame();

@@ -74,6 +74,7 @@ namespace plt {
         u32 screenPixelWidth = 0;
         u32 screenPixelHeight = 0;
         float contentScale = 1.0f;
+        float refreshRate = 0.0f;
         bool focused = false;
         bool iconified = false;
         bool maximized = false;
