@@ -347,6 +347,7 @@ namespace {
         u64 present();
         void finishIfEnded(u64 now);
         void show(Frame* frame);
+        void advance(double at);
         Frame* takeFirst();
         void discard(Frame* frame);
         void release(VideoImage* image);
@@ -1679,20 +1680,7 @@ u64 Screen::present() {
 
     double at = position(now);
 
-    if (clockRunning) {
-        while (!waiting.empty() && waiting[0]->pts <= at) {
-            Frame* frame = takeFirst();
-
-            if (!waiting.empty() && waiting[0]->pts <= at) {
-                release(frame->image);
-                discard(frame);
-                statsDropped++;
-            } else {
-                show(frame);
-            }
-        }
-    }
-
+    advance(at);
     finishIfEnded(now);
     at = position(now);
 
@@ -1736,6 +1724,24 @@ void Screen::finishIfEnded(u64 now) {
     setClock(position(now), false, now);
     player->ui->trace(StringView(StringBuilder() << StringView(u8"ended generation=") << (i64)generation));
     player->ui->requestFrame();
+}
+
+void Screen::advance(double at) {
+    if (!clockRunning) {
+        return;
+    }
+
+    while (!waiting.empty() && waiting[0]->pts <= at) {
+        Frame* frame = takeFirst();
+
+        if (!waiting.empty() && waiting[0]->pts <= at) {
+            release(frame->image);
+            discard(frame);
+            statsDropped++;
+        } else {
+            show(frame);
+        }
+    }
 }
 
 void Screen::show(Frame* frame) {
@@ -2150,6 +2156,7 @@ void Screen::draw() {
     float bar = ImGui::GetFrameHeight() + 2.f * pad;
     double at = position(ui.presentTime());
 
+    advance(at);
     ImGui::SetNextWindowPos(vp->Pos);
     ImGui::SetNextWindowSize(vp->Size);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
