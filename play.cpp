@@ -2091,10 +2091,8 @@ void Screen::noteDraw(double weight, ImVec2 drawn) {
     if (!describedDisplay) {
         describedDisplay = true;
         text << StringView(u8"im play: display ");
-        appendFixed(text, player->ui->refreshRate(), 2);
-        text << StringView(u8" Hz as the screen reports it, ");
         appendFixed(text, statsDraws / seconds, 2);
-        text << StringView(u8" Hz drawn; window ") << (i64)(io.DisplaySize.x * io.DisplayFramebufferScale.x) << StringView(u8"x") << (i64)(io.DisplaySize.y * io.DisplayFramebufferScale.y);
+        text << StringView(u8" Hz drawn, a frame presents ") << (i64)((player->ui->presentTime() - monotonicNowUs()) / 1000) << StringView(u8" ms after its draw; window ") << (i64)(io.DisplaySize.x * io.DisplayFramebufferScale.x) << StringView(u8"x") << (i64)(io.DisplaySize.y * io.DisplayFramebufferScale.y);
         text << StringView(u8" px, the video drawn at ") << (i64)(drawn.x * io.DisplayFramebufferScale.x) << StringView(u8"x") << (i64)(drawn.y * io.DisplayFramebufferScale.y) << StringView(u8" px");
         sysE << StringView(text) << endL;
         text.reset();

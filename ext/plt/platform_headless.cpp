@@ -5,6 +5,7 @@
 #include "poller_loop.h"
 
 #include <std/ios/input.h>
+#include <std/sys/crt.h>
 #include <std/alg/minmax.h>
 #include <std/ios/output.h>
 #include <std/lib/buffer.h>
@@ -411,7 +412,8 @@ bool WindowHeadlessImpl::dispatchFrame() {
         target_.pixels = nullptr;
         target_.length = 0;
     }
-    const WindowInfo frameInfo = info_;
+    WindowInfo frameInfo = info_;
+    frameInfo.presentTime = monotonicNowUs();
     const bool presented = frame != nullptr && frame->frame(frameInfo);
     target_.pixels = pixels;
     target_.length = length;

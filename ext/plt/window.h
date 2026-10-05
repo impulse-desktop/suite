@@ -74,13 +74,18 @@ namespace plt {
         u32 screenPixelWidth = 0;
         u32 screenPixelHeight = 0;
         float contentScale = 1.0f;
-        float refreshRate = 0.0f;
-        // The frame's presentation surface and the monotonic time (us) it is
-        // due on the glass, when the platform paces frames to the display
-        // and hands them out (Cocoa: a CAMetalDrawable); null and 0 where the
-        // renderer acquires its own (Wayland, headless).
-        void* surface = nullptr;
+        // When this frame's contents reach the glass, in stl::monotonicNowUs()
+        // units: the platform's best knowledge, always on the program's own
+        // clock, never zero. A platform that is told the moment by its display
+        // (Cocoa's display link) carries it over from the display's clock; one
+        // that knows the display's period alone (Wayland, from the output's
+        // mode) gives the next refresh from now; one that knows nothing gives
+        // now. A renderer or a player targets this moment, not the draw's.
         u64 presentTime = 0;
+        // The frame's presentation surface where the platform hands one out
+        // (Cocoa: a CAMetalDrawable), null where the renderer acquires its own
+        // (Wayland, headless).
+        void* surface = nullptr;
         bool focused = false;
         bool iconified = false;
         bool maximized = false;

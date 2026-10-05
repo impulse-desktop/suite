@@ -1303,7 +1303,6 @@ WindowInfo WindowImpl::info() const {
         .screenPixelWidth = (u32)(max(0.0, screenFrame.size.width)),
         .screenPixelHeight = (u32)(max(0.0, screenFrame.size.height)),
         .contentScale = (float)(window.backingScaleFactor),
-        .refreshRate = (float)(screen.maximumFramesPerSecond),
         .focused = (bool)(window.keyWindow),
         .iconified = (bool)(window.miniaturized),
         .maximized = (bool)([window isZoomed]),

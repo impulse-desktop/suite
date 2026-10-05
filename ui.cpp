@@ -389,7 +389,6 @@ namespace {
         ImTextureRef loadTexture(u32 width, u32 height, const void* rgba) override;
         void releaseTexture(ImTextureRef texture) override;
         u32 maxTextureSide() override;
-        float refreshRate() override;
         u64 presentTime() override;
         bool drawErrorPanel(StringView message) override;
         void trace(StringView what) override;
@@ -720,12 +719,8 @@ u32 UiImpl::maxTextureSide() {
     return renderer->maxTextureSide();
 }
 
-float UiImpl::refreshRate() {
-    return window ? window->info().refreshRate : 0.f;
-}
-
 u64 UiImpl::presentTime() {
-    return framePresentUs ? framePresentUs : monotonicNowUs();
+    return framePresentUs;
 }
 
 bool UiImpl::drawErrorPanel(StringView message) {
@@ -802,9 +797,7 @@ bool UiImpl::frame(const plt::WindowInfo& info) {
         text << StringView(u8" render ") << MS{rendered - drew};
         text << StringView(u8" end ") << MS{monotonicNowUs() - rendered};
 
-        if (framePresentUs) {
-            text << StringView(u8" present +") << MS{framePresentUs > began ? framePresentUs - began : 0};
-        }
+        text << StringView(u8" present +") << MS{framePresentUs > began ? framePresentUs - began : 0};
 
         if (!presented) {
             text << StringView(u8" unpresented");

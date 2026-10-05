@@ -2759,7 +2759,12 @@ void WindowImpl::ready() {
         return;
     }
     frameRequested = false;
-    if (!frame->frame(info())) {
+    // Without wp_presentation the next refresh is the moment to aim at:
+    // one period of the output's current mode (mHz) from now, or now where
+    // no output has told its mode.
+    WindowInfo current = info();
+    current.presentTime = monotonicNowUs() + (platform.outputRefresh ? 1'000'000'000ULL / platform.outputRefresh : 0);
+    if (!frame->frame(current)) {
         if (frameRequested) {
             // The callback re-requested while failing.  Retry once
             // immediately (transient failures during resize), then back
@@ -2881,7 +2886,6 @@ WindowInfo WindowImpl::info() const {
         .screenPixelWidth = platform.outputWidth,
         .screenPixelHeight = platform.outputHeight,
         .contentScale = (float)(scaleNumerator) / scaleDenominator,
-        .refreshRate = (float)(platform.outputRefresh) / 1000.0f,
         .focused = focused,
         .maximized = maximized,
         .fullscreen = fullscreen,
