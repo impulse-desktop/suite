@@ -66,13 +66,13 @@ def shader(corpus, compiler, host, fmt, source, target, directory):
     spec = importlib.util.spec_from_file_location("compositor", HERE.parent / "compositor" / "bench.py")
     compositor = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(compositor)
-    words = subprocess.run([corpus, "layout", fmt, *map(str, source)], check=True, capture_output=True, text=True).stdout.split()
+    words = subprocess.run([corpus, "layout", fmt, *map(str, source)], check=True, stdout=subprocess.PIPE, text=True).stdout.split()
     offsets, lines = [int(word) for word in words[1:5]], [int(word) for word in words[6:10]]
     _, layout, components = bench.layout_of(fmt)
     facts = bench.facts(case(fmt, source, target), layout, components, offsets, lines)
     directory.mkdir(parents=True, exist_ok=True)
     for tiles in ("inside", "edge", "mixed"):
-        code = subprocess.run([compiler, "--output", "srgb", "--tiles", tiles, *facts], check=True, capture_output=True).stdout
+        code = subprocess.run([compiler, "--output", "srgb", "--tiles", tiles, *facts], check=True, stdout=subprocess.PIPE).stdout
         (directory / f"{tiles}.spv").write_bytes(compositor.merge(Path(host).read_bytes(), code) if tiles == "mixed" else code)
 
 
@@ -82,7 +82,7 @@ def filled(path, size):
 
 
 def compose(args, directory, layers, rounds):
-    text = subprocess.run([args.compositor, args.plain, str(rounds), str(directory / "frame.bin"), str(directory), str(layers), str(directory / "data.bin")], check=True, capture_output=True, text=True).stdout
+    text = subprocess.run([args.compositor, args.plain, str(rounds), str(directory / "frame.bin"), str(directory), str(layers), str(directory / "data.bin")], check=True, stdout=subprocess.PIPE, text=True).stdout
     return float(re.search(r"^compose gpu ([\d.]+) us", text, re.M).group(1))
 
 
@@ -184,7 +184,7 @@ def speed(args):
             cases.append((video, screen, directory))
         times = {(str(directory), "ours"): compose(args, directory, root / "cases" / directory.name, args.rounds) for _, _, directory in cases}
         for preset in args.presets:
-            text = subprocess.run([args.placebo, preset, str(args.rounds), *(str(directory) for _, _, directory in cases)], check=True, capture_output=True, text=True).stdout
+            text = subprocess.run([args.placebo, preset, str(args.rounds), *(str(directory) for _, _, directory in cases)], check=True, stdout=subprocess.PIPE, text=True).stdout
             times.update({(directory, f"placebo_{preset}"): float(value) for directory, value in re.findall(rf"^placebo (\S+) {preset} gpu ([\d.]+)", text, re.M)})
         rows += [{"format": fmt, "video": video, "screen": screen, **{variant: times[(str(directory), variant)] for variant in VARIANTS if (str(directory), variant) in times}} for video, screen, directory in cases]
         shutil.rmtree(scratch)
