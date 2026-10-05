@@ -1460,13 +1460,8 @@ bool MetalRenderer::endFrame(ImDrawData* draw) {
         want = want && edr;
         if (want != wide) {
             setMode(want);
-            layer.presentsWithTransaction = YES;
-            transaction = true;
-            drawable = [layer nextDrawable];
-            if (!drawable) {
-                fail(StringView(u8"Metal gives no drawable in the frame's new mode"));
-            }
         }
+        bool wideDrawable = drawable.texture.pixelFormat == MTLPixelFormatRGBA16Float;
         id<MTLCommandBuffer> command = [queue commandBuffer];
         if (!command) {
             fail(StringView(u8"cannot begin Metal command buffer"));
@@ -1488,8 +1483,8 @@ bool MetalRenderer::endFrame(ImDrawData* draw) {
         Flight* flight = smallObjects->make<Flight>(drawn);
         drawn.clear();
         const float clear[4] = {srgbTable[25], srgbTable[25], srgbTable[25], 1.f};
-        tiles.compose(draw, Vector<Layer>(), (u32)drawable.texture.width, (u32)drawable.texture.height, wide, ++frames, command, clear);
-        encode(command, drawable.texture, wide ? ShaderOutput::WideLinear : ShaderOutput::Srgb);
+        tiles.compose(draw, Vector<Layer>(), (u32)drawable.texture.width, (u32)drawable.texture.height, wideDrawable, ++frames, command, clear);
+        encode(command, drawable.texture, wideDrawable ? ShaderOutput::WideLinear : ShaderOutput::Srgb);
         Channel* done = landed;
         plt::LoopWake* completed = wake;
         [command addCompletedHandler:^(id<MTLCommandBuffer>) {
