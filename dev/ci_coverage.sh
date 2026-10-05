@@ -22,8 +22,9 @@ command -v "$profdata" >/dev/null || { profdata=llvm-profdata; cov=llvm-cov; }
 
 binary="$build_dir/im_test"
 # our test sources, the vendored libraries, generated files in any build dir
-# view, and system headers carry no coverage of interest
-ignore='(^|/)(tst|ext|\.b[^/]*)/|^/usr/'
+# view, and system headers (macOS's in its SDK and Homebrew) carry no
+# coverage of interest
+ignore='(^|/)(tst|ext|\.b[^/]*)/|^/(usr|Applications|Library|opt)/'
 out=.coverage
 
 mkdir -p "$out/html"
@@ -40,7 +41,7 @@ echo "found ${#profiles[@]} profiles"
 good_list="$out/readable-profiles.txt"
 
 printf '%s\n' "${profiles[@]}" |
-    xargs -P "$(nproc)" -I{} sh -c '
+    xargs -P "$(getconf _NPROCESSORS_ONLN)" -I{} sh -c '
         tmp=$(mktemp)
         if "$0" merge -sparse "$1" -o "$tmp" 2>/dev/null; then
             printf "%s\n" "$1"
@@ -54,7 +55,7 @@ echo "merging ${#good[@]} of ${#profiles[@]} profiles"
 # why it did not load, or lines it ran read as never run
 # (diagnostics only: nothing here may fail the report under set -e)
 { printf '%s\n' "${profiles[@]}" | grep -vxF -f "$good_list" || true; } | while read -r bad; do
-    echo "dropped $(basename "$bad") ($(stat -c %s "$bad") bytes):"
+    echo "dropped $(basename "$bad") ($(wc -c < "$bad" | tr -d ' ') bytes):"
     { "$profdata" show "$bad" 2>&1 || true; } | head -3 | sed 's/^/    /'
 done
 [[ ${#good[@]} -gt 0 ]] || { echo "no readable profiles in $profile_dir" >&2; exit 1; }
@@ -68,7 +69,8 @@ done
     -output-dir="$out/html" -show-branches=percent -coverage-watermark=80,50 \
     -ignore-filename-regex="$ignore"
 
-sed -i "s|^SF:$PWD/|SF:|" "$out/coverage.info"
+sed -i.absolute "s|^SF:$PWD/|SF:|" "$out/coverage.info"
+rm "$out/coverage.info.absolute"
 if grep -q '^SF:/' "$out/coverage.info"; then
     echo "coverage report contains absolute source paths" >&2
     grep '^SF:/' "$out/coverage.info" | head -10 >&2

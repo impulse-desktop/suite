@@ -322,8 +322,15 @@ install(im, links)
 # fails `./build test`. -Dfilter=GLOB restricts which scenarios build,
 # -Druntime=DIR keeps their Wayland sockets under a short path, and
 # -Devidence=DIR keeps what a failed one captured, outside the graph.
-# Linux only: the compositor and the devices are Wayland's.
-if not darwin:
+# The compositor and the devices are Wayland's: macOS runs the scenarios
+# that drive the renderer's own helpers, each in a window of its own, and
+# tst/session.py starts no compositor there.
+# the fixture and the runner: any change to the harness re-runs every scenario
+harness = ["$(S)/tst/session.py", "$(S)/dev/run_test.py"]
+if darwin:
+    helpers = [renderer_test, video_test, imgui_frames_test]
+    scenarios = [f"$(S)/tst/{name}.py" for name in ("renderer_pixels", "renderer_hdr", "video", "imgui_frames")]
+else:
     e2e_protocols = []
     e2e_protocol_headers = []
     for xml, name in [
@@ -371,70 +378,69 @@ if not darwin:
         deps=[vulkan],
     )
     helpers = [devices, jxl_dump, device_uuid, renderer_test, video_test, imgui_frames_test]
+    scenarios = sorted(set(build.glob("$(S)/tst/*.py")) - set(harness))
 
-    # -Dshard=K/N splits the scenarios into N slices by a hash of the name, so
-    # CI jobs can run them side by side; the slice a scenario falls in does not
-    # move when others are added
-    shard_index, shard_count = (int(part) for part in flags.shard.split("/")) if flags.shard else (0, 1)
-    # the fixture and the runner: any change to the harness re-runs every scenario
-    harness = ["$(S)/tst/session.py", "$(S)/dev/run_test.py"]
 
-    # a scenario with buckets becomes that many test nodes, each running the
-    # checks whose names hash into its bucket
-    buckets = {"video": 64}
+# -Dshard=K/N splits the scenarios into N slices by a hash of the name, so
+# CI jobs can run them side by side; the slice a scenario falls in does not
+# move when others are added
+shard_index, shard_count = (int(part) for part in flags.shard.split("/")) if flags.shard else (0, 1)
+# a scenario with buckets becomes that many test nodes, each running the
+# checks whose names hash into its bucket
+buckets = {"video": 64}
 
-    runs = []
-    for scenario in sorted(set(build.glob("$(S)/tst/*.py")) - set(harness)):
-        base = os.path.basename(scenario)[:-len(".py")]
-        count = buckets.get(base, 0)
-        runs += [(scenario, f"{base}_{k}", f"{k}/{count}") for k in range(count)] if count else [(scenario, base, "")]
+runs = []
+for scenario in scenarios:
+    base = os.path.basename(scenario)[:-len(".py")]
+    count = buckets.get(base, 0)
+    runs += [(scenario, f"{base}_{k}", f"{k}/{count}") for k in range(count)] if count else [(scenario, base, "")]
 
-    test_nodes = []
-    test_verdicts = []
-    for scenario, name, bucket in runs:
-        if flags.filter and not fnmatch.fnmatch(name, flags.filter):
-            continue
-        if int(hashlib.sha1(name.encode()).hexdigest(), 16) % shard_count != shard_index:
-            continue
-        out = f"$(B)/test-results/{name}.json"
-        cmd = [
-            "python3", "$(S)/dev/run_test.py",
-            "--scenario", scenario,
-            "--binary", "$(B)/im_test",
-            "--helpers", "$(B)/e2e",
-            "--out", out,
-        ]
-        if bucket:
-            cmd += ["--bucket", bucket]
-        if flags.runtime:
-            cmd += ["--runtime", flags.runtime]
-        if flags.evidence:
-            cmd += ["--evidence", flags.evidence]
-        test_verdicts.append(out)
-        test_nodes.append(command(
-            name=f"test_{name}",
-            inputs=[scenario, *harness],
-            outputs=[out],
-            deps=[im_test, *helpers],
-            cmd=cmd,
-            descr="TS",
-            color="cyan",
-        ))
+test_nodes = []
+test_verdicts = []
+for scenario, name, bucket in runs:
+    if flags.filter and not fnmatch.fnmatch(name, flags.filter):
+        continue
+    if int(hashlib.sha1(name.encode()).hexdigest(), 16) % shard_count != shard_index:
+        continue
+    out = f"$(B)/test-results/{name}.json"
+    cmd = [
+        "python3", "$(S)/dev/run_test.py",
+        "--scenario", scenario,
+        "--binary", "$(B)/im_test",
+        "--helpers", "$(B)/e2e",
+        "--out", out,
+    ]
+    if bucket:
+        cmd += ["--bucket", bucket]
+    if flags.runtime:
+        cmd += ["--runtime", flags.runtime]
+    if flags.evidence:
+        cmd += ["--evidence", flags.evidence]
+    test_verdicts.append(out)
+    test_nodes.append(command(
+        name=f"test_{name}",
+        inputs=[scenario, *harness],
+        outputs=[out],
+        deps=[im_test, *helpers],
+        cmd=cmd,
+        descr="TS",
+        color="cyan",
+    ))
 
-    if test_nodes:
-        test = command(
-            name="test",
-            inputs=["$(S)/dev/aggregate_tests.py"],
-            outputs=["$(B)/test-results/verdict.txt"],
-            deps=test_nodes,
-            cmd=[
-                "python3", "$(S)/dev/aggregate_tests.py",
-                "--out", "$(B)/test-results/verdict.txt",
-                *test_verdicts,
-            ],
-            descr="OK",
-            color="light-green",
-        )
+if test_nodes:
+    test = command(
+        name="test",
+        inputs=["$(S)/dev/aggregate_tests.py"],
+        outputs=["$(B)/test-results/verdict.txt"],
+        deps=test_nodes,
+        cmd=[
+            "python3", "$(S)/dev/aggregate_tests.py",
+            "--out", "$(B)/test-results/verdict.txt",
+            *test_verdicts,
+        ],
+        descr="OK",
+        color="light-green",
+    )
 
 
 

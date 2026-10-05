@@ -56,7 +56,14 @@ fi
 # error in one must not stop the others; the final test node reads every
 # verdict. The scenarios' Wayland sockets need a short path; what a failed
 # one captured is kept for the job's artifacts.
-targets=(im im_test links devices jxl_dump device_uuid)
+# macOS builds the tools without the Wayland scenarios' own helpers, and
+# without the fault seam: the chaos monkey is Linux's
+darwin=$([[ "$(uname)" == Darwin ]] && echo 1 || true)
+if [[ -n "$darwin" ]]; then
+    targets=(im im_test links)
+else
+    targets=(im im_test links devices jxl_dump device_uuid)
+fi
 status=0
 if [[ "$mode" == build ]]; then
     python3 ./build -B "$build_dir" -j "$jobs" "${targets[@]}" || status=1
@@ -64,7 +71,7 @@ else
     python3 ./build -B "$build_dir" -j "$jobs" -k -Druntime=/tmp/im-e2e -Devidence="$build_dir/evidence" "${targets[@]}" test || status=1
 fi
 # Test controls must never ship in the production binary.
-if [[ -f "$build_dir/im" && -f "$build_dir/im_test" ]]; then
+if [[ -z "$darwin" && -f "$build_dir/im" && -f "$build_dir/im_test" ]]; then
     python3 - "$build_dir/im" "$build_dir/im_test" <<'PY_CHECK'
 from pathlib import Path
 import sys

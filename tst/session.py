@@ -96,6 +96,10 @@ class Session:
             self.env.pop(key, None)
 
     def __enter__(self):
+        # macOS has no compositor of ours: its scenarios run the renderer's
+        # helpers, each opening its own window
+        if sys.platform == "darwin":
+            return self
         try:
             for tool in ("sway", "swaymsg", "grim"):
                 if shutil.which(tool) is None:
@@ -164,8 +168,9 @@ class Session:
             raise
 
     def require(self, interface):
-        """The compositor offers this global, or the scenario is skipped."""
-        if interface not in self.globals:
+        """The compositor offers this global, or the scenario is skipped;
+        macOS has no Wayland globals, its renderer asks the display."""
+        if sys.platform != "darwin" and interface not in self.globals:
             raise Skip(f"the compositor offers no {interface}")
 
     def skip(self, reason):

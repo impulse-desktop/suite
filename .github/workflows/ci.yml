@@ -10,10 +10,12 @@ on:
 permissions:
   contents: read
 
-# Every job runs in a stock distribution container: dev/ci_linux.sh installs
-# the toolchain, the libraries and, for the scenarios, the compositor they
-# run under (a headless Sway, the tool's Vulkan on lavapipe), then hands
-# over to dev/ci.sh MODE. The build gates the rest.
+# Every Linux job runs in a stock distribution container: dev/ci_linux.sh
+# installs the toolchain, the libraries and, for the scenarios, the
+# compositor they run under (a headless Sway, the tool's Vulkan on
+# lavapipe), then hands over to dev/ci.sh MODE. The macOS jobs run on the
+# runner itself, through dev/ci_darwin.sh, the renderer's scenarios on its
+# Metal device. The build gates the rest.
 env:
   UBUNTU_IMAGE: ubuntu:26.04
   GCC_IMAGE: gcc:16.1.0-trixie
@@ -291,6 +293,49 @@ jobs:
           retention-days: 7
           compression-level: 9
 
+  tests-darwin:
+    name: Tests Darwin
+    needs: build
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build the tools and run the scenarios
+        run: |
+          set -o pipefail
+          bash dev/ci_darwin.sh test 2>&1 | tee "$RUNNER_TEMP/tests-darwin.log"
+
+      - name: Upload what the failed scenarios captured
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tests-darwin-evidence
+          path: .build/ci-*/evidence
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 7
+          compression-level: 9
+
+      - name: Summarize failure
+        if: failure()
+        run: |
+          python3 dev/ci_report.py \
+            --log "$RUNNER_TEMP/tests-darwin.log" \
+            --title "Tests Darwin" \
+            --reproduce "dev/ci_darwin.sh test"
+
+      - name: Upload failure log
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tests-darwin-log
+          path: ${{ runner.temp }}/tests-darwin.log
+          if-no-files-found: ignore
+          retention-days: 7
+          compression-level: 9
+
   coverage-ubuntu:
     name: Coverage Ubuntu
     needs: build
@@ -421,11 +466,66 @@ jobs:
           retention-days: 7
           compression-level: 9
 
+  coverage-darwin:
+    name: Coverage Darwin
+    needs: build
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build the tools and run the scenarios with coverage
+        run: |
+          set -o pipefail
+          bash dev/ci_darwin.sh coverage 2>&1 | tee "$RUNNER_TEMP/coverage-darwin.log"
+
+      - name: Upload what the failed scenarios captured
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-darwin-evidence
+          path: .build/ci-*/evidence
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 7
+          compression-level: 9
+
+      - name: Upload the shard's tracefile
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-darwin
+          path: |
+            .coverage/coverage.info
+            .coverage/summary.txt
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Summarize failure
+        if: failure()
+        run: |
+          python3 dev/ci_report.py \
+            --log "$RUNNER_TEMP/coverage-darwin.log" \
+            --title "Coverage Darwin" \
+            --reproduce "dev/ci_darwin.sh coverage"
+
+      - name: Upload failure log
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-darwin-log
+          path: ${{ runner.temp }}/coverage-darwin.log
+          if-no-files-found: ignore
+          retention-days: 7
+          compression-level: 9
+
   coverage:
     name: Coverage
-    # the two shards see different scenarios: Ubuntu's sway skips the HDR
-    # ones, Alpine's runs them; the merge is what Codecov gets
-    needs: [coverage-ubuntu, coverage-alpine]
+    # the shards see different scenarios: Ubuntu's sway skips the HDR ones,
+    # Alpine's runs them, macOS runs the renderer's own through Metal; the
+    # merge is what Codecov gets
+    needs: [coverage-ubuntu, coverage-alpine, coverage-darwin]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -465,7 +565,7 @@ jobs:
           files: ${{ runner.temp }}/coverage-report/coverage.info
           disable_search: true
           fail_ci_if_error: true
-          name: ubuntu-alpine
+          name: ubuntu-alpine-darwin
           verbose: true
 
       - name: Upload the merged report
