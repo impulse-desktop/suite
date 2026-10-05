@@ -1047,8 +1047,12 @@ namespace {
         }
     };
 
+    static double radiusOf(double ratio) {
+        return ratio <= 1. ? lanczosRadius : ::fmin(ratio, maxTaps / 2.);
+    }
+
     static int tapsOf(double ratio) {
-        return ratio <= 1. ? lanczosTaps : 2 * (int)::ceil(::fmin(ratio, maxTaps / 2.) - 1e-9);
+        return (int)::ceil(2. * radiusOf(ratio) - 1e-9);
     }
 
     static int reachOf(double ratio, int rows) {
@@ -1315,14 +1319,17 @@ namespace {
                     a.w[lanczosTaps - 1 - k] = g.sub(even, odd);
                 }
             } else {
-                double reach = ::fmin(1. / ratio, maxTaps / 2.);
-                int half = (int)::ceil(reach - 1e-9);
+                double reach = radiusOf(1. / ratio);
+                Node* low = g.sub(at, reach);
+                Node* start = g.floor(low);
+                Node* offset = g.add(g.sub(low, start), reach - 1.);
                 Node* total = g.f(0.);
 
-                a.taps = 2 * half;
+                a.taps = tapsOf(1. / ratio);
+                base = g.add(g.convert(start, Kind::Int), a.taps / 2);
 
                 for (int k = 0; k < a.taps; k++) {
-                    Node* x = g.min(g.mul(g.abs(g.sub(f, k + 1 - half)), 1. / reach), 1.);
+                    Node* x = g.min(g.mul(g.abs(g.sub(offset, k)), 1. / reach), 1.);
 
                     a.w[k] = g.add(g.mul(g.mul(g.sub(g.mul(x, 2.), 3.), x), x), 1.);
                     total = g.add(total, a.w[k]);
@@ -1621,6 +1628,12 @@ namespace {
             return g.mul(g.sub(g.div(1., g.add(g.exp(g.mul(g.sub(sigmoidCenter, v), sigmoidSlope)), 1.)), sigmoidLow), 1. / sigmoidSpan);
         }
 
+        Node* windowStart(Node* head, double ratio) {
+            Node* at = g.sub(g.mul(g.add(g.convert(head, Kind::Float), 0.5), ratio), 0.5);
+
+            return g.add(g.convert(g.floor(g.sub(at, radiusOf(ratio))), Kind::Int), 1);
+        }
+
         Node* weightAt(const Axis& a, Node* position) {
             Node* x = g.min(g.mul(g.abs(g.sub(position, a.at)), 1. / a.reach), 1.);
 
@@ -1900,7 +1913,7 @@ namespace {
 
             if (portions) {
                 upright = axis(g.sub(g.mul(g.add(g.convert(pixel[1], Kind::Float), 0.5), ratio[1]), 0.5), 1. / ratio[1]);
-                tileCorner = g.add(g.convert(g.floor(g.sub(g.mul(g.add(g.convert(first[1], Kind::Float), 0.5), ratio[1]), 0.5)), Kind::Int), 1 - tapsOf(ratio[1]) / 2);
+                tileCorner = windowStart(first[1], ratio[1]);
                 k.loop.count = (footprintOf(s) + rows - 1) / rows;
                 k.loop.carried = channels;
                 k.loop.first = k.count;
@@ -1921,8 +1934,8 @@ namespace {
                 ChromaRows chroma;
                 int lightPhase = 0;
 
-                corner[0] = g.add(g.convert(g.floor(g.sub(g.mul(g.add(g.convert(head[0], Kind::Float), 0.5), ratio[0]), 0.5)), Kind::Int), 1 - tapsOf(ratio[0]) / 2);
-                corner[1] = portions ? g.add(tileCorner, g.mul(portion, rows)) : g.add(g.convert(g.floor(g.sub(g.mul(g.add(g.convert(head[1], Kind::Float), 0.5), ratio[1]), 0.5)), Kind::Int), 1 - tapsOf(ratio[1]) / 2);
+                corner[0] = windowStart(head[0], ratio[0]);
+                corner[1] = portions ? g.add(tileCorner, g.mul(portion, rows)) : windowStart(head[1], ratio[1]);
 
                 if (subsampled) {
                     chroma = chromaRows(k, corner, reach, last, lane, pending);
