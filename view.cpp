@@ -555,13 +555,17 @@ void ViewApp::startWorkers(ObjPool& pool) {
 }
 
 void ViewApp::stopWorkers() {
+    void* item;
+
     jobs->close();
 
     for (Thread* worker : workers) {
         worker->join();
     }
 
-    accept();
+    while (results->tryDequeue(&item)) {
+        delete ((Job*)item)->owner;
+    }
 
     if (shown) {
         delete shown->owner;
