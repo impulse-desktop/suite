@@ -308,6 +308,9 @@ int main(int argc, char** argv) {
                 const float* b = (const float*)pixels[1].contents;
                 const uint32_t* listed = (const uint32_t*)tileList.bytes;
                 double most = 0;
+                double relative = 0;
+                float pair[3] = {0, 0, 0};
+                int where[3] = {0, 0, 0};
                 long over = 0;
                 long nans = 0;
                 long compared = 0;
@@ -334,8 +337,19 @@ int main(int argc, char** argv) {
                                 }
 
                                 double d = fabs((double)p - (double)q);
+                                double r = d / fmax(1.0, fabs((double)q));
 
-                                most = d > most ? d : most;
+                                if (d > most) {
+                                    most = d;
+                                    pair[0] = p;
+                                    pair[1] = q;
+                                    pair[2] = b[((size_t)y * frameWidth + x) * 4 + 3];
+                                    where[0] = x;
+                                    where[1] = y;
+                                    where[2] = c;
+                                }
+
+                                relative = r > relative ? r : relative;
                                 over += d > 1.0 / 1024;
                             }
                         }
@@ -352,7 +366,7 @@ int main(int argc, char** argv) {
                     worstName = name;
                 }
 
-                printf("%s: %s tiles %lu pixels %ld max %.6f over %ld nan %ld\n", name.UTF8String, good ? "ok" : "FAIL", (unsigned long)tiles, compared, most, over, nans);
+                printf("%s: %s tiles %lu pixels %ld max %.6f relative %.6f over %ld nan %ld at (%d, %d).%d air %g msl %g alpha %g\n", name.UTF8String, good ? "ok" : "FAIL", (unsigned long)tiles, compared, most, relative, over, nans, where[0], where[1], where[2], pair[0], pair[1], pair[2]);
             }
         }
 
