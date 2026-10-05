@@ -1174,7 +1174,16 @@ void WindowImpl::draw(CAMetalDisplayLinkUpdate* update) {
     frameRequested = false;
     WindowInfo current = info();
     current.surface = (__bridge void*)(update.drawable);
-    current.presentTime = (u64)(update.targetPresentationTimestamp * 1e6);
+    // The link's timestamps are CACurrentMediaTime (mach_absolute_time,
+    // which stops while the machine sleeps); the program's clock is
+    // CLOCK_MONOTONIC, which keeps counting. The two drift apart by the
+    // time slept, so the target is carried over on the difference read now.
+    timespec monotonic;
+    timespec uptime;
+    clock_gettime(CLOCK_MONOTONIC, &monotonic);
+    clock_gettime(CLOCK_UPTIME_RAW, &uptime);
+    const double skew = (double)(monotonic.tv_sec - uptime.tv_sec) + (double)(monotonic.tv_nsec - uptime.tv_nsec) / 1e9;
+    current.presentTime = (u64)((update.targetPresentationTimestamp + skew) * 1e6);
     frame->frame(current);
 }
 

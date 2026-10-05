@@ -802,6 +802,10 @@ bool UiImpl::frame(const plt::WindowInfo& info) {
         text << StringView(u8" render ") << MS{rendered - drew};
         text << StringView(u8" end ") << MS{monotonicNowUs() - rendered};
 
+        if (framePresentUs) {
+            text << StringView(u8" present +") << MS{framePresentUs > began ? framePresentUs - began : 0};
+        }
+
         if (!presented) {
             text << StringView(u8" unpresented");
         }
