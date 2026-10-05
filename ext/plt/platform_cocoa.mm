@@ -1540,7 +1540,15 @@ void WindowImpl::resizeFrame() {
     if (frame != nullptr) {
         frame->frame(info());
     }
-    requestFrame();
+    // The link made again here would be born inside CoreAnimation's commit
+    // and never tick; it is made on the next pass of the run loop.
+    frameRequested = true;
+    CFRunLoopPerformBlock(CFRunLoopGetMain(), kCFRunLoopCommonModes, ^{
+      if (view.owner != nullptr && frameRequested) {
+          startDisplayLink();
+      }
+    });
+    CFRunLoopWakeUp(CFRunLoopGetMain());
 }
 
 void WindowImpl::screenChanged() {
