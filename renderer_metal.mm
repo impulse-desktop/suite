@@ -1232,7 +1232,7 @@ id<MTLComputePipelineState> MetalRenderer::pipeline(id<MTLLibrary> from, ShaderO
     descriptor.maxTotalThreadsPerThreadgroup = (NSUInteger)side * side;
     if (linked) {
         MTLLinkedFunctions* functions = [MTLLinkedFunctions linkedFunctions];
-        functions.privateFunctions = @[linked];
+        functions.privateFunctions = @[ linked ];
         descriptor.linkedFunctions = functions;
     }
     id<MTLComputePipelineState> made = [device newComputePipelineStateWithDescriptor:descriptor options:MTLPipelineOptionNone reflection:nil error:&error];
