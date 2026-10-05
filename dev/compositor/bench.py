@@ -1,33 +1,40 @@
 #!/usr/bin/env python3
 
-"""Composes headless ImGui frames (compositor_dump) through the tiled
-compute compositor of gpu/compose.comp and the video programs that compile()
-makes: a kernel for tiles the video covers, one for its edge, and its layer
-merged into the compositor for tiles where the interface lies over it. It
-prints the GPU time, the CPU time of the tile programs and, for a scene with
-video, the video's tiles alone; composed.ppm is what it drew.
+"""How fast the tiled compute compositor of gpu/compose.comp draws headless
+ImGui frames, and the merge of a video layer into its host that the video
+stand shares. The pieces are nodes of build.py's compositor_speed target;
+this file is what those nodes run between the C tools.
 
-The video is a yuv420p BT.709 frame of a chart, drawn into the scene's
-video rectangle the way the player draws it. The scene native is play with
-a video of its rectangle's own size, shrunk play with a 4K video.
+A scene is a frame compositor_dump makes: demo, play, menu (play with its
+menu open over the video) and view, and play again as native and shrunk.
+Where it shows a video, the video is a yuv420p noise frame as the video
+stand makes them, drawn into the scene's video rectangle with the programs
+compile() makes: a kernel for the tiles the video covers, one for its edge,
+and its layer merged into the compositor for the tiles where the interface
+lies over it; play's and menu's video is 1280x720, native's its rectangle's
+own size, shrunk's 4K. The scenes are
+made side by side; the timings then run one after another, with
+dev/compositor's harness: the GPU time of the whole frame and the CPU time
+of its tile programs, the best of 20, and for a scene with video its tiles
+alone. Each scene's composed.ppm is what it drew.
 
-  ix run set/pg/libs bin/glslang lib/vulkan/drivers --vulkan=amd/radv -- \\
-      python3 dev/compositor/bench.py --dump BUILD/dev/compositor_dump --compiler BUILD/dev/video_shader [--work DIR] [--size 1920x1080] [--source 1280x720] [SCENE...]
+  ix run set/pg/libs lib/ffmpeg/7 lib/openal bin/wabt bin/glslang lib/vulkan/drivers --vulkan=amd/radv -- \\
+      ./build -B BUILD compositor_speed
+
+leaves BUILD/compositor_speed/speed.{txt,json}.
 """
 
 import argparse
 import importlib.util
 import json
-import os
+import re
 import struct
 import subprocess
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-SUITE = HERE.parent.parent
-spec = importlib.util.spec_from_file_location("video_bench", HERE.parent / "video_bench" / "bench.py")
-video = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(video)
+FORMAT = "yuv420p"
+DUMPED = {"native": "play", "shrunk": "play"}
 
 
 TYPES = set(range(19, 40))
@@ -203,9 +210,6 @@ def merge(host_bytes, layer_bytes, name=b"layer("):
     return struct.pack("<%dI" % len(words), *words)
 
 
-VIDEO = {"native": "play", "shrunk": "play"}
-
-
 def rectangle(frame):
     data = frame.read_bytes()
     if struct.unpack("<I", data[-4:])[0] == 0:
@@ -213,62 +217,92 @@ def rectangle(frame):
     return [int(value) for value in struct.unpack("<4f", data[-16:])]
 
 
-def programs(compiler, work, rect, source, host):
-    name, layout, components = video.layout_of("yuv420p")
-    case = dict(video.SIZES, format="yuv420p", subsampling=(1, 1), matrix=1, range=1, transfer=1, primaries=1, location=1, output="sdr")
-    case.update(source=source, target=(rect[2] - rect[0], rect[3] - rect[1]), content="chart", origin=(rect[0], rect[1]))
-    data = work / ("video_%dx%d.bin" % source)
-    planes = data.with_suffix(".json")
-    if not planes.exists():
-        frame, offsets, lines = video.frame(case, layout, components)
-        data.write_bytes(frame)
-        planes.write_text(json.dumps([offsets, lines]))
-    offsets, lines = json.loads(planes.read_text())
+def scene(args):
+    """One scene's frame and, where it shows a video, the video's frame and
+    programs."""
+    directory = Path(args.directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    frame = directory / "frame.bin"
+    with frame.open("wb") as handle:
+        subprocess.run([args.dump, DUMPED.get(args.name, args.name), *args.size.split("x")], check=True, stdout=handle)
+    rect = rectangle(frame)
+    if (rect is None) != (args.source == "-"):
+        raise SystemExit(f"{args.name}: the scene's video is not the one asked for")
+    if rect is None:
+        return
+    target = (rect[2] - rect[0], rect[3] - rect[1])
+    source = target if args.source == "native" else tuple(int(value) for value in args.source.split("x"))
+    subprocess.run([args.corpus, "input", "noise", str(directory), *map(str, source), FORMAT, *map(str, target)], check=True)
+    for name in ("dump", "placebo.txt", "size"):
+        (directory / name).unlink()
+    spec = importlib.util.spec_from_file_location("quality", HERE.parent / "video_bench" / "quality.py")
+    quality = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(quality)
+    quality.shader(args.corpus, args.compiler, args.host, FORMAT, source, target, directory)
 
-    def compiled(tiles):
-        arguments = video.facts(dict(case, tile=24), layout, components, offsets, lines)
-        return subprocess.run([compiler, "--target", "spirv", "--output", "srgb", "--tiles", tiles, "--size", "%dx%d" % (rect[2] - rect[0], rect[3] - rect[1]), *arguments], check=True, capture_output=True).stdout
 
-    layers = work / ("layers_%d_%d_%d_%d_%dx%d" % (*rect, *source))
-    layers.mkdir(exist_ok=True)
-    (layers / "inside.spv").write_bytes(compiled("inside"))
-    (layers / "edge.spv").write_bytes(compiled("edge"))
-    (layers / "mixed.spv").write_bytes(merge(host.read_bytes(), compiled("mixed")))
-    return [layers, data]
+def speed(args):
+    """Every scene one after another, after all the CPU work: processes
+    timing side by side stretch each other's numbers."""
+    rows = []
+    for path, source in zip(args.scenes, args.sources, strict=True):
+        directory = Path(path)
+        out = Path(args.json).parent / directory.name
+        out.mkdir(parents=True, exist_ok=True)
+        video = [str(directory), str(directory / "data.bin")] if (directory / "data.bin").exists() else []
+        text = subprocess.run([args.compositor, args.plain, str(args.rounds), str(directory / "frame.bin"), str(out), *video], check=True, stdout=subprocess.PIPE, text=True).stdout
+        compose = re.search(r"^compose gpu ([\d.]+) us, cpu ([\d.]+) us", text, re.M)
+        program = re.search(r"^program cpu [\d.]+ us, (\d+) ops \((\d+) triangles\), \d+ list entries, \d+ tiles: (\d+) plain, (\d+) inside, (\d+) edge, (\d+) mixed", text, re.M)
+        alone = re.search(r"^alone: video tiles ([\d.]+) us", text, re.M)
+        rect = rectangle(directory / "frame.bin")
+        shown = None if rect is None else [rect[2] - rect[0], rect[3] - rect[1]]
+        rows.append({
+            "scene": directory.name,
+            "video": shown if source == "native" else None if source == "-" else [int(value) for value in source.split("x")],
+            "shown": shown,
+            "gpu": float(compose.group(1)),
+            "cpu": float(compose.group(2)),
+            "video_tiles": float(alone.group(1)) if alone else None,
+            "ops": int(program.group(1)),
+            "triangles": int(program.group(2)),
+            "tiles": dict(zip(("plain", "inside", "edge", "mixed"), map(int, program.group(3, 4, 5, 6)))),
+        })
+    Path(args.json).write_text(json.dumps(rows, indent=1) + "\n")
+    text = [f"compositor: us per frame, the best of {args.rounds}"]
+    text.append(f"  {'scene':<8} {'video':>22} {'gpu':>9} {'cpu':>9} {'video tiles':>12} {'ops':>6} {'plain':>6} {'inside':>6} {'edge':>6} {'mixed':>6}")
+    for row in rows:
+        video = "-" if row["video"] is None else "%dx%d -> %dx%d" % (*row["video"], *row["shown"])
+        tiles = "-" if row["video_tiles"] is None else f"{row['video_tiles']:.1f}"
+        counts = " ".join(f"{row['tiles'][kind]:>6}" for kind in ("plain", "inside", "edge", "mixed"))
+        text.append(f"  {row['scene']:<8} {video:>22} {row['gpu']:9.1f} {row['cpu']:9.1f} {tiles:>12} {row['ops']:>6} {counts}")
+    Path(args.text).write_text("\n".join(text) + "\n")
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dump", required=True)
-    parser.add_argument("--compiler", required=True)
-    parser.add_argument("--work", default=str(SUITE / ".build" / "compositor"))
-    parser.add_argument("--size", default="1920x1080")
-    parser.add_argument("--source", default="1280x720")
-    parser.add_argument("--rounds", type=int, default=20)
-    parser.add_argument("scenes", nargs="*", default=["demo", "play", "native", "shrunk", "menu", "view"])
+    commands = parser.add_subparsers(dest="command", required=True)
+    one = commands.add_parser("scene")
+    one.add_argument("dump")
+    one.add_argument("corpus")
+    one.add_argument("compiler")
+    one.add_argument("host")
+    one.add_argument("name")
+    one.add_argument("size", help="WxH")
+    one.add_argument("source", help="the video's WxH, native for its rectangle's own size, - for a scene without one")
+    one.add_argument("directory")
+    one = commands.add_parser("speed")
+    one.add_argument("json")
+    one.add_argument("text")
+    one.add_argument("--compositor", required=True)
+    one.add_argument("--plain", required=True)
+    one.add_argument("--rounds", type=int, default=20)
+    one.add_argument("--scenes", nargs="+", required=True)
+    one.add_argument("--sources", nargs="+", required=True, help="each scene's video as scene takes it")
     args = parser.parse_args()
-    work = Path(args.work)
-    work.mkdir(parents=True, exist_ok=True)
-    flags = " ".join(os.environ.get(name, "") for name in ("CPPFLAGS", "CFLAGS"))
-    libraries = " ".join(os.environ.get(name, "") for name in ("CTRFLAGS", "LDFLAGS"))
-    harness = work / "harness"
-    subprocess.run(f"cc -O2 {flags} -o {harness} {HERE / 'harness.c'} $(pkg-config --cflags --libs vulkan) {libraries} -lm", shell=True, check=True)
-    plain, host = work / "compose_plain.spv", work / "compose_layer.spv"
-    subprocess.run(["glslangValidator", "--quiet", "--target-env", "vulkan1.1", "-V", str(SUITE / "gpu" / "compose.comp"), "-o", str(plain)], check=True)
-    subprocess.run(["glslangValidator", "--quiet", "--target-env", "vulkan1.1", "-V", "-DGROUP=24", "-DLAYER", str(SUITE / "gpu" / "compose.comp"), "-o", str(host)], check=True)
-    width, height = args.size.split("x")
-    source = tuple(int(value) for value in args.source.split("x"))
-    for scene in args.scenes:
-        out = work / scene
-        out.mkdir(exist_ok=True)
-        frame = out / "frame.bin"
-        with frame.open("wb") as handle:
-            subprocess.run([args.dump, VIDEO.get(scene, scene), width, height], check=True, stdout=handle)
-        rect = rectangle(frame)
-        shown = {"native": None if rect is None else (rect[2] - rect[0], rect[3] - rect[1]), "shrunk": (3840, 2160)}.get(scene, source)
-        extra = [] if rect is None else [str(path) for path in programs(args.compiler, work, rect, shown, host)]
-        print(f"== {scene} {args.size}" + ("" if rect is None else f", video {rect[2] - rect[0]}x{rect[3] - rect[1]} from {shown[0]}x{shown[1]}"), flush=True)
-        subprocess.run([str(harness), str(plain), str(args.rounds), str(frame), str(out), *extra], check=True)
+    if args.command == "scene":
+        scene(args)
+    else:
+        speed(args)
 
 
 if __name__ == "__main__":

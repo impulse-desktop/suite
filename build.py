@@ -280,7 +280,7 @@ video_shader = program(
     deps=[video_codes, imgui, libstd],
 )
 
-# dev/compositor dumps headless ImGui frames for the compositor bench
+# the headless ImGui frames compositor_speed times the compositor over
 compositor_dump = program(
     name="compositor_dump",
     output="$(B)/dev/compositor_dump",
@@ -601,5 +601,33 @@ if not darwin:
             "--formats", *video_formats, "--pairs", *pairs, "--presets", *presets, "--cases", speed_dir,
             *ours_tools, *(["--placebo", f"{bench_dir}/placebo"] if libplacebo else []),
         ],
+        descr="SP",
+    ))
+
+    # `./build compositor_speed` times the compositor itself over the ImGui
+    # scenes compositor_dump makes at 1920x1080, the video of play and of its
+    # menu drawn from 1280x720, and play again from its rectangle's own size
+    # and from 4K (dev/compositor/bench.py tells how): a node makes each
+    # scene's frame and programs, one times them all after them
+    compositor_script = "$(S)/dev/compositor/bench.py"
+    compositor_dir = "$(B)/compositor_speed"
+    scenes = [("demo", "-"), ("play", "1280x720"), ("native", "native"), ("shrunk", "3840x2160"), ("menu", "1280x720"), ("view", "-")]
+    scene_nodes = []
+    for scene, source in scenes:
+        directory = f"{compositor_dir}/scenes/{scene}"
+        scene_nodes.append(command(
+            name=f"compositor_scene_{scene}",
+            inputs=bench_shader_inputs,
+            outputs=[f"{directory}/frame.bin", *(f"{directory}/{file}" for file in ("data.bin", "inside.spv", "edge.spv", "mixed.spv") if source != "-")],
+            deps=[compositor_dump, corpus_tool, video_shader, compositor_hosts],
+            cmd=["python3", compositor_script, "scene", "$(B)/dev/compositor_dump", *shader_tools, scene, "1920x1080", source, directory],
+            descr="CS",
+        ))
+    group("compositor_speed", command(
+        name="compositor_speed_report",
+        inputs=[compositor_script],
+        outputs=[f"{compositor_dir}/speed.json", f"{compositor_dir}/speed.txt", *(f"{compositor_dir}/{scene}/composed.ppm" for scene, _ in scenes)],
+        deps=[compositor_tool, compositor_hosts, *scene_nodes],
+        cmd=["python3", compositor_script, "speed", f"{compositor_dir}/speed.json", f"{compositor_dir}/speed.txt", *ours_tools, "--scenes", *(f"{compositor_dir}/scenes/{scene}" for scene, _ in scenes), "--sources", *(source for _, source in scenes)],
         descr="SP",
     ))
