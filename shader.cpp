@@ -1011,6 +1011,7 @@ namespace {
 
     constexpr u32 composeFill = 0x80000000u;
     constexpr int headerWords = 8;
+    constexpr u8 transferSrgb = 13;
     constexpr int opWords = 20;
 
     enum ComposeBuffer {
@@ -1050,8 +1051,8 @@ namespace {
         return ratio <= 1. ? lanczosTaps : 2 * (int)::ceil(::fmin(ratio, maxTaps / 2.) - 1e-9);
     }
 
-    static int reachOf(double ratio, int rows, bool identity) {
-        return identity ? rows : (int)::ceil((rows - 1) * ratio) + tapsOf(ratio) + 1;
+    static int reachOf(double ratio, int rows) {
+        return (int)::ceil((rows - 1) * ratio) + tapsOf(ratio) + 1;
     }
 
     static bool shrinking(const VideoShader& s) {
@@ -1069,13 +1070,12 @@ namespace {
     }
 
     static int footprintOf(const VideoShader& s) {
-        return reachOf(ratioOf(s, 1), (int)s.tile, false);
+        return reachOf(ratioOf(s, 1), (int)s.tile);
     }
 
     static int blockRows(const VideoShader& s, bool portions) {
         const int tile = (int)s.tile;
         const int channels = s.layout->alpha ? 4 : 3;
-        bool identity = s.size[0] == s.target[0] && s.size[1] == s.target[1];
         bool boxed = boxOf(s, 0) > 1 || boxOf(s, 1) > 1;
         bool subsampled = !boxed && !strcmp(s.layout->model, "yuv") && (s.chroma[0] < 1. || s.chroma[1] < 1.);
         double ratio[2] = {ratioOf(s, 0), ratioOf(s, 1)};
@@ -1086,11 +1086,11 @@ namespace {
                 continue;
             }
 
-            int reach[2] = {reachOf(ratio[0], tile, identity), portions ? rows : reachOf(ratio[1], rows, identity)};
+            int reach[2] = {reachOf(ratio[0], tile), portions ? rows : reachOf(ratio[1], rows)};
             int a = 0;
             int b = 0;
-            int c = identity ? 0 : reach[0] * reach[1] * channels;
-            int d = identity ? 0 : reach[1] * tile * channels;
+            int c = reach[0] * reach[1] * channels;
+            int d = reach[1] * tile * channels;
 
             if (subsampled) {
                 int chroma[2];
@@ -1722,6 +1722,12 @@ namespace {
             Node* w[lanczosTaps];
         };
 
+        struct ChromaRows {
+            int phase = 0;
+            Node* corner[2] = {nullptr, nullptr};
+            int reach[2] = {0, 0};
+        };
+
         Taps chromaTaps(Node* at, int i) {
             Taps t;
             int factor = (int)::lround(1. / s.chroma[i]);
@@ -1761,6 +1767,97 @@ namespace {
             return (pass + 1) * capacity > count ? g.lt(index, count) : nullptr;
         }
 
+        ChromaRows chromaRows(Kernel& k, Node* const (&corner)[2], const int (&reach)[2], Node* const (&last)[2], Node* lane, Vector<Node*>& pending) {
+            const int tile = (int)s.tile;
+            ChromaRows chroma;
+
+            for (int i = 0; i < 2; i++) {
+                int radius = s.chroma[i] < 1. ? lanczosRadius - 1 : 0;
+
+                chroma.corner[i] = g.add(g.convert(g.floor(g.sub(g.mul(g.convert(corner[i], Kind::Float), s.chroma[i]), s.chroma[2 + i])), Kind::Int), -radius);
+                chroma.reach[i] = (int)::ceil((reach[i] - 1) * s.chroma[i]) + 3 + 2 * radius;
+            }
+
+            int positions = chroma.reach[0] * chroma.reach[1];
+            int phase = k.open(positions * 2);
+
+            k.before[phase].xchg(pending);
+
+            for (int pass = 0; pass * tile * tile < positions; pass++) {
+                Node* index = g.add(lane, pass * tile * tile);
+                Node* y = g.convert(g.floor(g.mul(g.add(g.convert(index, Kind::Float), 0.5), 1. / chroma.reach[0])), Kind::Uint);
+                Node* x = g.sub(index, g.mul(y, chroma.reach[0]));
+                Node* across = g.convert(g.clamp(g.add(chroma.corner[0], g.convert(x, Kind::Int)), 0, s.size[2] - 1.), Kind::Uint);
+                Node* line = g.convert(g.clamp(g.add(chroma.corner[1], g.convert(y, Kind::Int)), 0, s.size[3] - 1.), Kind::Uint);
+                Node* slot = g.mul(index, 2);
+                Node* guard = partial(index, pass, positions, tile * tile);
+
+                for (int c = 1; c <= 2; c++) {
+                    int plane = l.components[c][0];
+                    Node* row = g.shr(g.add(g.u(s.planeOffset[plane]), g.mul(line, g.u(s.lineSize[plane]))), 2);
+
+                    k.stores[phase].pushBack(Store{g.add(slot, c - 1), value(c, window(c, row, across)), guard});
+                }
+            }
+
+            positions = chroma.reach[0] * reach[1];
+            chroma.phase = k.open(positions * 2);
+
+            for (int pass = 0; pass * tile * tile < positions; pass++) {
+                Node* index = g.add(lane, pass * tile * tile);
+                Node* y = g.convert(g.floor(g.mul(g.add(g.convert(index, Kind::Float), 0.5), 1. / chroma.reach[0])), Kind::Uint);
+                Node* x = g.sub(index, g.mul(y, chroma.reach[0]));
+                Taps down = chromaTaps(g.clamp(g.add(corner[1], g.convert(y, Kind::Int)), 0, last[1]), 1);
+                Node* start = g.convert(g.sub(down.base, chroma.corner[1]), Kind::Uint);
+                Node* slot = g.mul(index, 2);
+                Node* guard = partial(index, pass, positions, tile * tile);
+
+                for (int c = 1; c <= 2; c++) {
+                    Node* sum = g.f(0.);
+
+                    for (int t = 0; t < down.count; t++) {
+                        sum = g.add(sum, g.mul(down.w[t], g.shared(g.add(g.mul(g.add(g.mul(g.add(start, t), chroma.reach[0]), x), 2), c - 1), phase)));
+                    }
+
+                    k.stores[chroma.phase].pushBack(Store{g.add(slot, c - 1), sum, guard});
+                }
+            }
+
+            return chroma;
+        }
+
+        void chromaAt(const ChromaRows& chroma, Node* at, Node* y, Node* (&codes)[4]) {
+            Taps across = chromaTaps(at, 0);
+            Node* start = g.convert(g.sub(across.base, chroma.corner[0]), Kind::Uint);
+
+            for (int c = 1; c <= 2; c++) {
+                Node* sum = g.f(0.);
+
+                for (int t = 0; t < across.count; t++) {
+                    sum = g.add(sum, g.mul(across.w[t], g.shared(g.add(g.mul(g.add(g.mul(y, chroma.reach[0]), g.add(start, t)), 2), c - 1), chroma.phase)));
+                }
+
+                codes[c] = sum;
+            }
+        }
+
+        Node* placeTile(Node* (&origin)[2]) {
+            Node* placed = o.tiles == ShaderTiles::Mixed ? nullptr : g.fetch(Tiles, g.add(g.frame(3, Kind::Uint, word), g.invocation(4, 65535.)));
+
+            origin[0] = g.origin(6);
+            origin[1] = g.origin(7);
+
+            if (placed) {
+                Node* tilesAcross = g.frame(2, Kind::Uint, 65535.);
+                Node* tileRow = g.convert(g.floor(g.div(g.add(g.convert(placed, Kind::Float), 0.5), g.convert(tilesAcross, Kind::Float))), Kind::Uint);
+
+                origin[0] = g.convert(g.mul(g.sub(placed, g.mul(tileRow, tilesAcross)), (double)s.tile), Kind::Int);
+                origin[1] = g.convert(g.mul(tileRow, (double)s.tile), Kind::Int);
+            }
+
+            return placed;
+        }
+
         void kernel(Kernel& k) {
             const int tile = (int)s.tile;
             const int channels = l.alpha ? 4 : 3;
@@ -1769,8 +1866,7 @@ namespace {
             bool boxed = box[0] > 1 || box[1] > 1;
             bool chromaNear = boxed && model("yuv") && (s.chroma[0] < 1. || s.chroma[1] < 1.);
             bool subsampled = !boxed && model("yuv") && (s.chroma[0] < 1. || s.chroma[1] < 1.);
-            bool identity = s.size[0] == s.target[0] && s.size[1] == s.target[1];
-            bool portions = !identity && shrinking(s) && !blockRows(s, false);
+            bool portions = shrinking(s) && !blockRows(s, false);
             const int rows = blockRows(s, portions);
             bool sigmoid = sdr && s.size[0] <= s.target[0] && s.size[1] <= s.target[1];
             double ratio[2];
@@ -1785,16 +1881,8 @@ namespace {
                 fail(StringView(u8"a video layer does not fit its tile"));
             }
 
-            Node* placed = o.tiles == ShaderTiles::Mixed ? nullptr : g.fetch(Tiles, g.add(g.frame(3, Kind::Uint, word), g.invocation(4, 65535.)));
-            Node* origin[2] = {g.origin(6), g.origin(7)};
-
-            if (placed) {
-                Node* tilesAcross = g.frame(2, Kind::Uint, 65535.);
-                Node* tileRow = g.convert(g.floor(g.div(g.add(g.convert(placed, Kind::Float), 0.5), g.convert(tilesAcross, Kind::Float))), Kind::Uint);
-
-                origin[0] = g.convert(g.mul(g.sub(placed, g.mul(tileRow, tilesAcross)), (double)tile), Kind::Int);
-                origin[1] = g.convert(g.mul(tileRow, (double)tile), Kind::Int);
-            }
+            Node* origin[2];
+            Node* placed = placeTile(origin);
 
             for (int i = 0; i < 2; i++) {
                 ratio[i] = ratioOf(s, i);
@@ -1828,68 +1916,16 @@ namespace {
                 int top = block * rows;
                 Node* opening = g.clamp(g.add(first[1], top), 0., s.target[1] - 1.);
                 Node* head[2] = {first[0], rows == tile ? first[1] : opening};
-                int reach[2] = {reachOf(ratio[0], tile, identity), portions ? rows : reachOf(ratio[1], rows, identity)};
-                int chromaReach[2] = {0, 0};
+                int reach[2] = {reachOf(ratio[0], tile), portions ? rows : reachOf(ratio[1], rows)};
                 Node* corner[2];
-                Node* chromaCorner[2] = {nullptr, nullptr};
-                int chromaPhase = 0;
+                ChromaRows chroma;
                 int lightPhase = 0;
 
-                corner[0] = identity ? g.convert(head[0], Kind::Int) : g.add(g.convert(g.floor(g.sub(g.mul(g.add(g.convert(head[0], Kind::Float), 0.5), ratio[0]), 0.5)), Kind::Int), 1 - tapsOf(ratio[0]) / 2);
-                corner[1] = portions ? g.add(tileCorner, g.mul(portion, rows)) : identity ? g.convert(head[1], Kind::Int) : g.add(g.convert(g.floor(g.sub(g.mul(g.add(g.convert(head[1], Kind::Float), 0.5), ratio[1]), 0.5)), Kind::Int), 1 - tapsOf(ratio[1]) / 2);
+                corner[0] = g.add(g.convert(g.floor(g.sub(g.mul(g.add(g.convert(head[0], Kind::Float), 0.5), ratio[0]), 0.5)), Kind::Int), 1 - tapsOf(ratio[0]) / 2);
+                corner[1] = portions ? g.add(tileCorner, g.mul(portion, rows)) : g.add(g.convert(g.floor(g.sub(g.mul(g.add(g.convert(head[1], Kind::Float), 0.5), ratio[1]), 0.5)), Kind::Int), 1 - tapsOf(ratio[1]) / 2);
 
                 if (subsampled) {
-                    for (int i = 0; i < 2; i++) {
-                        int radius = s.chroma[i] < 1. ? lanczosRadius - 1 : 0;
-
-                        chromaCorner[i] = g.add(g.convert(g.floor(g.sub(g.mul(g.convert(corner[i], Kind::Float), s.chroma[i]), s.chroma[2 + i])), Kind::Int), -radius);
-                        chromaReach[i] = (int)::ceil((reach[i] - 1) * s.chroma[i]) + 3 + 2 * radius;
-                    }
-
-                    int positions = chromaReach[0] * chromaReach[1];
-                    int phase = k.open(positions * 2);
-
-                    k.before[phase].xchg(pending);
-
-                    for (int pass = 0; pass * tile * tile < positions; pass++) {
-                        Node* index = g.add(lane, pass * tile * tile);
-                        Node* y = g.convert(g.floor(g.mul(g.add(g.convert(index, Kind::Float), 0.5), 1. / chromaReach[0])), Kind::Uint);
-                        Node* x = g.sub(index, g.mul(y, chromaReach[0]));
-                        Node* across = g.convert(g.clamp(g.add(chromaCorner[0], g.convert(x, Kind::Int)), 0, s.size[2] - 1.), Kind::Uint);
-                        Node* line = g.convert(g.clamp(g.add(chromaCorner[1], g.convert(y, Kind::Int)), 0, s.size[3] - 1.), Kind::Uint);
-                        Node* slot = g.mul(index, 2);
-                        Node* guard = partial(index, pass, positions, tile * tile);
-
-                        for (int c = 1; c <= 2; c++) {
-                            int plane = l.components[c][0];
-                            Node* row = g.shr(g.add(g.u(s.planeOffset[plane]), g.mul(line, g.u(s.lineSize[plane]))), 2);
-
-                            k.stores[phase].pushBack(Store{g.add(slot, c - 1), value(c, window(c, row, across)), guard});
-                        }
-                    }
-
-                    positions = chromaReach[0] * reach[1];
-                    chromaPhase = k.open(positions * 2);
-
-                    for (int pass = 0; pass * tile * tile < positions; pass++) {
-                        Node* index = g.add(lane, pass * tile * tile);
-                        Node* y = g.convert(g.floor(g.mul(g.add(g.convert(index, Kind::Float), 0.5), 1. / chromaReach[0])), Kind::Uint);
-                        Node* x = g.sub(index, g.mul(y, chromaReach[0]));
-                        Taps down = chromaTaps(g.clamp(g.add(corner[1], g.convert(y, Kind::Int)), 0, last[1]), 1);
-                        Node* start = g.convert(g.sub(down.base, chromaCorner[1]), Kind::Uint);
-                        Node* slot = g.mul(index, 2);
-                        Node* guard = partial(index, pass, positions, tile * tile);
-
-                        for (int c = 1; c <= 2; c++) {
-                            Node* sum = g.f(0.);
-
-                            for (int t = 0; t < down.count; t++) {
-                                sum = g.add(sum, g.mul(down.w[t], g.shared(g.add(g.mul(g.add(g.mul(g.add(start, t), chromaReach[0]), x), 2), c - 1), phase)));
-                            }
-
-                            k.stores[chromaPhase].pushBack(Store{g.add(slot, c - 1), sum, guard});
-                        }
-                    }
+                    chroma = chromaRows(k, corner, reach, last, lane, pending);
                 }
 
                 auto lightAt = [&](Node* x, Node* y, Node*(&out)[4]) {
@@ -1937,18 +1973,7 @@ namespace {
                     decodeAt(at, codes);
 
                     if (subsampled) {
-                        Taps across = chromaTaps(at[0], 0);
-                        Node* start = g.convert(g.sub(across.base, chromaCorner[0]), Kind::Uint);
-
-                        for (int c = 1; c <= 2; c++) {
-                            Node* sum = g.f(0.);
-
-                            for (int t = 0; t < across.count; t++) {
-                                sum = g.add(sum, g.mul(across.w[t], g.shared(g.add(g.mul(g.add(g.mul(y, chromaReach[0]), g.add(start, t)), 2), c - 1), chromaPhase)));
-                            }
-
-                            codes[c] = sum;
-                        }
+                        chromaAt(chroma, at[0], y, codes);
                     }
 
                     signalOf(codes, signal, out[3]);
@@ -1958,11 +1983,6 @@ namespace {
                         out[c] = rgb[c];
                     }
                 };
-
-                if (identity) {
-                    lightAt(local[0], local[1], light);
-                    continue;
-                }
 
                 int positions = reach[0] * reach[1];
 
@@ -2051,20 +2071,159 @@ namespace {
             Node* shown[3];
 
             for (int c = 0; c < 3; c++) {
-                Node* straight = channels == 4 && !identity ? g.select(g.lt(0., light[3]), g.div(light[c], light[3]), g.f(0.)) : light[c];
+                Node* straight = channels == 4 ? g.select(g.lt(0., light[3]), g.div(light[c], light[3]), g.f(0.)) : light[c];
 
-                shown[c] = sigmoid && !identity ? unsigmoidize(straight) : straight;
+                shown[c] = sigmoid ? unsigmoidize(straight) : straight;
             }
 
             Node* layer[4];
 
             outputOf(shown, layer);
-            layer[3] = identity ? light[3] : alpha;
+            layer[3] = alpha;
             compose(k, placed, origin, local, layer);
         }
 
         Node* fract(Node* x) {
             return g.sub(x, g.floor(x));
+        }
+
+        void pixels(Kernel& k, Node* const (&origin)[2], Node* const (&local)[2]) {
+            for (int i = 0; i < 2; i++) {
+                k.pixel[i] = g.add(origin[i], g.convert(local[i], Kind::Int));
+
+                Node* within = g.convert(g.lt(k.pixel[i], g.frame(i, Kind::Int, 65535.)), Kind::Float);
+
+                k.drawn = i ? g.mul(k.drawn, within) : within;
+            }
+
+            k.drawn = g.lt(0.5, k.drawn);
+        }
+
+        Node* dither(const Kernel& k) {
+            Node* at[2] = {g.add(g.convert(k.pixel[0], Kind::Float), 0.5), g.add(g.convert(k.pixel[1], Kind::Float), 0.5)};
+
+            return g.sub(fract(g.mul(fract(g.add(g.mul(at[0], 0.06711056), g.mul(at[1], 0.00583715))), 52.9829189)), 0.5);
+        }
+
+        bool srgbCurve() const {
+            for (const VideoTransfer& known : videoTransfers) {
+                if (known.code != transferSrgb) {
+                    continue;
+                }
+
+                for (int i = 0; i < 11; i++) {
+                    if (::fabs(s.curve[i] - known.eotf[i]) > 1e-9 * (1. + ::fabs(known.eotf[i]))) {
+                        return false;
+                    }
+                }
+
+                return true;
+            }
+
+            return false;
+        }
+
+        bool exactCodes() const {
+            if (l.floating || model("palette") || model("bayer") || !strcmp(s.system, "cl")) {
+                return false;
+            }
+
+            for (int r = 0; r < 3; r++) {
+                int nonzero = 0;
+
+                for (int c = 0; c < 3; c++) {
+                    if (s.decode[r][c] == 0.) {
+                        continue;
+                    }
+
+                    if (::fabs(s.decode[r][c] * 255. - 1.) > 1e-9 || l.components[c][4] != 8) {
+                        return false;
+                    }
+
+                    nonzero++;
+                }
+
+                if (nonzero != 1 || s.bias[r] != 0.) {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        bool unchanged(Kernel& k, Node* const (&signal)[3], Node* alpha, Node* const (&origin)[2], Node* const (&local)[2]) {
+            bool power = s.curve[10] < 0. && s.curve[0] == 1. && s.curve[2] == 1. && s.curve[3] == 0. && s.curve[4] == 0.;
+            bool srgb = srgbCurve();
+
+            if (o.tiles != ShaderTiles::Inside || o.output != ShaderOutput::Srgb || alpha->op != Op::Const || alpha->value != 1.) {
+                return false;
+            }
+
+            if (strcmp(s.output, "sdr") || strcmp(s.conversion, "same") || !strcmp(s.system, "ictcp") || !curved() || (!srgb && !power)) {
+                return false;
+            }
+
+            bool exact = srgb && exactCodes();
+
+            pixels(k, origin, local);
+
+            Node* noise = exact ? nullptr : g.mul(dither(k), 1. / 255.);
+
+            for (int c = 0; c < 3; c++) {
+                Node* v = g.clamp(signal[c], 0., 1.);
+                double gamma = s.curve[1];
+                Node* coded = srgb ? v : g.select(g.le(v, ::pow(0.0031308, 1. / gamma)), g.mul(g.pow(v, gamma), 12.92), g.sub(g.mul(g.pow(v, gamma / 2.4), 1.055), 0.055));
+
+                k.encoded[c] = noise ? g.add(coded, noise) : coded;
+            }
+
+            k.encoded[3] = g.f(1.);
+
+            return true;
+        }
+
+        void native(Kernel& k) {
+            const int tile = (int)s.tile;
+            bool subsampled = model("yuv") && (s.chroma[0] < 1. || s.chroma[1] < 1.);
+            Node* local[2] = {g.invocation(2, tile - 1), g.invocation(3, tile - 1)};
+            Node* origin[2];
+            Node* placed = placeTile(origin);
+            Node* first[2];
+            Node* last[2];
+            Node* at[2];
+            Node* codes[4];
+            Node* signal[3];
+            Node* alpha;
+
+            for (int i = 0; i < 2; i++) {
+                first[i] = g.sub(origin[i], (double)s.origin[i]);
+                last[i] = g.i(s.size[i] - 1.);
+                at[i] = g.clamp(g.add(first[i], g.convert(local[i], Kind::Int)), 0, last[i]);
+            }
+
+            decodeAt(at, codes);
+
+            if (subsampled) {
+                Vector<Node*> pending;
+                const int reach[2] = {tile, tile};
+                ChromaRows chroma = chromaRows(k, first, reach, last, g.add(g.mul(local[1], tile), local[0]), pending);
+
+                chromaAt(chroma, at[0], local[1], codes);
+            }
+
+            signalOf(codes, signal, alpha);
+
+            if (unchanged(k, signal, alpha, origin, local)) {
+                return;
+            }
+
+            Node* light[3];
+            Node* layer[4];
+
+            lightOf(signal, light);
+            outputOf(light, layer);
+            layer[3] = alpha;
+            compose(k, placed, origin, local, layer);
         }
 
         void compose(Kernel& k, Node* tile, Node* const (&origin)[2], Node* const (&local)[2], Node* const (&layer)[4]) {
@@ -2094,15 +2253,7 @@ namespace {
             Node* header = g.mul(tile, headerWords);
             Node* inside = g.f(1.);
 
-            for (int i = 0; i < 2; i++) {
-                k.pixel[i] = g.add(origin[i], g.convert(local[i], Kind::Int));
-
-                Node* within = g.convert(g.lt(k.pixel[i], g.frame(i, Kind::Int, 65535.)), Kind::Float);
-
-                k.drawn = i ? g.mul(k.drawn, within) : within;
-            }
-
-            k.drawn = g.lt(0.5, k.drawn);
+            pixels(k, origin, local);
 
             if (o.tiles == ShaderTiles::Edge) {
                 Node* video = g.band(g.fetch(List, g.fetch(Headers, g.add(header, 1))), (double)~composeFill);
@@ -2125,8 +2276,7 @@ namespace {
                 acc[c] = g.add(c < 3 ? g.mul(k.shown[c], cover) : cover, g.mul(color, keep));
             }
 
-            Node* at[2] = {g.add(g.convert(k.pixel[0], Kind::Float), 0.5), g.add(g.convert(k.pixel[1], Kind::Float), 0.5)};
-            Node* noise = g.sub(fract(g.mul(fract(g.add(g.mul(at[0], 0.06711056), g.mul(at[1], 0.00583715))), 52.9829189)), 0.5);
+            Node* noise = dither(k);
             Node* visible = g.lt(0., acc[3]);
 
             for (int c = 0; c < 3; c++) {
@@ -3299,7 +3449,12 @@ StringView compile(ObjPool& pool, const VideoShader& shader, const ShaderOptions
     }
 
     layer.tile = shader.tile;
-    video.kernel(layer);
+
+    if (shader.size[0] == shader.target[0] && shader.size[1] == shader.target[1]) {
+        video.native(layer);
+    } else {
+        video.kernel(layer);
+    }
 
 #if defined(__APPLE__)
     return options.tiles == ShaderTiles::Mixed ? mslLayer(pool, layer) : mslKernel(pool, layer);
