@@ -12,7 +12,7 @@ for name in probe_kernel probe_layer probe_host; do
 done
 ls "$(dirname "$(xcrun -sdk macosx -f metal)")" > tools.txt 2>&1
 rm -f probe_owned.air probe_owned.metallib
-xcrun -sdk macosx metal -c probe_owned.ll -o probe_owned.air > probe_owned.log 2>&1
+xcrun -sdk macosx metal -mmacosx-version-min=14.0 -c probe_owned.ll -o probe_owned.air > probe_owned.log 2>&1
 if [ -f probe_owned.air ]; then
     xcrun -sdk macosx metallib probe_owned.air -o probe_owned.metallib >> probe_owned.log 2>&1
 fi
