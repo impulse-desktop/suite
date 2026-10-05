@@ -111,7 +111,7 @@ int main(void) {
         printf("layer function: %s, type %d\n", layer ? "found" : "missing", layer ? (int)layer.functionType : -1);
 
         NSString* source = [NSString stringWithContentsOfFile:@"probe_host.metal" encoding:NSUTF8StringEncoding error:&error];
-        NSArray<NSString*>* variants = @[@"extern float4 layer", @"extern [[visible]] float4 layer"];
+        NSArray<NSString*>* variants = @[@"extern float4 layer", @"[[visible]] float4 layer", @"[[visible]] extern float4 layer"];
 
         for (NSString* declaration in variants) {
             NSString* text = [source stringByReplacingOccurrencesOfString:@"extern float4 layer" withString:declaration];
