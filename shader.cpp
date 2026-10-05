@@ -1774,7 +1774,7 @@ namespace {
             for (int i = 0; i < 2; i++) {
                 int radius = s.chroma[i] < 1. ? lanczosRadius - 1 : 0;
 
-                chroma.corner[i] = g.add(g.convert(g.floor(g.sub(g.mul(g.convert(corner[i], Kind::Float), s.chroma[i]), s.chroma[2 + i])), Kind::Int), -radius);
+                chroma.corner[i] = g.add(g.convert(g.floor(g.sub(g.mul(g.convert(g.clamp(corner[i], 0, last[i]), Kind::Float), s.chroma[i]), s.chroma[2 + i])), Kind::Int), -radius);
                 chroma.reach[i] = (int)::ceil((reach[i] - 1) * s.chroma[i]) + 3 + 2 * radius;
             }
 
@@ -1886,7 +1886,7 @@ namespace {
 
             for (int i = 0; i < 2; i++) {
                 ratio[i] = ratioOf(s, i);
-                first[i] = g.sub(origin[i], (double)s.origin[i]);
+                first[i] = g.min(g.sub(origin[i], (double)s.origin[i]), s.target[i] - 1.);
                 last[i] = g.i(::ceil((double)s.size[i] / box[i]) - 1.);
                 pixel[i] = g.clamp(g.add(first[i], g.convert(local[i], Kind::Int)), 0., s.target[i] - 1.);
             }
