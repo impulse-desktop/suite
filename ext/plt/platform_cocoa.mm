@@ -1106,17 +1106,6 @@ WindowImpl::WindowImpl(PlatformImpl& platform_, const WindowOptions& options)
     [view registerForDraggedTypes:@[ NSPasteboardTypeString, NSPasteboardTypeFileURL ]];
     requestTitle(options.title);
     requestMinimumSize(options.minimumWidth, options.minimumHeight);
-    // CAMetalDisplayLink paces frames to the display the window is on and
-    // hands each frame its drawable with the time it is due on the glass,
-    // so the renderer never blocks on nextDrawable. It is paused between
-    // requests; a live resize renders outside it, synchronously, inside
-    // AppKit's own transaction (see resizeFrame()).
-    displayLinkTarget = [PltDisplayLinkTarget new];
-    displayLinkTarget.owner = this;
-    displayLink = [[CAMetalDisplayLink alloc] initWithMetalLayer:(CAMetalLayer*)(view.layer)];
-    displayLink.delegate = displayLinkTarget;
-    displayLink.paused = YES;
-    [displayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
 }
 
 WindowImpl::~WindowImpl() {
@@ -1149,6 +1138,20 @@ void WindowImpl::requestFrame() {
 
 void WindowImpl::startDisplayLink() {
     idleFrames = 0;
+    // CAMetalDisplayLink paces frames to the display the window is on and
+    // hands each frame its drawable with the time it is due on the glass,
+    // so the renderer never blocks on nextDrawable. It is made at the first
+    // request, once the renderer has given the layer its device (a link on
+    // a device-less layer throws); paused between requests; a live resize
+    // renders outside it, synchronously, inside AppKit's own transaction
+    // (see resizeFrame()).
+    if (displayLink == nil) {
+        displayLinkTarget = [PltDisplayLinkTarget new];
+        displayLinkTarget.owner = this;
+        displayLink = [[CAMetalDisplayLink alloc] initWithMetalLayer:(CAMetalLayer*)(view.layer)];
+        displayLink.delegate = displayLinkTarget;
+        [displayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+    }
     displayLink.paused = NO;
 }
 
