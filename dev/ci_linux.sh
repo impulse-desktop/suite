@@ -34,7 +34,7 @@ else
     # wabt's wasm2c turns the vendored image decoder into C
     apt-get install --yes --no-install-recommends python3 pkg-config glslang-tools wabt curl ca-certificates \
         libwayland-dev libwayland-bin wayland-protocols libxkbcommon-dev libcairo2-dev libfontconfig-dev \
-        libvulkan-dev libpng-dev libjxl-dev libavformat-dev libavcodec-dev libavutil-dev libswresample-dev libswscale-dev libopenal-dev ffmpeg
+        libvulkan-dev libpng-dev libjxl-dev libavformat-dev libavcodec-dev libavutil-dev libswresample-dev libopenal-dev ffmpeg
     # the package leaves out the includes its wasm2c runtime is made of;
     # they come from wabt's tree, at the packaged version
     rt=/usr/share/wabt/wasm2c
