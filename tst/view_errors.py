@@ -1,9 +1,10 @@
 """What the viewer does with what it cannot show: no arguments is a usage
 error; a path that is not there, a directory without images or one that
-cannot be read leaves the viewer empty, the path's trouble reported; a file
-no coder takes or a truncated one is reported in the properties panel and
-stays in the list, its neighbours showing all the same; a Vulkan that fails
-ends the tool with the error."""
+cannot be read leaves the list empty, the path's trouble written at its
+top; a file no coder takes or a truncated one stays in the list with its
+error in place of its thumbnail and in the properties panel, its
+neighbours showing all the same; a Vulkan that fails ends the tool with
+the error."""
 
 import os
 

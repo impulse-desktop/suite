@@ -60,6 +60,8 @@ namespace {
     struct Entry {
         Buffer path;
         size_t nameAt = 0;
+        u32 arg = 0;
+        Buffer error;
         bool loading = false;
         Load thumb = Load::None;
         ImTextureRef thumbTex;
@@ -182,31 +184,14 @@ namespace {
         return entry;
     }
 
-    void addFile(ObjPool& pool, Vector<Entry*>& entries, StringView path) {
-        entries.pushBack(makeEntry(pool, path));
-    }
+    StringView nameOf(StringView path) {
+        size_t slash = path.length();
 
-    void addDirectory(ObjPool& pool, Vector<Entry*>& entries, StringView dir) {
-        Vector<Entry*> found;
+        while (slash > 0 && path[slash - 1] != '/') {
+            slash--;
+        }
 
-        listDir(dir, [&](const TPathInfo& info) {
-            if (!info.isDir && imageName(info.item)) {
-                StringBuilder path;
-
-                path << dir;
-
-                if (!dir.endsWith(StringView(u8"/"))) {
-                    path << StringView(u8"/");
-                }
-
-                path << info.item;
-                found.pushBack(makeEntry(pool, StringView(path)));
-            }
-        });
-        quickSort(found.mutBegin(), found.mutEnd(), [](const Entry* a, const Entry* b) {
-            return a->name() < b->name();
-        });
-        entries.append(found.begin(), found.end());
+        return StringView(path.begin() + slash, path.end());
     }
 
     u32 thumbSideFor(float innerW) {
@@ -245,8 +230,47 @@ namespace {
         text << tenths / 10 << StringView(u8".") << tenths % 10 << StringView(u8" ") << units[unit];
     }
 
-    struct AcceptShow;
-    struct AcceptList;
+    struct ViewApp;
+
+    struct Job: Runable {
+        ObjPool* owner;
+        Channel* results;
+        Ui* wake;
+        bool listing;
+
+        Job(ObjPool* owner, ViewApp& app, bool listing);
+        void post();
+    };
+
+    struct Decoded final: Job {
+        Buffer path;
+        size_t nameAt;
+        u32 side;
+        u32 thumbSide;
+        u64 request;
+        Image* image = nullptr;
+        Image* thumb = nullptr;
+        i64 fileBytes = -1;
+        Buffer fileModified;
+        Buffer error;
+        Buffer timing;
+
+        Decoded(ObjPool* owner, ViewApp& app, const Entry& entry, u32 side, u32 thumbSide, u64 request);
+        void run() override;
+    };
+
+    struct Listed final: Job {
+        u32 arg;
+        Buffer path;
+        bool alone;
+        bool directory = false;
+        Buffer folder;
+        Vector<StringView> names;
+        Buffer error;
+
+        Listed(ObjPool* owner, ViewApp& app, u32 arg, StringView path, bool alone);
+        void run() override;
+    };
 
     struct ShownImage {
         ObjPool* owner;
@@ -259,12 +283,13 @@ namespace {
         Buffer fileModified;
         Buffer error;
 
-        ShownImage(ObjPool* owner, AcceptShow& result);
+        ShownImage(ObjPool* owner, Ui* ui, const Entry* entry, Decoded& result);
         ~ShownImage() noexcept;
     };
 
     struct ViewApp {
         Ui* ui = nullptr;
+        ObjPool* pool = nullptr;
         Channel* jobs = nullptr;
         Channel* results = nullptr;
         Thread* workers[workerCount] = {};
@@ -273,8 +298,11 @@ namespace {
         bool showPending = false;
         Vector<size_t> wantedThumbs;
         u32 thumbSide = thumbTexelsMin;
+        char** paths = nullptr;
+        u32 pathCount = 0;
+        u32 listedNext = 0;
+        Buffer problems;
         Vector<Entry*> entries;
-        ObjPool* listing = nullptr;
         size_t current = 0;
         u32 maxSide = 0;
         const ShownImage* shown = nullptr;
@@ -291,10 +319,12 @@ namespace {
 
         void startWorkers(ObjPool& pool);
         void stopWorkers();
-        void list(int count, char** paths);
-        void adopt(AcceptList& listed);
+        void open(u32 count, char** given);
         void accept();
+        void take(Decoded& decoded);
+        void adopt(Listed& listed);
         void submit();
+        void dispatch(Job* job);
         void setThumb(Entry& entry, u32 side, Image& image);
         void select(size_t index);
         void show(size_t index);
@@ -313,82 +343,6 @@ namespace {
         Channel* jobs;
 
         explicit Worker(Channel* jobs);
-        void run() override;
-    };
-
-    struct AcceptThumb final: Runable {
-        ObjPool* owner;
-        ViewApp* app;
-        Entry* entry;
-        u32 side;
-        Image* image = nullptr;
-        Buffer error;
-        Buffer timing;
-
-        AcceptThumb(ObjPool* owner, ViewApp* app, Entry* entry, u32 side);
-        void run() override;
-    };
-
-    struct AcceptShow final: Runable {
-        ObjPool* owner;
-        ViewApp* app;
-        Entry* entry;
-        u64 request;
-        u32 thumbSide;
-        Image* image = nullptr;
-        Image* thumb = nullptr;
-        Buffer error;
-        Buffer timing;
-        i64 fileBytes = -1;
-        Buffer fileModified;
-
-        AcceptShow(ObjPool* owner, ViewApp* app, Entry* entry);
-        void run() override;
-    };
-
-    struct AcceptList final: Runable {
-        ViewApp* app;
-        Vector<Entry*> entries;
-        size_t selected = 0;
-        bool named = false;
-        Buffer errors;
-
-        explicit AcceptList(ViewApp* app);
-        void run() override;
-    };
-
-    struct LoadThumb final: Runable {
-        Buffer path;
-        size_t nameAt;
-        Channel* results;
-        Ui* wake;
-        AcceptThumb* reply;
-
-        explicit LoadThumb(AcceptThumb* reply);
-        void run() override;
-    };
-
-    struct LoadShow final: Runable {
-        Buffer path;
-        size_t nameAt;
-        u32 side;
-        Channel* results;
-        Ui* wake;
-        AcceptShow* reply;
-
-        explicit LoadShow(AcceptShow* reply);
-        void run() override;
-    };
-
-    struct ListPaths final: Runable {
-        ObjPool* pool;
-        int count;
-        char** paths;
-        Channel* results;
-        Ui* wake;
-        AcceptList* reply;
-
-        ListPaths(ObjPool* pool, AcceptList* reply, int count, char** paths);
         void run() override;
     };
 }
@@ -458,14 +412,14 @@ StringView Entry::name() const {
     return StringView(whole.begin() + nameAt, whole.end());
 }
 
-ShownImage::ShownImage(ObjPool* owner_, AcceptShow& result)
+ShownImage::ShownImage(ObjPool* owner_, Ui* ui_, const Entry* entry_, Decoded& result)
     : owner(owner_)
-    , ui(result.app->ui)
-    , entry(result.entry)
+    , ui(ui_)
+    , entry(entry_)
     , fileBytes(result.fileBytes)
 {
     fileModified.xchg(result.fileModified);
-    error.xchg(result.error);
+    error = Buffer(StringView(result.error));
 
     if (error.empty()) {
         width = result.image->width();
@@ -493,218 +447,98 @@ void Worker::run() {
     }
 }
 
-AcceptThumb::AcceptThumb(ObjPool* owner_, ViewApp* app_, Entry* entry_, u32 side_)
+Job::Job(ObjPool* owner_, ViewApp& app, bool listing_)
     : owner(owner_)
-    , app(app_)
-    , entry(entry_)
-    , side(side_)
+    , results(app.results)
+    , wake(app.ui)
+    , listing(listing_)
 {
 }
 
-void AcceptThumb::run() {
-    ScopedGuard cleanup = [pool = owner] {
-        delete pool;
-    };
-    entry->loading = false;
-    app->ui->timing(StringView(timing));
-
-    if (!error.empty()) {
-        entry->thumb = Load::Failed;
-        app->ui->trace(StringView(StringBuilder() << StringView(u8"no thumbnail ") << entry->name() << StringView(u8": ") << StringView(error)));
-        return;
-    }
-
-    app->setThumb(*entry, side, *image);
-}
-
-AcceptShow::AcceptShow(ObjPool* owner_, ViewApp* app_, Entry* entry_)
-    : owner(owner_)
-    , app(app_)
-    , entry(entry_)
-    , request(app_->showRequest)
-    , thumbSide(app_->thumbSide)
-{
-}
-
-void AcceptShow::run() {
-    ScopedGuard cleanup = [pool = owner] {
-        delete pool;
-    };
-    entry->loading = false;
-    app->ui->timing(StringView(timing));
-
-    if (thumb) {
-        app->setThumb(*entry, thumbSide, *thumb);
-    } else if (!error.empty() && entry->thumb != Load::Ready) {
-        entry->thumb = Load::Failed;
-        app->ui->trace(StringView(StringBuilder() << StringView(u8"no thumbnail ") << entry->name() << StringView(u8": ") << StringView(error)));
-    }
-
-    if (request != app->showRequest) {
-        app->ui->trace(StringView(StringBuilder() << StringView(u8"discarded image ") << entry->name()));
-        return;
-    }
-
-    ObjPool* storage = ObjPool::fromMemoryRaw();
-    const ShownImage* next = storage->make<ShownImage>(storage, *this);
-
-    app->replaceShown(next);
-
-    if (!next->error.empty()) {
-        app->ui->trace(StringView(StringBuilder() << StringView(u8"cannot show ") << entry->name() << StringView(u8": ") << StringView(next->error)));
-    } else {
-        app->ui->trace(StringView(StringBuilder() << StringView(u8"showing ") << entry->name() << StringView(u8" ") << (i64)next->width << StringView(u8"x") << (i64)next->height));
-    }
-}
-
-AcceptList::AcceptList(ViewApp* app_)
-    : app(app_)
-{
-}
-
-void AcceptList::run() {
-    if (!errors.empty()) {
-        sysE << StringView(errors) << endL;
-    }
-
-    app->adopt(*this);
-}
-
-LoadThumb::LoadThumb(AcceptThumb* reply_)
-    : path(StringView(reply_->entry->path))
-    , nameAt(reply_->entry->nameAt)
-    , results(reply_->app->results)
-    , wake(reply_->app->ui)
-    , reply(reply_)
-{
-}
-
-void LoadThumb::run() {
+void Job::post() {
     Ui* notify = wake;
 
-    try {
-        reply->image = decodeFile(*reply->owner, path, nameAt, reply->side, reply->timing);
-    } catch (...) {
-        reply->error = Buffer(Exception::current());
-    }
-
-    // Publication transfers the entire pool, including this callback, to the UI.
-    results->enqueue(reply);
+    results->enqueue(this);
     notify->requestFrame();
 }
 
-LoadShow::LoadShow(AcceptShow* reply_)
-    : path(StringView(reply_->entry->path))
-    , nameAt(reply_->entry->nameAt)
-    , side(reply_->app->maxSide)
-    , results(reply_->app->results)
-    , wake(reply_->app->ui)
-    , reply(reply_)
+Decoded::Decoded(ObjPool* owner, ViewApp& app, const Entry& entry, u32 side_, u32 thumbSide_, u64 request_)
+    : Job(owner, app, false)
+    , path(StringView(entry.path))
+    , nameAt(entry.nameAt)
+    , side(side_)
+    , thumbSide(thumbSide_)
+    , request(request_)
 {
-    const Entry& entry = *reply_->entry;
-
-    if (entry.thumb == Load::Ready && entry.thumbSide * 4 >= reply->thumbSide * 3) {
-        reply->thumbSide = 0;
-    }
 }
 
-void LoadShow::run() {
-    Ui* notify = wake;
+void Decoded::run() {
     struct stat st;
 
-    if (stat(path.cStr(), &st) == 0) {
-        reply->fileBytes = (i64)st.st_size;
+    if (request && stat(path.cStr(), &st) == 0) {
+        fileBytes = (i64)st.st_size;
         struct tm tm;
         char stamp[32];
 
         localtime_r(&st.st_mtime, &tm);
         if (strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M", &tm)) {
-            reply->fileModified = Buffer(StringView(stamp));
+            fileModified = Buffer(StringView(stamp));
         }
     }
 
     try {
-        reply->image = decodeFile(*reply->owner, path, nameAt, side, reply->timing);
-        if (reply->thumbSide) {
-            reply->thumb = shrinkToSide(*reply->owner, reply->image, reply->thumbSide);
+        image = decodeFile(*owner, path, nameAt, side, timing);
+        if (thumbSide) {
+            thumb = shrinkToSide(*owner, image, thumbSide);
         }
     } catch (...) {
-        reply->error = Buffer(Exception::current());
+        error = Buffer(Exception::current());
     }
 
-    results->enqueue(reply);
-    notify->requestFrame();
+    post();
 }
 
-ListPaths::ListPaths(ObjPool* pool_, AcceptList* reply_, int count_, char** paths_)
-    : pool(pool_)
-    , count(count_)
-    , paths(paths_)
-    , results(reply_->app->results)
-    , wake(reply_->app->ui)
-    , reply(reply_)
+Listed::Listed(ObjPool* owner, ViewApp& app, u32 arg_, StringView path_, bool alone_)
+    : Job(owner, app, true)
+    , arg(arg_)
+    , path(path_)
+    , alone(alone_)
 {
 }
 
-void ListPaths::run() {
-    Ui* notify = wake;
-    Vector<Entry*>& entries = reply->entries;
-    StringBuilder errors;
+void Listed::run() {
+    struct stat st;
 
-    for (int i = 0; i < count; i++) {
-        StringView arg(paths[i]);
-        StringView separator = errors.used() ? StringView(u8"\n") : StringView();
-        struct stat st;
+    if (stat(path.cStr(), &st) != 0) {
+        error = Buffer(StringView(strerror(errno)));
+        post();
 
-        if (stat(paths[i], &st) != 0) {
-            errors << separator << StringView(u8"im view: ") << arg << StringView(u8": ") << StringView(strerror(errno));
+        return;
+    }
 
-            continue;
-        }
+    directory = S_ISDIR(st.st_mode);
+
+    if (directory || alone) {
+        StringView whole(path);
+        size_t slash = whole.length() - nameOf(whole).length();
+
+        folder = directory ? Buffer(whole) : Buffer(slash == 0 ? StringView(u8".") : slash == 1 ? StringView(u8"/") : StringView(whole.begin(), whole.begin() + slash - 1));
 
         try {
-            if (S_ISDIR(st.st_mode)) {
-                addDirectory(*pool, entries, arg);
-            } else if (count == 1) {
-                size_t slash = arg.length();
+            listDir(StringView(folder), [&](const TPathInfo& info) {
+                if (!info.isDir && imageName(info.item)) {
+                    u8* copy = (u8*)owner->allocate(info.item.length());
 
-                while (slash > 0 && arg[slash - 1] != '/') {
-                    slash--;
+                    memcpy(copy, info.item.data(), info.item.length());
+                    names.pushBack(StringView(copy, info.item.length()));
                 }
-
-                StringView dir = slash == 0 ? StringView(u8".") : slash == 1 ? StringView(u8"/") : StringView(arg.begin(), arg.begin() + slash - 1);
-                StringView name(arg.begin() + slash, arg.end());
-
-                addDirectory(*pool, entries, dir);
-                reply->named = true;
-                reply->selected = entries.length();
-
-                for (size_t j = 0; j < entries.length() && reply->selected == entries.length(); j++) {
-                    if (entries[j]->name() == name) {
-                        reply->selected = j;
-                    }
-                }
-
-                if (reply->selected == entries.length()) {
-                    Vector<Entry*> rest;
-
-                    rest.xchg(entries);
-                    addFile(*pool, entries, arg);
-                    entries.append(rest.begin(), rest.end());
-                    reply->selected = 0;
-                }
-            } else {
-                reply->named = reply->named || i == 0;
-                addFile(*pool, entries, arg);
-            }
+            });
         } catch (...) {
-            errors << separator << StringView(u8"im view: ") << arg << StringView(u8": ") << Exception::current();
+            error = Buffer(Exception::current());
         }
     }
 
-    reply->errors = Buffer(StringView(errors));
-    results->enqueue(reply);
-    notify->requestFrame();
+    post();
 }
 
 void ViewApp::startWorkers(ObjPool& pool) {
@@ -733,48 +567,15 @@ void ViewApp::stopWorkers() {
         delete shown->owner;
         shown = nullptr;
     }
-
-    delete listing;
-    listing = nullptr;
 }
 
-void ViewApp::list(int count, char** paths) {
-    listing = ObjPool::fromMemoryRaw();
+void ViewApp::open(u32 count, char** given) {
+    paths = given;
+    pathCount = count;
 
-    auto* reply = listing->make<AcceptList>(this);
-    auto* job = listing->make<ListPaths>(listing, reply, count, paths);
-
-    if (imageName(StringView(paths[0]))) {
-        entries.pushBack(makeEntry(*listing, StringView(paths[0])));
+    if (imageName(StringView(given[0]))) {
+        entries.pushBack(makeEntry(*pool, StringView(given[0])));
         select(0);
-    }
-
-    ++inFlight;
-    jobs->enqueue(job);
-}
-
-void ViewApp::adopt(AcceptList& listed) {
-    Entry* named = entries.empty() ? nullptr : entries[0];
-    bool kept = named && listed.named;
-
-    if (kept) {
-        listed.entries.mut(listed.selected) = named;
-    }
-
-    entries.xchg(listed.entries);
-    scrollToCurrent = true;
-    ui->trace(StringView(StringBuilder() << StringView(u8"listed ") << (i64)entries.length()));
-
-    if (entries.empty()) {
-        current = 0;
-        ++showRequest;
-        showPending = false;
-        replaceShown(nullptr);
-    } else if (kept) {
-        current = listed.selected;
-        ui->requestFrame();
-    } else {
-        select(listed.selected);
     }
 }
 
@@ -782,22 +583,188 @@ void ViewApp::accept() {
     void* item;
 
     while (results->tryDequeue(&item)) {
+        Job* job = (Job*)item;
+        ScopedGuard cleanup = [owner = job->owner] {
+            delete owner;
+        };
+
         --inFlight;
-        ((Runable*)item)->run();
+
+        if (job->listing) {
+            adopt(*static_cast<Listed*>(job));
+        } else {
+            take(*static_cast<Decoded*>(job));
+        }
     }
+}
+
+void ViewApp::take(Decoded& decoded) {
+    StringView path(decoded.path);
+    StringView name(path.begin() + decoded.nameAt, path.end());
+    Image* small = decoded.request ? decoded.thumb : decoded.image;
+    u32 side = decoded.request ? decoded.thumbSide : decoded.side;
+
+    ui->timing(StringView(decoded.timing));
+
+    for (Entry* entry : entries) {
+        if (StringView(entry->path) != path) {
+            continue;
+        }
+
+        entry->loading = false;
+
+        if (small) {
+            setThumb(*entry, side, *small);
+        } else if (!decoded.error.empty() && entry->thumb != Load::Ready) {
+            entry->thumb = Load::Failed;
+            entry->error = Buffer(StringView(decoded.error));
+            ui->trace(StringView(StringBuilder() << StringView(u8"no thumbnail ") << name << StringView(u8": ") << StringView(decoded.error)));
+        }
+    }
+
+    if (!decoded.request) {
+        return;
+    }
+
+    if (decoded.request != showRequest || entries.empty() || StringView(entries[current]->path) != path) {
+        ui->trace(StringView(StringBuilder() << StringView(u8"discarded image ") << name));
+        return;
+    }
+
+    ObjPool* storage = ObjPool::fromMemoryRaw();
+    const ShownImage* next = storage->make<ShownImage>(storage, ui, entries[current], decoded);
+
+    replaceShown(next);
+
+    if (!next->error.empty()) {
+        ui->trace(StringView(StringBuilder() << StringView(u8"cannot show ") << name << StringView(u8": ") << StringView(next->error)));
+    } else {
+        ui->trace(StringView(StringBuilder() << StringView(u8"showing ") << name << StringView(u8" ") << (i64)next->width << StringView(u8"x") << (i64)next->height));
+    }
+}
+
+void ViewApp::adopt(Listed& listed) {
+    constexpr size_t none = (size_t)-1;
+    StringView path(listed.path);
+    StringView folder(listed.folder);
+    Entry* chosen = entries.empty() ? nullptr : entries[current];
+    Entry* early = nullptr;
+    Vector<Entry*> found;
+    size_t named = none;
+
+    if (!listed.error.empty()) {
+        StringBuilder text;
+
+        text << path << StringView(u8": ") << StringView(listed.error);
+        problems = Buffer(StringView(StringBuilder() << StringView(problems) << (problems.empty() ? StringView() : StringView(u8"\n")) << StringView(text)));
+        ui->trace(StringView(text));
+    }
+
+    for (StringView name : listed.names) {
+        StringBuilder joined;
+
+        joined << folder;
+
+        if (!folder.endsWith(StringView(u8"/"))) {
+            joined << StringView(u8"/");
+        }
+
+        joined << name;
+        found.pushBack(makeEntry(*pool, StringView(joined)));
+    }
+
+    quickSort(found.mutBegin(), found.mutEnd(), [](const Entry* a, const Entry* b) {
+        return a->name() < b->name();
+    });
+
+    if (listed.error.empty() && !listed.directory) {
+        for (size_t i = 0; i < found.length() && named == none; i++) {
+            if (found[i]->name() == nameOf(path)) {
+                named = i;
+            }
+        }
+
+        if (named == none) {
+            Vector<Entry*> rest;
+
+            rest.xchg(found);
+            found.pushBack(makeEntry(*pool, path));
+            found.append(rest.begin(), rest.end());
+            named = 0;
+        }
+    }
+
+    Vector<Entry*> kept;
+    size_t at = 0;
+
+    for (Entry* entry : entries) {
+        if (entry->arg == listed.arg) {
+            early = entry;
+            continue;
+        }
+
+        at += entry->arg < listed.arg;
+        kept.pushBack(entry);
+    }
+
+    if (early && named != none) {
+        found.mut(named) = early;
+    }
+
+    for (Entry* entry : found) {
+        entry->arg = listed.arg;
+    }
+
+    entries.clear();
+    entries.append(kept.begin(), kept.begin() + at);
+    entries.append(found.begin(), found.end());
+    entries.append(kept.begin() + at, kept.end());
+    scrollToCurrent = true;
+    ui->trace(StringView(StringBuilder() << StringView(u8"listed ") << (i64)entries.length()));
+
+    for (size_t i = 0; i < entries.length(); i++) {
+        if (entries[i] == chosen) {
+            current = i;
+            ui->requestFrame();
+
+            return;
+        }
+    }
+
+    if (entries.empty()) {
+        current = 0;
+        ++showRequest;
+        showPending = false;
+        replaceShown(nullptr);
+
+        return;
+    }
+
+    select(named == none ? 0 : at + named);
+}
+
+void ViewApp::dispatch(Job* job) {
+    ++inFlight;
+    jobs->enqueue(static_cast<Runable*>(job));
 }
 
 void ViewApp::submit() {
     if (showPending && inFlight < workerCount && !entries[current]->loading) {
+        Entry& entry = *entries[current];
         ObjPool* owner = ObjPool::fromMemoryRaw();
-        auto* reply = owner->make<AcceptShow>(owner, this, entries[current]);
-        auto* load = owner->make<LoadShow>(reply);
+        u32 thumbs = entry.thumb == Load::Ready && entry.thumbSide * 4 >= thumbSide * 3 ? 0 : thumbSide;
 
-        entries[current]->loading = true;
+        entry.loading = true;
         showPending = false;
-        ++inFlight;
-        ui->trace(StringView(StringBuilder() << StringView(u8"loading image ") << entries[current]->name()));
-        jobs->enqueue(load);
+        ui->trace(StringView(StringBuilder() << StringView(u8"loading image ") << entry.name()));
+        dispatch(owner->make<Decoded>(owner, *this, entry, maxSide, thumbs, showRequest));
+    }
+
+    while (listedNext < pathCount && inFlight < workerCount) {
+        ObjPool* owner = ObjPool::fromMemoryRaw();
+
+        dispatch(owner->make<Listed>(owner, *this, listedNext, StringView(paths[listedNext]), pathCount == 1));
+        listedNext++;
     }
 
     // Missing visible images precede resolution upgrades. The list is rebuilt by drawGallery().
@@ -815,13 +782,10 @@ void ViewApp::submit() {
                 continue;
             }
             ObjPool* owner = ObjPool::fromMemoryRaw();
-            auto* reply = owner->make<AcceptThumb>(owner, this, &entry, thumbSide);
-            auto* load = owner->make<LoadThumb>(reply);
 
             entry.loading = true;
-            ++inFlight;
             ui->trace(StringView(StringBuilder() << StringView(u8"loading thumbnail ") << entry.name()));
-            jobs->enqueue(load);
+            dispatch(owner->make<Decoded>(owner, *this, entry, thumbSide, 0, 0));
         }
     }
 }
@@ -972,8 +936,12 @@ void ViewApp::drawGallery() {
     ImGuiViewport* vp = ImGui::GetMainViewport();
     bool pointed = mouse.x >= vp->Pos.x && mouse.x < vp->Pos.x + vp->Size.x && mouse.y >= vp->Pos.y && mouse.y < vp->Pos.y + vp->Size.y;
     float reach = ui->px(bulgeReach);
-    float total = g;
-    float currentTop = g;
+    ImFont* font = ImGui::GetFont();
+    float fontSize = ImGui::GetFontSize();
+    StringView problem(problems);
+    float head = problem.empty() ? 0.f : font->CalcTextSizeA(fontSize, FLT_MAX, innerW, (const char*)problem.begin(), (const char*)problem.end()).y + g;
+    float total = g + head;
+    float currentTop = total;
     float currentH = 0.f;
 
     for (size_t i = 0; i < count; i++) {
@@ -1009,7 +977,11 @@ void ViewApp::drawGallery() {
     float lastBottom = 0.f;
     size_t nearest = count;
     float nearestD = 0.f;
-    float top = g;
+    float top = g + head;
+
+    if (head > 0.f) {
+        dl->AddText(font, fontSize, ImVec2(origin.x + g, origin.y + g), ImGui::GetColorU32(ImGuiCol_Text), (const char*)problem.begin(), (const char*)problem.end(), innerW);
+    }
 
     for (size_t i = 0; i < count; i++) {
         Entry& entry = *entries[i];
@@ -1067,6 +1039,17 @@ void ViewApp::drawGallery() {
         Entry& entry = *entries[i];
         ImVec2 p0(origin.x + g, origin.y + rowTop);
         ImVec2 p1(p0.x + innerW, p0.y + h);
+
+        if (!entry.thumbW && !entry.error.empty()) {
+            StringView error(entry.error);
+            float pad = g * 2.f;
+
+            dl->PushClipRect(p0, p1, true);
+            dl->AddText(font, fontSize, ImVec2(p0.x + pad, p0.y + pad), ImGui::GetColorU32(ImGuiCol_Text), (const char*)error.begin(), (const char*)error.end(), max(1.f, innerW - 2.f * pad));
+            dl->PopClipRect();
+
+            return;
+        }
 
         if (!entry.thumbW) {
             const char* mark = entry.thumb == Load::Failed ? "?" : "\xe2\x80\xa6";
@@ -1395,9 +1378,10 @@ int mainView(ObjPool& pool, int argc, char** argv) {
     Ui& ui = *Ui::create(pool, StringView(u8"view"), UiOptions{windowWidth, windowHeight});
 
     app.ui = &ui;
+    app.pool = &pool;
     app.maxSide = ui.maxTextureSide();
     app.startWorkers(pool);
-    app.list(argc - 1, argv + 1);
+    app.open((u32)(argc - 1), argv + 1);
 
     auto body = makeRunable([&] {
         UiEvent event;
