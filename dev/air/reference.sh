@@ -11,3 +11,8 @@ for name in probe_kernel probe_layer probe_host; do
     fi
 done
 ls -l
+if xcrun -sdk macosx clang -fobjc-arc -framework Foundation -framework Metal link.m -o link > link.txt 2>&1; then
+    ./link >> link.txt 2>&1
+fi
+rm -f link
+cat link.txt
