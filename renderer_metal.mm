@@ -244,6 +244,7 @@ namespace {
         id<CAMetalDrawable> drawable = nil;
         id<MTLCommandBuffer> last = nil;
         id<MTLLibrary> plainLibrary = nil;
+        id<MTLLibrary> layeredLibrary = nil;
         id<MTLComputePipelineState> plain[outputs] = {};
         bool edr = false;
         bool wide = false;
@@ -264,7 +265,7 @@ namespace {
         RenderShader* compileKernel(ObjPool& pool, const void* code, size_t size, u32 tile, const ShaderOptions& options) override;
         RenderImage* shade(ObjPool& pool, ShaderFactory& factory, u32 width, u32 height, const void* data, size_t size, bool hdr, Runable& retired) override;
         id<MTLLibrary> library(NSString* source);
-        id<MTLComputePipelineState> pipeline(id<MTLLibrary> library, ShaderOutput output, u32 side);
+        id<MTLComputePipelineState> pipeline(id<MTLLibrary> library, ShaderOutput output, u32 side, id<MTLFunction> linked);
         void updateTextures(ImDrawData* draw);
         void encode(id<MTLCommandBuffer> command, id<MTLTexture> target, ShaderOutput output);
         void setMode(bool wide);
@@ -404,6 +405,10 @@ static float4 over(float4 src, float4 acc) {
     return float4(src.rgb * src.a, src.a) + acc * (1.0 - src.a);
 }
 
+#ifdef LAYER
+[[visible]] float4 layer(uint2 local, int2 origin, const device uint* words);
+#endif
+
 kernel void compose(device const Header* headers [[buffer(0)]], device const uint* list [[buffer(1)]], device const Op* ops [[buffer(2)]], device const Triangle* triangles [[buffer(3)]], device const uint* tiles [[buffer(4)]], constant Frame& frame [[buffer(5)]], constant Textures& textures [[buffer(6)]],
 #ifdef LAYER
     const device uint* words [[buffer(7)]],
@@ -420,8 +425,7 @@ kernel void compose(device const Header* headers [[buffer(0)]], device const uin
     float4 shown = float4(0.0);
 
 #ifdef LAYER
-    LAYER_SHARED
-    shown = LAYER_CALL(inside.xy, origin - frame.video, words);
+    shown = layer(inside.xy, origin - frame.video, words);
 #endif
 
     if (pixel.x >= frame.size.x || pixel.y >= frame.size.y) {
@@ -1212,7 +1216,7 @@ id<MTLLibrary> MetalRenderer::library(NSString* source) {
     return made;
 }
 
-id<MTLComputePipelineState> MetalRenderer::pipeline(id<MTLLibrary> from, ShaderOutput output, u32 side) {
+id<MTLComputePipelineState> MetalRenderer::pipeline(id<MTLLibrary> from, ShaderOutput output, u32 side, id<MTLFunction> linked) {
     MTLFunctionConstantValues* constants = [[MTLFunctionConstantValues alloc] init];
     int encoding = output == ShaderOutput::Srgb ? 0 : 2;
     bool wideOutput = output == ShaderOutput::WideLinear;
@@ -1226,6 +1230,11 @@ id<MTLComputePipelineState> MetalRenderer::pipeline(id<MTLLibrary> from, ShaderO
     MTLComputePipelineDescriptor* descriptor = [[MTLComputePipelineDescriptor alloc] init];
     descriptor.computeFunction = function;
     descriptor.maxTotalThreadsPerThreadgroup = (NSUInteger)side * side;
+    if (linked) {
+        MTLLinkedFunctions* functions = [MTLLinkedFunctions linkedFunctions];
+        functions.privateFunctions = @[linked];
+        descriptor.linkedFunctions = functions;
+    }
     id<MTLComputePipelineState> made = [device newComputePipelineStateWithDescriptor:descriptor options:MTLPipelineOptionNone reflection:nil error:&error];
     if (!made) {
         fail(StringView(StringBuilder() << StringView(u8"Metal compositor pipeline: ") << StringView(error ? error.localizedDescription.UTF8String : "missing")));
@@ -1271,7 +1280,7 @@ void MetalRenderer::encode(id<MTLCommandBuffer> command, id<MTLTexture> target, 
         push.first = t.programs[p * 2];
         if (p == 0) {
             if (!plain[(u32)output]) {
-                plain[(u32)output] = pipeline(plainLibrary, output, composeGroup);
+                plain[(u32)output] = pipeline(plainLibrary, output, composeGroup, nil);
             }
             [compute setComputePipelineState:plain[(u32)output]];
             [compute setBytes:&push length:sizeof(push) atIndex:5];
@@ -1280,7 +1289,7 @@ void MetalRenderer::encode(id<MTLCommandBuffer> command, id<MTLTexture> target, 
         }
         const Placement& placed = t.layers[(p - 1) / 3];
         MetalImage* image = placed.image;
-        ShaderOptions options{ShaderTarget::Msl, output, (ShaderTiles)((p - 1) % 3), {(u32)(placed.box[2] - placed.box[0]), (u32)(placed.box[3] - placed.box[1])}};
+        ShaderOptions options{ShaderTarget::Air, output, (ShaderTiles)((p - 1) % 3), {(u32)(placed.box[2] - placed.box[0]), (u32)(placed.box[3] - placed.box[1])}};
         MetalShader& shader = static_cast<MetalShader&>(image->factory->shader(options));
         push.video[0] = placed.box[0];
         push.video[1] = placed.box[1];
@@ -1556,13 +1565,25 @@ RenderShader* MetalRenderer::compileKernel(ObjPool& pool, const void* code, size
         fail(StringView(u8"invalid shader code"));
     }
     @autoreleasepool {
-        NSString* layerSource = [[NSString alloc] initWithBytes:code length:size encoding:NSUTF8StringEncoding];
-        if (!layerSource) {
-            fail(StringView(u8"Metal shader: not UTF-8"));
+        NSError* error = nil;
+        dispatch_data_t bytes = dispatch_data_create(code, size, nil, DISPATCH_DATA_DESTRUCTOR_DEFAULT);
+        id<MTLLibrary> made = [device newLibraryWithData:bytes error:&error];
+        if (!made) {
+            fail(StringView(StringBuilder() << StringView(u8"Metal shader: ") << StringView(error ? error.localizedDescription.UTF8String : "no library")));
         }
         MetalShader* shader = pool.make<MetalShader>();
-        id<MTLLibrary> made = options.tiles == ShaderTiles::Mixed ? library([NSString stringWithFormat:@"#define GROUP %u\n#define LAYER 1\n%@\n%s", composeTile, layerSource, composeSource]) : library(layerSource);
-        shader->pipeline = pipeline(made, options.output, composeTile);
+        if (options.tiles != ShaderTiles::Mixed) {
+            shader->pipeline = pipeline(made, options.output, composeTile, nil);
+            return shader;
+        }
+        id<MTLFunction> layer = [made newFunctionWithName:@"layer"];
+        if (!layer) {
+            fail(StringView(u8"Metal shader: no layer function"));
+        }
+        if (!layeredLibrary) {
+            layeredLibrary = library([NSString stringWithFormat:@"#define GROUP %u\n#define LAYER 1\n%s", composeTile, composeSource]);
+        }
+        shader->pipeline = pipeline(layeredLibrary, options.output, composeTile, layer);
         return shader;
     }
 }
@@ -1637,7 +1658,7 @@ Renderer* createMetalRenderer(ObjPool& pool, plt::Platform& platform, plt::Windo
     layer.presentsWithTransaction = NO;
     renderer->setMode(false);
     renderer->plainLibrary = renderer->library([NSString stringWithFormat:@"#define GROUP %u\n%s", composeGroup, composeSource]);
-    renderer->plain[(u32)ShaderOutput::Srgb] = renderer->pipeline(renderer->plainLibrary, ShaderOutput::Srgb, composeGroup);
+    renderer->plain[(u32)ShaderOutput::Srgb] = renderer->pipeline(renderer->plainLibrary, ShaderOutput::Srgb, composeGroup, nil);
     renderer->wake = platform.createLoopWake(pool, *pool.make<PollMetal>(renderer));
     renderer->smallObjects = SmallObjAllocator::create(&pool);
     renderer->landed = Channel::create(&pool, 64);
