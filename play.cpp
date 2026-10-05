@@ -2148,7 +2148,7 @@ void Screen::draw() {
     ImGuiViewport* vp = ImGui::GetMainViewport();
     float pad = ui.px(barPadding);
     float bar = ImGui::GetFrameHeight() + 2.f * pad;
-    double at = position(monotonicNowUs());
+    double at = position(ui.presentTime());
 
     ImGui::SetNextWindowPos(vp->Pos);
     ImGui::SetNextWindowSize(vp->Size);

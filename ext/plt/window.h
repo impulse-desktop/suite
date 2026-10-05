@@ -75,6 +75,12 @@ namespace plt {
         u32 screenPixelHeight = 0;
         float contentScale = 1.0f;
         float refreshRate = 0.0f;
+        // The frame's presentation surface and the monotonic time (us) it is
+        // due on the glass, when the platform paces frames to the display
+        // and hands them out (Cocoa: a CAMetalDrawable); null and 0 where the
+        // renderer acquires its own (Wayland, headless).
+        void* surface = nullptr;
+        u64 presentTime = 0;
         bool focused = false;
         bool iconified = false;
         bool maximized = false;

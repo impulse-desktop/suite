@@ -67,6 +67,7 @@ struct Ui {
     virtual void releaseTexture(ImTextureRef texture) = 0;
     virtual u32 maxTextureSide() = 0;
     virtual float refreshRate() = 0;
+    virtual u64 presentTime() = 0;
 
     virtual bool drawErrorPanel(stl::StringView message) = 0;
 

@@ -2892,14 +2892,17 @@ namespace {
         RenderImage* bind(ObjPool& pool, u32 width, u32 height, const void* data, size_t size, size_t stride, Runable& retired) override;
         RenderShader* compileKernel(ObjPool& pool, const void* code, size_t size, u32 tile, const ShaderOptions& options) override;
         RenderImage* shade(ObjPool& pool, ShaderFactory& factory, u32 width, u32 height, const void* data, size_t size, bool hdr, Runable& retired) override;
-        bool beginFrame(u32 width, u32 height) override;
+        bool beginFrame(const plt::WindowInfo& info) override;
         bool endFrame(ImDrawData* draw) override;
         u32 maxTextureSide() override;
         u32 maxTextures() override;
     };
 }
 
-bool VulkanRenderer::beginFrame(u32 width, u32 height) {
+bool VulkanRenderer::beginFrame(const plt::WindowInfo& info) {
+    u32 width = info.width;
+    u32 height = info.height;
+
     if (gpu->rebuild || gpu->present.width != (int)width || gpu->present.height != (int)height) {
         gpu->createSwapchain(width, height);
         gpu->rebuild = false;

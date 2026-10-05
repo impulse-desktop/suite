@@ -5,6 +5,7 @@
 #include <std/lib/buffer.h>
 
 #include <imgui.h>
+#include <plt/window.h>
 
 namespace stl {
     class ObjPool;
@@ -88,7 +89,7 @@ struct RendererOptions {
 };
 
 struct Renderer {
-    virtual bool beginFrame(u32 width, u32 height) = 0;
+    virtual bool beginFrame(const plt::WindowInfo& info) = 0;
     virtual bool endFrame(ImDrawData* draw) = 0;
 
     virtual u32 maxTextureSide() = 0;

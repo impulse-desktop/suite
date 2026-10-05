@@ -357,6 +357,7 @@ namespace {
         plt::LoopWake* wake = nullptr;
         Renderer* renderer = nullptr;
         u64 frameUs = 0;
+        u64 framePresentUs = 0;
         plt::PointerIcon icon = plt::PointerIcon::Text;
         bool shown = false;
         u32 presentedWidth = 0;
@@ -389,6 +390,7 @@ namespace {
         void releaseTexture(ImTextureRef texture) override;
         u32 maxTextureSide() override;
         float refreshRate() override;
+        u64 presentTime() override;
         bool drawErrorPanel(StringView message) override;
         void trace(StringView what) override;
         void timing(StringView line) override;
@@ -722,6 +724,10 @@ float UiImpl::refreshRate() {
     return window ? window->info().refreshRate : 0.f;
 }
 
+u64 UiImpl::presentTime() {
+    return framePresentUs ? framePresentUs : monotonicNowUs();
+}
+
 bool UiImpl::drawErrorPanel(StringView message) {
     return drawToolErrorPanel(name, scale, message) != 0;
 }
@@ -761,7 +767,8 @@ bool UiImpl::frame(const plt::WindowInfo& info) {
     u64 gap = frameBegan ? began - frameBegan : 0;
 
     frameBegan = began;
-    if (!renderer->beginFrame(info.width, info.height)) {
+    framePresentUs = info.presentTime;
+    if (!renderer->beginFrame(info)) {
         return false;
     }
 
