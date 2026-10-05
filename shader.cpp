@@ -3054,7 +3054,9 @@ namespace {
         u32 pointerFloat = s.fresh();
         u32 pointerInt = s.fresh();
 
-        for (int which : {2, 3, 6, 7}) {
+        const int given[4] = {2, 3, 6, 7};
+
+        for (int which : given) {
             e.inputs[which] = s.fresh();
         }
 
@@ -3155,7 +3157,9 @@ namespace {
         order(indices, 4, constants);
         e.emit(constants);
 
-        for (int which : {2, 3, 4, 5, 32, 33, 34, 35, 36}) {
+        const int given[9] = {2, 3, 4, 5, 32, 33, 34, 35, 36};
+
+        for (int which : given) {
             e.inputs[which] = s.fresh();
         }
 
