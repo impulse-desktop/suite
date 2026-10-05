@@ -85,7 +85,7 @@ plt = import_build(
     extra_cppflags=["-Dno_vendored_std", "-I$(S)/../libstd"],
 )
 system = dependency(ldflags=["-lm"])
-media = [pkg_config(name) for name in ("libavformat", "libavcodec", "libavutil", "libswresample", "openal")]
+media = [pkg_config(name) for name in ("libavformat", "libavcodec", "libavutil", "libswresample", "libswscale", "openal")]
 # Vulkan's canonical `VkFoo info{VK_STRUCTURE_TYPE_FOO}` initialization zeros
 # the remaining aggregate fields by design; Clang otherwise diagnoses every
 # such declaration under -Wextra.

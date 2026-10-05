@@ -37,6 +37,7 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavutil/channel_layout.h>
+#include <libswscale/swscale.h>
 #include <libswresample/swresample.h>
 }
 
@@ -57,6 +58,10 @@ namespace {
     constexpr int bufferRate = 20;
     constexpr size_t sampleBytes = 4;
     constexpr double seekStep = 10.;
+    constexpr double clockBandwidth = 0.5;
+    constexpr double clockSlip = 0.1;
+    constexpr double clockGap = 0.25;
+    constexpr int blendWidth = 1920;
 
     enum class Kind : u8 {
         Control,
@@ -142,6 +147,11 @@ namespace {
         u64 generation;
         double pts;
         double aspect;
+        Buffer rgba;
+        int width = 0;
+        int height = 0;
+        ImTextureRef texture;
+        bool textured = false;
 
         Frame(VideoImage* image, u64 generation, double pts, double aspect);
     };
@@ -198,6 +208,7 @@ namespace {
         Stream stream;
         Vector<VideoImage*> idle;
         AVFrame* last;
+        SwsContext* scaler = nullptr;
         u64 generation = 1;
         double target = 0.;
         double pts = 0.;
@@ -211,6 +222,7 @@ namespace {
         void apply(const Control& control);
         bool step();
         bool deliver();
+        void blended(Frame& message, const AVFrame* source);
         void copy(AVFrame* to, const AVFrame* from);
     };
 
@@ -279,8 +291,10 @@ namespace {
         bool videoEnded = false;
         bool audioEnded = false;
         double clockBase = 0.;
+        double clockRate = 1.;
         u64 clockAt = 0;
         bool clockRunning = false;
+        bool clockLocked = false;
         i64 drawnSecond = -1;
         bool scrubbing = false;
         float scrub = 0.f;
@@ -298,6 +312,7 @@ namespace {
         void finishIfEnded(u64 now);
         void show(Frame* frame);
         Frame* takeFirst();
+        void discard(Frame* frame);
         void release(VideoImage* image);
         void retired(VideoImage* image);
         void applyClock(const Clock& clock);
@@ -330,6 +345,7 @@ namespace {
         Channel* audioInbox;
         Channel* screenInbox;
         plt::LoopWake* wake;
+        bool blend;
         Video* video;
         Audio* audio;
         Screen* screen;
@@ -949,6 +965,7 @@ Video::Video(Player* player_)
     , last(av_frame_alloc())
 {
     pooledGuard(*player->pool, [this] {
+        sws_freeContext(scaler);
         av_frame_free(&last);
         av_buffer_pool_uninit(&slots.pool);
     });
@@ -1084,10 +1101,38 @@ bool Video::deliver() {
         av_frame_unref(frame);
     }
 
-    player->post(new Frame(image, generation, pts, aspect));
+    Frame* message = new Frame(image, generation, pts, aspect);
+
+    if (player->blend) {
+        blended(*message, image->frame);
+    }
+
+    player->post(message);
     decoded = false;
 
     return true;
+}
+
+void Video::blended(Frame& message, const AVFrame* source) {
+    int width = source->width > blendWidth ? blendWidth : source->width;
+    int height = (int)((i64)source->height * width / source->width);
+    int space = source->colorspace == AVCOL_SPC_UNSPECIFIED ? SWS_CS_ITU709 : source->colorspace;
+
+    scaler = sws_getCachedContext(scaler, source->width, source->height, (AVPixelFormat)source->format, width, height, AV_PIX_FMT_RGBA, SWS_BILINEAR, nullptr, nullptr, nullptr);
+
+    if (!scaler) {
+        fail(StringView(u8"cannot convert a video frame to RGBA"));
+    }
+
+    sws_setColorspaceDetails(scaler, sws_getCoefficients(space), source->color_range == AVCOL_RANGE_JPEG, sws_getCoefficients(SWS_CS_ITU709), 1, 0, 1 << 16, 1 << 16);
+    message.rgba.zero((size_t)width * height * 4);
+
+    uint8_t* planes[4] = {(uint8_t*)message.rgba.mutData()};
+    int lines[4] = {width * 4};
+
+    sws_scale(scaler, source->data, source->linesize, 0, source->height, planes, lines);
+    message.width = width;
+    message.height = height;
 }
 
 void Video::copy(AVFrame* to, const AVFrame* from) {
@@ -1492,10 +1537,12 @@ Screen::Screen(Player* player_)
 
 Screen::~Screen() noexcept {
     for (Frame* frame : waiting) {
-        delete frame;
+        discard(frame);
     }
 
-    delete shown;
+    if (shown) {
+        discard(shown);
+    }
 
     for (VideoFactory* known : factories) {
         delete known->pool;
@@ -1554,6 +1601,12 @@ void Screen::drain() {
 
         if (Frame* frame = cast<Frame>(message.ptr)) {
             if (frame->generation == generation) {
+                if (!frame->rgba.empty()) {
+                    frame->texture = player->ui->loadTexture((u32)frame->width, (u32)frame->height, frame->rgba.data());
+                    frame->textured = true;
+                    frame->rgba = Buffer();
+                }
+
                 waiting.pushBack(frame);
                 message.drop();
             } else {
@@ -1594,7 +1647,7 @@ u64 Screen::present() {
 
             if (!waiting.empty() && waiting[0]->pts <= at) {
                 release(frame->image);
-                delete frame;
+                discard(frame);
             } else {
                 show(frame);
             }
@@ -1656,10 +1709,10 @@ void Screen::show(Frame* frame) {
             release(previous->image);
         }
 
-        delete previous;
+        discard(previous);
     }
 
-    if (!frame->image->render) {
+    if (!frame->image->render && !frame->textured) {
         makeRender(frame->image);
     }
 
@@ -1677,6 +1730,14 @@ Frame* Screen::takeFirst() {
     waiting.popBack();
 
     return first;
+}
+
+void Screen::discard(Frame* frame) {
+    if (frame->textured) {
+        player->ui->releaseTexture(frame->texture);
+    }
+
+    delete frame;
 }
 
 void Screen::release(VideoImage* image) {
@@ -1700,7 +1761,23 @@ void Screen::applyClock(const Clock& clock) {
     }
 
     audioEnded = clock.ended;
-    setClock(clock.position, clock.running && !clock.ended, clock.at);
+
+    bool running = clock.running && !clock.ended;
+    double elapsed = clock.at > clockAt ? (double)(clock.at - clockAt) / 1e6 : 0.;
+    double error = clock.position - position(clock.at);
+
+    if (!running || !clockRunning || !clockLocked || elapsed <= 0. || elapsed > clockGap || fabs(error) > clockSlip) {
+        setClock(clock.position, running, clock.at);
+        clockLocked = running;
+
+        return;
+    }
+
+    double omega = 2. * 3.14159265358979 * clockBandwidth * elapsed;
+
+    clockBase = position(clock.at) + sqrt(2.) * omega * error;
+    clockRate += omega * omega * error / elapsed;
+    clockAt = clock.at;
 }
 
 void Screen::makeRender(VideoImage* image) {
@@ -1815,7 +1892,7 @@ void Screen::seek(double to, bool play) {
 
     for (Frame* frame : waiting) {
         release(frame->image);
-        delete frame;
+        discard(frame);
     }
 
     waiting.clear();
@@ -1878,13 +1955,15 @@ double Screen::position(u64 now) const {
         return clockBase;
     }
 
-    return clockBase + (double)(now - clockAt) / 1e6;
+    return clockBase + clockRate * (double)(now - clockAt) / 1e6;
 }
 
 void Screen::setClock(double base, bool running, u64 at) {
     clockBase = base;
+    clockRate = 1.;
     clockAt = at;
     clockRunning = running;
+    clockLocked = false;
 }
 
 void Screen::keys() {
@@ -1951,8 +2030,25 @@ void Screen::draw() {
         ImVec2 p1(p0.x + fmaxf(floorf(w), 1.f), p0.y + fmaxf(floorf(h), 1.f));
         VideoImage* image = shown->image;
 
-        image->draws++;
-        image->render->draw(*dl, p0, p1);
+        if (shown->textured) {
+            Frame* next = waiting.empty() ? nullptr : waiting[0];
+            double span = next ? next->pts - shown->pts : 0.;
+            double weight = next && next->textured && span > 0. ? (at - shown->pts) / span : 0.;
+            int alpha = (int)(fmin(fmax(weight, 0.), 1.) * 255. + .5);
+
+            dl->AddImage(shown->texture, p0, p1);
+
+            if (alpha > 0) {
+                dl->AddImage(next->texture, p0, p1, ImVec2(0, 0), ImVec2(1, 1), IM_COL32(255, 255, 255, alpha));
+            }
+
+            if (clockRunning) {
+                ui.requestFrame();
+            }
+        } else {
+            image->draws++;
+            image->render->draw(*dl, p0, p1);
+        }
         dl->AddRectFilled(lo, ImVec2(hi.x, p0.y), black);
         dl->AddRectFilled(ImVec2(lo.x, p1.y), hi, black);
         dl->AddRectFilled(ImVec2(lo.x, p0.y), ImVec2(p0.x, p1.y), black);
@@ -2031,6 +2127,7 @@ Player::Player(ObjPool& pool_, Ui& ui_, const char* path_)
     , audioInbox(Channel::create(pool, channelCapacity))
     , screenInbox(Channel::create(pool, channelCapacity))
     , wake(ui->platform()->createLoopWake(*pool, *pool->make<CallScreen>(this)))
+    , blend(getenv("IM_PLAY_BLEND") != nullptr)
     , video(pool->make<Video>(this))
     , audio(pool->make<Audio>(this))
     , screen(pool->make<Screen>(this))
