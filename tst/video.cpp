@@ -123,7 +123,7 @@ namespace {
         void writePalette(AVFrame* frame);
         void linearize(const Case& kase);
         void shade(AVFrame* frame, const char* output, Vector<double>& out);
-        void shade(AVFrame* frame, const VideoShader& facts, bool hdr, Vector<double>& out);
+        void shade(AVFrame* frame, const VideoShader& facts, bool hdr, int width, int height, Vector<double>& out);
         void compare(StringView what, StringView output, const Vector<double>& got, double tolerance, bool relative, int width = sampleWidth, int height = sampleHeight);
         void verify(AVFrame* frame, StringView what, double tolerance);
         void verifyLinear(AVFrame* frame, StringView what, double tolerance);
@@ -795,8 +795,6 @@ VideoShader FormatCheck::describe(const AVFrame* frame, const char* output) {
     out.size[1] = (u32)frame->height;
     out.size[2] = (u32)AV_CEIL_RSHIFT(frame->width, shiftX);
     out.size[3] = (u32)AV_CEIL_RSHIFT(frame->height, shiftY);
-    out.target[0] = (u32)frame->width;
-    out.target[1] = (u32)frame->height;
     out.chroma[0] = exp2(-shiftX);
     out.chroma[1] = exp2(-shiftY);
     out.chroma[2] = within(kase.location, 0) * (exp2(shiftX) - 1.) * exp2(-shiftX);
@@ -825,7 +823,7 @@ VideoFactory::VideoFactory(ObjPool* pool_, Ui* ui_, const VideoShader& facts_)
 
 RenderShader& VideoFactory::shader(const ShaderOptions& options) {
     for (const Made& known : made) {
-        if (known.options.output == options.output && known.options.tiles == options.tiles) {
+        if (known.options.target == options.target && known.options.output == options.output && known.options.tiles == options.tiles && known.options.size[0] == options.size[0] && known.options.size[1] == options.size[1]) {
             return *known.shader;
         }
     }
@@ -1124,23 +1122,26 @@ void FormatCheck::linearize(const Case& kase) {
 }
 
 void FormatCheck::shade(AVFrame* frame, const char* output, Vector<double>& out) {
-    shade(frame, describe(frame, output), !strcmp(output, "hdr"), out);
+    shade(frame, describe(frame, output), !strcmp(output, "hdr"), frame->width, frame->height, out);
 }
 
-void FormatCheck::shade(AVFrame* frame, const VideoShader& facts, bool hdr, Vector<double>& out) {
+void FormatCheck::shade(AVFrame* frame, const VideoShader& facts, bool hdr, int width, int height, Vector<double>& out) {
     ScopedPtr<ObjPool> owner{ObjPool::fromMemoryRaw()};
     RenderImage* image = ui->shadeImage(*owner.ptr, factoryFor(facts), (u32)frame->width, (u32)frame->height, frame->buf[0]->data, frame->buf[0]->size, hdr, retired);
     ImagePixels pixels;
 
     image->prepare();
-    image->read(0, 0, frame->width, frame->height, pixels);
+    image->read(0, 0, width, height, pixels);
 
     const float* got = (const float*)pixels.rgbaf.data();
 
     out.clear();
 
     for (size_t i = 0; i < samplePixels * 4; i++) {
-        out.pushBack(got[i]);
+        int x = (int)(i / 4 % sampleWidth);
+        int y = (int)(i / 4 / sampleWidth);
+
+        out.pushBack(x < width && y < height ? got[((size_t)y * width + x) * 4 + i % 4] : 0.);
     }
 }
 
@@ -1362,9 +1363,6 @@ void FormatCheck::underlay() {
 
     VideoShader facts = describe(frame, "sdr");
 
-    facts.origin[0] = 1;
-    facts.origin[1] = 1;
-
     ScopedPtr<ObjPool> owner{ObjPool::fromMemoryRaw()};
     RenderImage* image = ui->shadeImage(*owner.ptr, factoryFor(facts), (u32)frame->width, (u32)frame->height, frame->buf[0]->data, frame->buf[0]->size, false, retired);
     UiEvent event;
@@ -1384,7 +1382,7 @@ void FormatCheck::underlay() {
 
         ImVec2 at = ImGui::GetMainViewport()->Pos;
 
-        image->underlay(ImVec2(at.x + 1.f, at.y + 1.f), ImVec2(at.x + 1.f + (float)frame->width, at.y + 1.f + (float)frame->height));
+        image->draw(*ImGui::GetBackgroundDrawList(), ImVec2(at.x + 1.f, at.y + 1.f), ImVec2(at.x + 1.f + (float)frame->width, at.y + 1.f + (float)frame->height));
         frames++;
         ui->requestFrame();
     }
@@ -1458,8 +1456,6 @@ void FormatCheck::scaled(StringView what, AVPixelFormat format, int width, int h
         return count;
     };
 
-    facts.target[0] = (u32)width;
-    facts.target[1] = (u32)height;
     expected.clear();
 
     for (int y = 0; y < sampleHeight; y++) {
@@ -1500,7 +1496,7 @@ void FormatCheck::scaled(StringView what, AVPixelFormat format, int width, int h
         }
     }
 
-    shade(frame, facts, true, got);
+    shade(frame, facts, true, width, height, got);
     compare(what, StringView(u8"hdr"), got, 2.4 * tolerance(kase, layout) * spread, true, width, height);
 }
 

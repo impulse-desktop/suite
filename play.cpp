@@ -267,10 +267,6 @@ namespace {
         Vector<VideoFactory*> factories;
         size_t compiledBytes = 0;
         u64 compiledClock = 0;
-        u32 targetX = 0;
-        u32 targetY = 0;
-        u32 targetWidth = 0;
-        u32 targetHeight = 0;
         int shownWidth = 0;
         int shownHeight = 0;
         int shownFormat = AV_PIX_FMT_NONE;
@@ -463,13 +459,6 @@ namespace {
                 rows[row][column] = ncl[row][column];
             }
         }
-    }
-
-    static void aim(VideoShader& facts, u32 x, u32 y, u32 width, u32 height) {
-        facts.target[0] = width;
-        facts.target[1] = height;
-        facts.origin[0] = x;
-        facts.origin[1] = y;
     }
 
     static VideoShader describeFrame(const AVFrame* frame, const char* output, float sdrWhiteNits) {
@@ -675,8 +664,6 @@ namespace {
         out.size[1] = (u32)frame->height;
         out.size[2] = (u32)AV_CEIL_RSHIFT(frame->width, shiftX);
         out.size[3] = (u32)AV_CEIL_RSHIFT(frame->height, shiftY);
-        out.target[0] = (u32)frame->width;
-        out.target[1] = (u32)frame->height;
         out.chroma[0] = exp2(-shiftX);
         out.chroma[1] = exp2(-shiftY);
         out.chroma[2] = location->site[0] * (exp2(shiftX) - 1.) * exp2(-shiftX);
@@ -1730,10 +1717,6 @@ void Screen::makeRender(VideoImage* image) {
 
     image->facts = describeFrame(frame, hdr ? "hdr" : "sdr", RendererOptions{}.sdrWhiteNits);
 
-    if (targetWidth) {
-        aim(image->facts, targetX, targetY, targetWidth, targetHeight);
-    }
-
     VideoFactory& factory = factoryFor(image->facts);
     ScopedPtr<ObjPool> owner{ObjPool::fromMemoryRaw()};
 
@@ -1757,7 +1740,7 @@ RenderShader& VideoFactory::shader(const ShaderOptions& options) {
     used = ++screen->compiledClock;
 
     for (const Made& known : made) {
-        if (known.options.output == options.output && known.options.tiles == options.tiles) {
+        if (known.options.target == options.target && known.options.output == options.output && known.options.tiles == options.tiles && known.options.size[0] == options.size[0] && known.options.size[1] == options.size[1]) {
             return *known.shader;
         }
     }
@@ -1773,7 +1756,7 @@ RenderShader& VideoFactory::shader(const ShaderOptions& options) {
     bytes += code.length();
     screen->compiledBytes += code.length();
     screen->trim(this);
-    screen->player->ui->trace(StringView(StringBuilder() << StringView(u8"compiled video shader ") << StringView(facts.layout->name) << StringView(u8" ") << StringView(facts.system) << StringView(u8" ") << StringView(facts.transfer) << StringView(u8" ") << StringView(facts.conversion) << StringView(u8" ") << StringView(facts.output) << StringView(u8" ") << (u64)facts.target[0] << StringView(u8"x") << (u64)facts.target[1] << StringView(u8" ") << StringView(outputs[(int)options.output]) << StringView(u8" ") << StringView(tiles[(int)options.tiles]) << StringView(u8" compile_us=") << (built - start) << StringView(u8" driver_us=") << (done - built)));
+    screen->player->ui->trace(StringView(StringBuilder() << StringView(u8"compiled video shader ") << StringView(facts.layout->name) << StringView(u8" ") << StringView(facts.system) << StringView(u8" ") << StringView(facts.transfer) << StringView(u8" ") << StringView(facts.conversion) << StringView(u8" ") << StringView(facts.output) << StringView(u8" ") << (u64)options.size[0] << StringView(u8"x") << (u64)options.size[1] << StringView(u8" ") << StringView(outputs[(int)options.output]) << StringView(u8" ") << StringView(tiles[(int)options.tiles]) << StringView(u8" compile_us=") << (built - start) << StringView(u8" driver_us=") << (done - built)));
 
     return *compiled;
 }
@@ -1968,16 +1951,8 @@ void Screen::draw() {
         ImVec2 p1(p0.x + fmaxf(floorf(w), 1.f), p0.y + fmaxf(floorf(h), 1.f));
         VideoImage* image = shown->image;
 
-        targetX = (u32)(p0.x - vp->Pos.x);
-        targetY = (u32)(p0.y - vp->Pos.y);
-        targetWidth = (u32)(p1.x - p0.x);
-        targetHeight = (u32)(p1.y - p0.y);
-
-        aim(image->facts, targetX, targetY, targetWidth, targetHeight);
-        image->render->shadeWith(factoryFor(image->facts));
-
         image->draws++;
-        image->render->underlay(p0, p1);
+        image->render->draw(*dl, p0, p1);
         dl->AddRectFilled(lo, ImVec2(hi.x, p0.y), black);
         dl->AddRectFilled(ImVec2(lo.x, p1.y), hi, black);
         dl->AddRectFilled(ImVec2(lo.x, p0.y), ImVec2(p0.x, p1.y), black);

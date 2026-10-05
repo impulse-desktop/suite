@@ -78,6 +78,7 @@ layout(set = 0, binding = 6) uniform sampler2D textures[1024];
 
 layout(push_constant) uniform Frame {
     ivec2 size;
+    ivec2 video;
     uint tilesX;
     uint first;
     float white;
@@ -175,7 +176,7 @@ void main() {
     vec4 shown = vec4(0.0);
 
 #ifdef LAYER
-    shown = layer(gl_LocalInvocationID.xy, origin);
+    shown = layer(gl_LocalInvocationID.xy, origin - frame.video);
 #endif
 
     if (pixel.x >= frame.size.x || pixel.y >= frame.size.y) {

@@ -95,6 +95,7 @@ namespace {
 
     struct Push {
         alignas(8) i32 size[2];
+        i32 video[2];
         u32 tilesX;
         u32 first;
         float white;
@@ -146,15 +147,11 @@ namespace {
         Runable* retired = nullptr;
         bool hostImported = false;
         bool dirty = false;
-        u64 frame = 0;
-        u32 layer = 0;
 
         ~MetalImage() noexcept;
         void prepare() override;
         void draw(ImDrawList& list, ImVec2 lo, ImVec2 hi) override;
-        void underlay(ImVec2 lo, ImVec2 hi) override;
         void read(int x0, int y0, int x1, int y1, ImagePixels& out) override;
-        void shadeWith(ShaderFactory& with) override;
         void readShaded(int x0, int y0, int x1, int y1, ImagePixels& out);
     };
 
@@ -181,6 +178,11 @@ namespace {
 
     float srgbTable[256];
 
+    struct Placement {
+        MetalImage* image;
+        i32 box[4];
+    };
+
     struct Tiles {
         Vector<Header> headers;
         Vector<u32> list;
@@ -189,7 +191,7 @@ namespace {
         Vector<u32> tiles;
         Vector<u32> programs;
         Vector<MetalTexture*> textures;
-        Vector<MetalImage*> layers;
+        Vector<Placement> layers;
         Vector<u32> base;
         Vector<float> color;
         Vector<u32> head;
@@ -220,7 +222,7 @@ namespace {
         void cover(u32 tile, const Op& op, u32 index, bool opaque);
         void append(u32 tile, u32 entry);
         u32 slot(MetalTexture* texture);
-        u32 layer(MetalImage* image);
+        u32 layer(MetalImage* image, const i32 (&box)[4]);
         void addLayer(MetalImage* image, const float (&lo)[2], const float (&hi)[2], const i32 (&clip)[4]);
         void addCommand(const ImDrawList& list, const ImDrawCmd& command);
         void finish();
@@ -232,7 +234,6 @@ namespace {
         CAMetalDisplayLink* displayLink = nil;
         ImMetalDisplayTarget* target = nil;
         Vector<MetalImage*> drawn;
-        Vector<Layer> underlays;
         SmallObjAllocator* smallObjects = nullptr;
         Channel* landed = nullptr;
         bool waiting = false;
@@ -328,6 +329,7 @@ struct Triangle {
 
 struct Frame {
     int2 size;
+    int2 video;
     uint tilesX;
     uint first;
     float white;
@@ -419,7 +421,7 @@ kernel void compose(device const Header* headers [[buffer(0)]], device const uin
 
 #ifdef LAYER
     LAYER_SHARED
-    shown = LAYER_CALL(inside.xy, origin, words);
+    shown = LAYER_CALL(inside.xy, origin - frame.video, words);
 #endif
 
     if (pixel.x >= frame.size.x || pixel.y >= frame.size.y) {
@@ -606,14 +608,12 @@ u32 Tiles::slot(MetalTexture* texture) {
     return texture->slot;
 }
 
-u32 Tiles::layer(MetalImage* image) {
-    if (image->frame != frame) {
-        image->frame = frame;
-        image->layer = (u32)layers.length();
-        layers.pushBack(image);
-    }
+u32 Tiles::layer(MetalImage* image, const i32 (&box)[4]) {
+    Placement placement{image, {box[0], box[1], box[2], box[3]}};
 
-    return image->layer;
+    layers.pushBack(placement);
+
+    return (u32)layers.length() - 1;
 }
 
 void Tiles::append(u32 tile, u32 entry) {
@@ -713,7 +713,12 @@ void Tiles::addLayer(MetalImage* image, const float (&lo)[2], const float (&hi)[
     i64 y0 = snap(lo[1], 1);
     i64 x1 = snap(hi[0], 0);
     i64 y1 = snap(hi[1], 1);
-    i32 box[4] = {firstPixel(x0 < x1 ? x0 : x1), firstPixel(y0 < y1 ? y0 : y1), firstPixel(x0 < x1 ? x1 : x0), firstPixel(y0 < y1 ? y1 : y0)};
+    i32 drawn[4] = {firstPixel(x0 < x1 ? x0 : x1), firstPixel(y0 < y1 ? y0 : y1), firstPixel(x0 < x1 ? x1 : x0), firstPixel(y0 < y1 ? y1 : y0)};
+    i32 box[4] = {drawn[0], drawn[1], drawn[2], drawn[3]};
+
+    if (drawn[2] <= drawn[0] || drawn[3] <= drawn[1]) {
+        return;
+    }
 
     for (int k = 0; k < 2; k++) {
         box[k] = box[k] < clip[k] ? clip[k] : box[k];
@@ -723,7 +728,7 @@ void Tiles::addLayer(MetalImage* image, const float (&lo)[2], const float (&hi)[
     Op op{};
 
     op.kind = OpLayer;
-    op.index = layer(image);
+    op.index = layer(image, drawn);
     memcpy(op.rect, box, sizeof(box));
 
     for (int k = 0; k < 4; k++) {
@@ -1130,21 +1135,6 @@ void MetalImage::prepare() {
     }
 }
 
-void MetalImage::shadeWith(ShaderFactory& with) {
-    if (!factory) {
-        fail(StringView(u8"only a shaded image takes another shader"));
-    }
-    factory = &with;
-}
-
-void MetalImage::underlay(ImVec2 lo, ImVec2 hi) {
-    if (!factory) {
-        fail(StringView(u8"only a shaded image goes under the interface"));
-    }
-    renderer->drawn.pushBack(this);
-    renderer->underlays.pushBack(Layer{this, {lo.x, lo.y}, {hi.x, hi.y}});
-}
-
 void MetalImage::draw(ImDrawList& list, ImVec2 lo, ImVec2 hi) {
     renderer->drawn.pushBack(this);
     if (factory) {
@@ -1157,7 +1147,7 @@ void MetalImage::draw(ImDrawList& list, ImVec2 lo, ImVec2 hi) {
 
 void MetalImage::read(int x0, int y0, int x1, int y1, ImagePixels& out) {
     if (factory) {
-        checkImageRegion(width, height, x0, y0, x1, y1);
+        checkImageRegion(renderer->maxTextureSide(), renderer->maxTextureSide(), x0, y0, x1, y1);
         readShaded(x0, y0, x1, y1, out);
         return;
     }
@@ -1188,7 +1178,7 @@ void MetalImage::readShaded(int x0, int y0, int x1, int y1, ImagePixels& out) {
         u32 h = (u32)(y1 - y0);
         const float clear[4] = {0.f, 0.f, 0.f, 0.f};
         Vector<Layer> whole;
-        MTLTextureDescriptor* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float width:width height:height mipmapped:NO];
+        MTLTextureDescriptor* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float width:(NSUInteger)x1 height:(NSUInteger)y1 mipmapped:NO];
         descriptor.storageMode = MTLStorageModePrivate;
         descriptor.usage = MTLTextureUsageShaderWrite;
         id<MTLTexture> target = [renderer->device newTextureWithDescriptor:descriptor];
@@ -1198,8 +1188,8 @@ void MetalImage::readShaded(int x0, int y0, int x1, int y1, ImagePixels& out) {
         if (!target || !readback || !command) {
             fail(StringView(u8"cannot allocate Metal readback"));
         }
-        whole.pushBack(Layer{this, {0.f, 0.f}, {(float)width, (float)height}});
-        renderer->tiles.compose(nullptr, whole, width, height, hdr, ++renderer->frames, command, clear);
+        whole.pushBack(Layer{this, {(float)x0, (float)y0}, {(float)x1, (float)y1}});
+        renderer->tiles.compose(nullptr, whole, (u32)x1, (u32)y1, hdr, ++renderer->frames, command, clear);
         renderer->encode(command, target, hdr ? ShaderOutput::WideLinear : ShaderOutput::Linear);
         id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
         [blit copyFromTexture:target sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(x0, y0, 0) sourceSize:MTLSizeMake(w, h, 1) toBuffer:readback destinationOffset:0 destinationBytesPerRow:stride destinationBytesPerImage:stride * h];
@@ -1272,7 +1262,7 @@ void MetalRenderer::encode(id<MTLCommandBuffer> command, id<MTLTexture> target, 
     }
     [compute setBuffer:textures offset:0 atIndex:6];
     [compute setTexture:target atIndex:0];
-    Push push{{(i32)target.width, (i32)target.height}, t.tilesX, 0, sdrWhiteNits};
+    Push push{{(i32)target.width, (i32)target.height}, {0, 0}, t.tilesX, 0, sdrWhiteNits};
     for (u32 p = 0; p * 2 < t.programs.length(); p++) {
         u32 count = t.programs[p * 2 + 1];
         if (!count) {
@@ -1288,8 +1278,12 @@ void MetalRenderer::encode(id<MTLCommandBuffer> command, id<MTLTexture> target, 
             [compute dispatchThreadgroups:MTLSizeMake(count, (composeTile / composeGroup) * (composeTile / composeGroup), 1) threadsPerThreadgroup:MTLSizeMake(composeGroup, composeGroup, 1)];
             continue;
         }
-        MetalImage* image = t.layers[(p - 1) / 3];
-        MetalShader& shader = static_cast<MetalShader&>(image->factory->shader(ShaderOptions{output, (ShaderTiles)((p - 1) % 3)}));
+        const Placement& placed = t.layers[(p - 1) / 3];
+        MetalImage* image = placed.image;
+        ShaderOptions options{ShaderTarget::Msl, output, (ShaderTiles)((p - 1) % 3), {(u32)(placed.box[2] - placed.box[0]), (u32)(placed.box[3] - placed.box[1])}};
+        MetalShader& shader = static_cast<MetalShader&>(image->factory->shader(options));
+        push.video[0] = placed.box[0];
+        push.video[1] = placed.box[1];
         [compute setComputePipelineState:shader.pipeline];
         [compute setBuffer:image->buffer offset:0 atIndex:7];
         [compute setBytes:&push length:sizeof(push) atIndex:5];
@@ -1505,8 +1499,7 @@ bool MetalRenderer::endFrame(ImDrawData* draw) {
         Flight* flight = smallObjects->make<Flight>(drawn);
         drawn.clear();
         const float clear[4] = {srgbTable[25], srgbTable[25], srgbTable[25], 1.f};
-        tiles.compose(draw, underlays, (u32)drawable.texture.width, (u32)drawable.texture.height, wide, ++frames, command, clear);
-        underlays.clear();
+        tiles.compose(draw, Vector<Layer>(), (u32)drawable.texture.width, (u32)drawable.texture.height, wide, ++frames, command, clear);
         encode(command, drawable.texture, wide ? ShaderOutput::WideLinear : ShaderOutput::Srgb);
         Channel* done = landed;
         plt::LoopWake* completed = wake;

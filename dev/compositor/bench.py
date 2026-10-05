@@ -227,7 +227,7 @@ def programs(compiler, work, rect, source, host):
 
     def compiled(tiles):
         arguments = video.facts(dict(case, tile=24), layout, components, offsets, lines)
-        return subprocess.run([compiler, "--output", "srgb", "--tiles", tiles, *arguments], check=True, capture_output=True).stdout
+        return subprocess.run([compiler, "--target", "spirv", "--output", "srgb", "--tiles", tiles, "--size", "%dx%d" % (rect[2] - rect[0], rect[3] - rect[1]), *arguments], check=True, capture_output=True).stdout
 
     layers = work / ("layers_%d_%d_%d_%d_%dx%d" % (*rect, *source))
     layers.mkdir(exist_ok=True)

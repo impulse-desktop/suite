@@ -45,6 +45,11 @@ void checkImageRegion(u32 width, u32 height, int x0, int y0, int x1, int y1);
 
 struct RenderShader {};
 
+enum class ShaderTarget : u8 {
+    Spirv,
+    Msl
+};
+
 enum class ShaderOutput : u8 {
     Srgb,
     Pq,
@@ -59,8 +64,10 @@ enum class ShaderTiles : u8 {
 };
 
 struct ShaderOptions {
+    ShaderTarget target;
     ShaderOutput output;
     ShaderTiles tiles;
+    u32 size[2];
 };
 
 struct ShaderFactory {
@@ -72,9 +79,7 @@ struct RenderImage {
     // before transferring the image to the UI through a Channel.
     virtual void prepare() = 0;
     virtual void draw(ImDrawList& list, ImVec2 lo, ImVec2 hi) = 0;
-    virtual void underlay(ImVec2 lo, ImVec2 hi) = 0;
     virtual void read(int x0, int y0, int x1, int y1, ImagePixels& out) = 0;
-    virtual void shadeWith(ShaderFactory& factory) = 0;
 };
 
 struct RendererOptions {

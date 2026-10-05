@@ -70,33 +70,58 @@ namespace {
 
         raiseError(StringView(StringBuilder() << StringView(u8"video_shader: unknown ") << StringView(flag)));
     }
+
+    void sizeOf(const char* text, u32 (&out)[2]) {
+        int at = 0;
+
+        out[0] = out[1] = 0;
+
+        for (const char* c = text; *c; c++) {
+            if (*c == 'x' && !at) {
+                at = 1;
+            } else if (*c >= '0' && *c <= '9') {
+                out[at] = out[at] * 10 + (u32)(*c - '0');
+            } else {
+                raiseError(StringView(u8"video_shader: --size is WxH"));
+            }
+        }
+
+        if (!at || !out[0] || !out[1]) {
+            raiseError(StringView(u8"video_shader: --size is WxH"));
+        }
+    }
 }
 
 int main(int argc, char** argv) {
-    if (argc < 10) {
-        sysE << StringView(u8"usage: video_shader --output srgb|pq|linear|wide --tiles inside|edge|mixed FORMAT SYSTEM TRANSFER CONVERSION OUTPUT HEX...") << endL;
+    if (argc < 14) {
+        sysE << StringView(u8"usage: video_shader --target spirv|msl --output srgb|pq|linear|wide --tiles inside|edge|mixed --size WxH FORMAT SYSTEM TRANSFER CONVERSION OUTPUT HEX...") << endL;
 
         return 2;
     }
 
+    static const char* const targets[2] = {"spirv", "msl"};
     static const char* const outputs[4] = {"srgb", "pq", "linear", "wide"};
     static const char* const tiles[3] = {"inside", "edge", "mixed"};
     ObjPool::Ref owner = ObjPool::fromMemory();
     VideoShader shader;
-    ShaderOptions options{(ShaderOutput)pick("--output", argv[1], argv[2], outputs, 4), (ShaderTiles)pick("--tiles", argv[3], argv[4], tiles, 3)};
-    Arguments numbers{argv + 10, argv + argc};
+    ShaderOptions options{(ShaderTarget)pick("--target", argv[1], argv[2], targets, 2), (ShaderOutput)pick("--output", argv[3], argv[4], outputs, 4), (ShaderTiles)pick("--tiles", argv[5], argv[6], tiles, 3), {0, 0}};
+    Arguments numbers{argv + 14, argv + argc};
+
+    if (strcmp(argv[7], "--size")) {
+        raiseError(StringView(u8"video_shader: --size comes fourth"));
+    }
+
+    sizeOf(argv[8], options.size);
 
     memset(&shader, 0, sizeof(shader));
-    shader.layout = layoutOf(argv[5]);
-    shader.system = argv[6];
-    shader.transfer = argv[7];
-    shader.conversion = argv[8];
-    shader.output = argv[9];
+    shader.layout = layoutOf(argv[9]);
+    shader.system = argv[10];
+    shader.transfer = argv[11];
+    shader.conversion = argv[12];
+    shader.output = argv[13];
     numbers.words(shader.planeOffset, 4);
     numbers.words(shader.lineSize, 4);
     numbers.words(shader.size, 4);
-    numbers.words(shader.target, 2);
-    numbers.words(shader.origin, 2);
     numbers.words(&shader.tile, 1);
     numbers.numbers(shader.chroma, 4);
     numbers.numbers(&shader.decode[0][0], 9);

@@ -243,11 +243,11 @@ namespace {
         }
 
         Node* origin(int which) {
-            return make(Op::Input, Kind::Int, 0, nullptr, nullptr, nullptr, which, 0., 65535.);
+            return make(Op::Input, Kind::Int, 0, nullptr, nullptr, nullptr, which, -65535., 65535.);
         }
 
         Node* frame(int which, Kind kind, double hi) {
-            return make(Op::Input, kind, 0, nullptr, nullptr, nullptr, 32. + which, 0., hi);
+            return make(Op::Input, kind, 0, nullptr, nullptr, nullptr, 32. + which, kind == Kind::Int ? -hi : 0., hi);
         }
 
         Node* portion(int count) {
@@ -1059,31 +1059,31 @@ namespace {
         return (int)::ceil((rows - 1) * ratio) + tapsOf(ratio) + 1;
     }
 
-    static bool shrinking(const VideoShader& s) {
-        return s.size[1] > s.target[1];
+    static bool shrinking(const VideoShader& s, const ShaderOptions& o) {
+        return s.size[1] > o.size[1];
     }
 
-    static int boxOf(const VideoShader& s, int i) {
-        double ratio = (double)s.size[i] / s.target[i];
+    static int boxOf(const VideoShader& s, const ShaderOptions& o, int i) {
+        double ratio = (double)s.size[i] / o.size[i];
 
         return ratio > maxTaps / 2. ? (int)::ceil(ratio / (maxTaps / 2.) - 1e-9) : 1;
     }
 
-    static double ratioOf(const VideoShader& s, int i) {
-        return (double)s.size[i] / s.target[i] / boxOf(s, i);
+    static double ratioOf(const VideoShader& s, const ShaderOptions& o, int i) {
+        return (double)s.size[i] / o.size[i] / boxOf(s, o, i);
     }
 
-    static int footprintOf(const VideoShader& s) {
-        return reachOf(ratioOf(s, 1), (int)s.tile);
+    static int footprintOf(const VideoShader& s, const ShaderOptions& o) {
+        return reachOf(ratioOf(s, o, 1), (int)s.tile);
     }
 
-    static int blockRows(const VideoShader& s, bool portions) {
+    static int blockRows(const VideoShader& s, const ShaderOptions& o, bool portions) {
         const int tile = (int)s.tile;
         const int channels = s.layout->alpha ? 4 : 3;
-        bool boxed = boxOf(s, 0) > 1 || boxOf(s, 1) > 1;
+        bool boxed = boxOf(s, o, 0) > 1 || boxOf(s, o, 1) > 1;
         bool subsampled = !boxed && !strcmp(s.layout->model, "yuv") && (s.chroma[0] < 1. || s.chroma[1] < 1.);
-        double ratio[2] = {ratioOf(s, 0), ratioOf(s, 1)};
-        int most = portions ? footprintOf(s) : tile;
+        double ratio[2] = {ratioOf(s, o, 0), ratioOf(s, o, 1)};
+        int most = portions ? footprintOf(s, o) : tile;
 
         for (int rows = most; rows >= 1; rows--) {
             if (!portions && tile % rows) {
@@ -1854,11 +1854,13 @@ namespace {
             }
         }
 
-        Node* placeTile(Node* (&origin)[2]) {
+        Node* placeTile(Node* (&origin)[2], Node* (&video)[2]) {
             Node* placed = o.tiles == ShaderTiles::Mixed ? nullptr : g.fetch(Tiles, g.add(g.frame(3, Kind::Uint, word), g.invocation(4, 65535.)));
 
             origin[0] = g.origin(6);
             origin[1] = g.origin(7);
+            video[0] = placed ? g.frame(5, Kind::Int, 65535.) : g.i(0.);
+            video[1] = placed ? g.frame(6, Kind::Int, 65535.) : g.i(0.);
 
             if (placed) {
                 Node* tilesAcross = g.frame(2, Kind::Uint, 65535.);
@@ -1875,13 +1877,13 @@ namespace {
             const int tile = (int)s.tile;
             const int channels = l.alpha ? 4 : 3;
             bool sdr = !strcmp(s.output, "sdr");
-            int box[2] = {boxOf(s, 0), boxOf(s, 1)};
+            int box[2] = {boxOf(s, o, 0), boxOf(s, o, 1)};
             bool boxed = box[0] > 1 || box[1] > 1;
             bool chromaNear = boxed && model("yuv") && (s.chroma[0] < 1. || s.chroma[1] < 1.);
             bool subsampled = !boxed && model("yuv") && (s.chroma[0] < 1. || s.chroma[1] < 1.);
-            bool portions = shrinking(s) && !blockRows(s, false);
-            const int rows = blockRows(s, portions);
-            bool sigmoid = sdr && s.size[0] <= s.target[0] && s.size[1] <= s.target[1];
+            bool portions = shrinking(s, o) && !blockRows(s, o, false);
+            const int rows = blockRows(s, o, portions);
+            bool sigmoid = sdr && s.size[0] <= o.size[0] && s.size[1] <= o.size[1];
             double ratio[2];
             Node* local[2] = {g.invocation(2, tile - 1), g.invocation(3, tile - 1)};
             Node* first[2];
@@ -1895,13 +1897,14 @@ namespace {
             }
 
             Node* origin[2];
-            Node* placed = placeTile(origin);
+            Node* video[2];
+            Node* placed = placeTile(origin, video);
 
             for (int i = 0; i < 2; i++) {
-                ratio[i] = ratioOf(s, i);
-                first[i] = g.min(g.sub(origin[i], (double)s.origin[i]), s.target[i] - 1.);
+                ratio[i] = ratioOf(s, o, i);
+                first[i] = g.min(g.sub(origin[i], video[i]), o.size[i] - 1.);
                 last[i] = g.i(::ceil((double)s.size[i] / box[i]) - 1.);
-                pixel[i] = g.clamp(g.add(first[i], g.convert(local[i], Kind::Int)), 0., s.target[i] - 1.);
+                pixel[i] = g.clamp(g.add(first[i], g.convert(local[i], Kind::Int)), 0., o.size[i] - 1.);
             }
 
             Node* lane = g.add(g.mul(local[1], tile), local[0]);
@@ -1914,7 +1917,7 @@ namespace {
             if (portions) {
                 upright = axis(g.sub(g.mul(g.add(g.convert(pixel[1], Kind::Float), 0.5), ratio[1]), 0.5), 1. / ratio[1]);
                 tileCorner = windowStart(first[1], ratio[1]);
-                k.loop.count = (footprintOf(s) + rows - 1) / rows;
+                k.loop.count = (footprintOf(s, o) + rows - 1) / rows;
                 k.loop.carried = channels;
                 k.loop.first = k.count;
                 portion = g.portion(k.loop.count);
@@ -1927,7 +1930,7 @@ namespace {
 
             for (int block = 0; block < blocks; block++) {
                 int top = block * rows;
-                Node* opening = g.clamp(g.add(first[1], top), 0., s.target[1] - 1.);
+                Node* opening = g.clamp(g.add(first[1], top), 0., o.size[1] - 1.);
                 Node* head[2] = {first[0], rows == tile ? first[1] : opening};
                 int reach[2] = {reachOf(ratio[0], tile), portions ? rows : reachOf(ratio[1], rows)};
                 Node* corner[2];
@@ -2063,7 +2066,7 @@ namespace {
                     continue;
                 }
 
-                Node* row = rows == tile ? pixel[1] : g.clamp(pixel[1], head[1], g.min(g.add(head[1], rows - 1), s.target[1] - 1.));
+                Node* row = rows == tile ? pixel[1] : g.clamp(pixel[1], head[1], g.min(g.add(head[1], rows - 1), o.size[1] - 1.));
                 Axis vertical = axis(g.sub(g.mul(g.add(g.convert(row, Kind::Float), 0.5), ratio[1]), 0.5), 1. / ratio[1]);
                 Node* down = g.convert(g.sub(vertical.origin, corner[1]), Kind::Uint);
                 Node* strip = rows == tile ? nullptr : g.lt(g.sub(local[1], top), rows);
@@ -2200,7 +2203,8 @@ namespace {
             bool subsampled = model("yuv") && (s.chroma[0] < 1. || s.chroma[1] < 1.);
             Node* local[2] = {g.invocation(2, tile - 1), g.invocation(3, tile - 1)};
             Node* origin[2];
-            Node* placed = placeTile(origin);
+            Node* video[2];
+            Node* placed = placeTile(origin, video);
             Node* first[2];
             Node* last[2];
             Node* at[2];
@@ -2209,7 +2213,7 @@ namespace {
             Node* alpha;
 
             for (int i = 0; i < 2; i++) {
-                first[i] = g.sub(origin[i], (double)s.origin[i]);
+                first[i] = g.sub(origin[i], video[i]);
                 last[i] = g.i(s.size[i] - 1.);
                 at[i] = g.clamp(g.add(first[i], g.convert(local[i], Kind::Int)), 0, last[i]);
             }
@@ -2392,7 +2396,6 @@ namespace {
     }
 }
 
-#if defined(__APPLE__)
 namespace {
     static const char* typeName(Kind kind) {
         return kind == Kind::Float ? "float" : kind == Kind::Uint ? "uint" : kind == Kind::Int ? "int" : "bool";
@@ -2402,7 +2405,7 @@ namespace {
         const char* inputs[8] = {"uv.x", "uv.y", "local.x", "local.y", "group.x", "group.y", "origin.x", "origin.y"};
 
         if (node->op == Op::Input && node->value >= 32.) {
-            const char* frames[5] = {"frame.size.x", "frame.size.y", "frame.tilesX", "frame.first", "frame.white"};
+            const char* frames[7] = {"frame.size.x", "frame.size.y", "frame.tilesX", "frame.first", "frame.white", "frame.video.x", "frame.video.y"};
 
             out << StringView(frames[(int)node->value - 32]);
         } else if (node->op == Op::Input && node->value >= 16.) {
@@ -2727,7 +2730,7 @@ namespace {
         u32 next = 3;
         Node* roots[7] = {k.encoded[0], k.encoded[1], k.encoded[2], k.encoded[3], k.pixel[0], k.pixel[1], k.drawn};
 
-        out << StringView(u8"struct Frame {\n    int2 size;\n    uint tilesX;\n    uint first;\n    float white;\n};\n");
+        out << StringView(u8"struct Frame {\n    int2 size;\n    int2 video;\n    uint tilesX;\n    uint first;\n    float white;\n};\n");
         out << StringView(u8"kernel void compose(device const uint* headers [[buffer(0)]], device const uint* list [[buffer(1)]], device const uint* ops [[buffer(2)]], device const uint* tiles [[buffer(4)]], constant Frame& frame [[buffer(5)]], const device uint* words [[buffer(7)]], texture2d<float, access::write> target [[texture(0)]], uint3 group [[threadgroup_position_in_grid]], uint3 local [[thread_position_in_threadgroup]]) {\n");
 
         for (int i = 0; i < kernelBuffers; i++) {
@@ -2752,7 +2755,7 @@ namespace {
         return copied(pool, out);
     }
 }
-#else
+
 namespace {
     enum : u32 {
         GlslFAbs = 4,
@@ -3314,13 +3317,13 @@ namespace {
         u32 pointerFloat = s.fresh();
         u32 pointerInt = s.fresh();
         u32 ids[2] = {s.fresh(), s.fresh()};
-        Node* indices[4] = {g.i(0.), g.i(1.), g.i(2.), g.i(3.)};
+        Node* indices[5] = {g.i(0.), g.i(1.), g.i(2.), g.i(3.), g.i(4.)};
         Vector<Node*> constants;
 
-        order(indices, 4, constants);
+        order(indices, 5, constants);
         e.emit(constants);
 
-        const int given[9] = {2, 3, 4, 5, 32, 33, 34, 35, 36};
+        const int given[11] = {2, 3, 4, 5, 32, 33, 34, 35, 36, 37, 38};
 
         for (int which : given) {
             e.inputs[which] = s.fresh();
@@ -3341,14 +3344,14 @@ namespace {
         Spirv::op(s.body, 81, e.typeUint, e.inputs[4], ids[1], 0);
         Spirv::op(s.body, 81, e.typeUint, e.inputs[5], ids[1], 1);
 
-        const u32 members[5][2] = {{0, 0}, {0, 1}, {1, 0}, {2, 0}, {3, 0}};
-        const u32 kinds[5] = {e.typeInt, e.typeInt, e.typeUint, e.typeUint, e.typeFloat};
-        const u32 pointers[5] = {frameInt, frameInt, frameUint, frameUint, frameFloat};
+        const u32 members[7][2] = {{0, 0}, {0, 1}, {2, 0}, {3, 0}, {4, 0}, {1, 0}, {1, 1}};
+        const u32 kinds[7] = {e.typeInt, e.typeInt, e.typeUint, e.typeUint, e.typeFloat, e.typeInt, e.typeInt};
+        const u32 pointers[7] = {frameInt, frameInt, frameUint, frameUint, frameFloat, frameInt, frameInt};
 
-        for (int i = 0; i < 5; i++) {
+        for (int i = 0; i < 7; i++) {
             u32 pointer = s.fresh();
 
-            if (i < 2) {
+            if (i < 2 || i > 4) {
                 Spirv::op(s.body, 65, pointers[i], pointer, frame, indices[members[i][0]]->id, indices[members[i][1]]->id);
             } else {
                 Spirv::op(s.body, 65, pointers[i], pointer, frame, indices[members[i][0]]->id);
@@ -3401,15 +3404,16 @@ namespace {
         Spirv::op(module, 71, typeFrame, 2);
         Spirv::op(module, 72, typeFrame, 0, 35, 0);
         Spirv::op(module, 72, typeFrame, 1, 35, 8);
-        Spirv::op(module, 72, typeFrame, 2, 35, 12);
-        Spirv::op(module, 72, typeFrame, 3, 35, 16);
+        Spirv::op(module, 72, typeFrame, 2, 35, 16);
+        Spirv::op(module, 72, typeFrame, 3, 35, 20);
+        Spirv::op(module, 72, typeFrame, 4, 35, 24);
         e.types(module);
         Spirv::op(module, 23, typeUvec3, e.typeUint, 3);
         Spirv::op(module, 23, typeIvec2, e.typeInt, 2);
         Spirv::op(module, 32, inputUvec3, 1, typeUvec3);
         Spirv::op(module, 25, typeImage, e.typeFloat, 1, 0, 0, 0, 2, 0);
         Spirv::op(module, 32, imagePointer, 0, typeImage);
-        Spirv::op(module, 30, typeFrame, typeIvec2, e.typeUint, e.typeUint, e.typeFloat);
+        Spirv::op(module, 30, typeFrame, typeIvec2, typeIvec2, e.typeUint, e.typeUint, e.typeFloat);
         Spirv::op(module, 32, framePointer, 9, typeFrame);
         Spirv::op(module, 32, frameInt, 9, e.typeInt);
         Spirv::op(module, 32, frameUint, 9, e.typeUint);
@@ -3450,7 +3454,6 @@ namespace {
         return e.finish(pool, module);
     }
 }
-#endif
 
 StringView compile(ObjPool& pool, const VideoShader& shader, const ShaderOptions& options) {
     Graph g(pool);
@@ -3463,15 +3466,19 @@ StringView compile(ObjPool& pool, const VideoShader& shader, const ShaderOptions
 
     layer.tile = shader.tile;
 
-    if (shader.size[0] == shader.target[0] && shader.size[1] == shader.target[1]) {
+    if (!options.size[0] || !options.size[1]) {
+        fail(StringView(u8"a video layer has no size"));
+    }
+
+    if (shader.size[0] == options.size[0] && shader.size[1] == options.size[1]) {
         video.native(layer);
     } else {
         video.kernel(layer);
     }
 
-#if defined(__APPLE__)
-    return options.tiles == ShaderTiles::Mixed ? mslLayer(pool, layer) : mslKernel(pool, layer);
-#else
+    if (options.target == ShaderTarget::Msl) {
+        return options.tiles == ShaderTiles::Mixed ? mslLayer(pool, layer) : mslKernel(pool, layer);
+    }
+
     return options.tiles == ShaderTiles::Mixed ? spirvLayer(pool, g, layer) : spirvKernel(pool, g, layer);
-#endif
 }

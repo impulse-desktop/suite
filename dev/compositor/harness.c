@@ -738,6 +738,7 @@ static void readback(Image* img, uint32_t w, uint32_t h, VkImageLayout layout, u
 
 typedef struct {
     int32_t size[2];
+    int32_t video[2];
     uint32_t tilesX;
     uint32_t first;
     float white;
@@ -926,7 +927,7 @@ int main(int argc, char** argv) {
         barrier(cmd, composed.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 0, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
         vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, queries, 0);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, composeLayout, 0, 2, sets, 0, NULL);
-        Push push = {{(int32_t)f.width, (int32_t)f.height}, program.tilesX, 0, 203.0f};
+        Push push = {{(int32_t)f.width, (int32_t)f.height}, {(int32_t)f.video[0], (int32_t)f.video[1]}, program.tilesX, 0, 203.0f};
         for (int k = 0; k < 4; k++) {
             if (!program.programs[k][1]) continue;
             push.first = program.programs[k][0];
@@ -948,7 +949,7 @@ int main(int argc, char** argv) {
             vkCmdResetQueryPool(cmd, queries, 0, 2);
             vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, queries, 0);
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, composeLayout, 0, 2, sets, 0, NULL);
-            Push push = {{(int32_t)f.width, (int32_t)f.height}, program.tilesX, 0, 203.0f};
+            Push push = {{(int32_t)f.width, (int32_t)f.height}, {(int32_t)f.video[0], (int32_t)f.video[1]}, program.tilesX, 0, 203.0f};
             for (int k = 1; k < 4; k++) {
                 if (!program.programs[k][1]) continue;
                 push.first = program.programs[k][0];

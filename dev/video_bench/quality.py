@@ -72,7 +72,7 @@ def shader(corpus, compiler, host, fmt, source, target, directory):
     facts = bench.facts(case(fmt, source, target), layout, components, offsets, lines)
     directory.mkdir(parents=True, exist_ok=True)
     for tiles in ("inside", "edge", "mixed"):
-        code = subprocess.run([compiler, "--output", "srgb", "--tiles", tiles, *facts], check=True, stdout=subprocess.PIPE).stdout
+        code = subprocess.run([compiler, "--target", "spirv", "--output", "srgb", "--tiles", tiles, "--size", "%dx%d" % target, *facts], check=True, stdout=subprocess.PIPE).stdout
         (directory / f"{tiles}.spv").write_bytes(compositor.merge(Path(host).read_bytes(), code) if tiles == "mixed" else code)
 
 
