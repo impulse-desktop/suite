@@ -94,7 +94,9 @@ warning_flags = ["-Wall", "-Wextra", "-Werror", "-Wno-missing-field-initializers
 
 # the compositor of every frame, gpu/compose.comp: compose is its own tile
 # program in 8x8 groups; compose_layer is the host a video layer that
-# compile() makes is merged into, one 24x24 group a tile, its layer() empty
+# compile() makes is merged into for the tiles where the interface lies over
+# the video, one 24x24 group a tile, its layer() empty; the tiles the video
+# alone covers run compile()'s own kernels
 shader_rules = []
 for shader, defines in [] if darwin else [
     ("compose", []),
@@ -275,7 +277,7 @@ video_shader = program(
     output="$(B)/dev/video_shader",
     srcs=["$(S)/dev/video_bench/emit.cpp", "$(S)/shader.cpp", "$(S)/error.cpp"],
     cflags=warning_flags,
-    deps=[video_codes, libstd],
+    deps=[video_codes, imgui, libstd],
 )
 
 # dev/compositor dumps headless ImGui frames for the compositor bench
@@ -437,8 +439,8 @@ if not darwin:
 
 
 # ---- the player's video next to libplacebo ----------------------------------
-# `./build video_quality` scores what the player draws (its video layer
-# merged into the compositor, dev/compositor/harness.c) and libplacebo's
+# `./build video_quality` scores what the player draws (its video programs
+# and the compositor, dev/compositor/harness.c) and libplacebo's
 # presets against every corpus picture at scale factors from 0.1 to 10, in
 # the frame formats decoders hand out (dev/video_bench/quality.py tells how);
 # `./build video_speed` times videos of the usual sizes drawn into the usual
@@ -537,14 +539,14 @@ if not darwin:
             shader_node = command(
                 name=f"video_shader_{tag}",
                 inputs=bench_shader_inputs,
-                outputs=[f"{shaders}/layer.spv"],
+                outputs=[f"{shaders}/{tiles}.spv" for tiles in ("inside", "edge", "mixed")],
                 deps=[corpus_tool, video_shader, compositor_hosts],
                 cmd=["python3", bench_script, "shader", *shader_tools, fmt, *sizes, shaders],
                 descr="SH",
             )
             triples = [word for name in pictures for word in (name, truth_of[name][0], truth_of[name][1].get(factor, truth_of[name][0]))]
             for variant, deps, tools in [
-                ("ours", [compositor_tool, compositor_hosts, shader_node], ["--layer", f"{shaders}/layer.spv", *ours_tools]),
+                ("ours", [compositor_tool, compositor_hosts, shader_node], ["--layers", shaders, *ours_tools]),
                 *((f"placebo_{preset}", [placebo_tool], ["--placebo", f"{bench_dir}/placebo"]) for preset in presets),
             ]:
                 out = f"{quality_dir}/scores/{tag}_{variant}.json"
@@ -576,7 +578,7 @@ if not darwin:
             name=f"video_speed_cases_{fmt}",
             inputs=bench_shader_inputs,
             outputs=[
-                *(f"{directory}/cases/{pair.replace(':', '_')}/{file}" for pair in pairs for file in ("size", "placebo.txt", "frame.bin", "layer.spv")),
+                *(f"{directory}/cases/{pair.replace(':', '_')}/{file}" for pair in pairs for file in ("size", "placebo.txt", "frame.bin", "inside.spv", "edge.spv", "mixed.spv")),
                 *(f"{directory}/frames/{video[0]}x{video[1]}.bin" for video in videos),
             ],
             deps=[corpus_tool, video_shader, compositor_hosts],

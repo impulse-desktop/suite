@@ -1,9 +1,11 @@
 #include "error.h"
 #include "shader.h"
+#include "renderer.h"
 
 #include <std/ios/sys.h>
 #include <std/sys/crt.h>
 #include <std/str/view.h>
+#include <std/str/builder.h>
 #include <std/mem/obj_pool.h>
 
 #include <string.h>
@@ -54,25 +56,42 @@ namespace {
 
         raiseError(StringView(u8"video_shader: unknown format"));
     }
+
+    int pick(const char* flag, const char* given, const char* wanted, const char* const* names, int count) {
+        if (!given || strcmp(given, flag)) {
+            raiseError(StringView(StringBuilder() << StringView(u8"video_shader: ") << StringView(flag) << StringView(u8" comes first")));
+        }
+
+        for (int i = 0; i < count; i++) {
+            if (wanted && !strcmp(wanted, names[i])) {
+                return i;
+            }
+        }
+
+        raiseError(StringView(StringBuilder() << StringView(u8"video_shader: unknown ") << StringView(flag)));
+    }
 }
 
 int main(int argc, char** argv) {
-    if (argc < 6) {
-        sysE << StringView(u8"usage: video_shader FORMAT SYSTEM TRANSFER CONVERSION OUTPUT HEX...") << endL;
+    if (argc < 10) {
+        sysE << StringView(u8"usage: video_shader --output srgb|pq|linear|wide --tiles inside|edge|mixed FORMAT SYSTEM TRANSFER CONVERSION OUTPUT HEX...") << endL;
 
         return 2;
     }
 
+    static const char* const outputs[4] = {"srgb", "pq", "linear", "wide"};
+    static const char* const tiles[3] = {"inside", "edge", "mixed"};
     ObjPool::Ref owner = ObjPool::fromMemory();
     VideoShader shader;
-    Arguments numbers{argv + 6, argv + argc};
+    ShaderOptions options{(ShaderOutput)pick("--output", argv[1], argv[2], outputs, 4), (ShaderTiles)pick("--tiles", argv[3], argv[4], tiles, 3)};
+    Arguments numbers{argv + 10, argv + argc};
 
     memset(&shader, 0, sizeof(shader));
-    shader.layout = layoutOf(argv[1]);
-    shader.system = argv[2];
-    shader.transfer = argv[3];
-    shader.conversion = argv[4];
-    shader.output = argv[5];
+    shader.layout = layoutOf(argv[5]);
+    shader.system = argv[6];
+    shader.transfer = argv[7];
+    shader.conversion = argv[8];
+    shader.output = argv[9];
     numbers.words(shader.planeOffset, 4);
     numbers.words(shader.lineSize, 4);
     numbers.words(shader.size, 4);
@@ -100,11 +119,11 @@ int main(int argc, char** argv) {
     for (int i = 0; i < 100; i++) {
         ObjPool::Ref scratch = ObjPool::fromMemory();
 
-        compile(*scratch, shader);
+        compile(*scratch, shader, options);
     }
 
     sysE << StringView(u8"compile ") << (monotonicNowUs() - start) * 10 << StringView(u8" ns") << endL;
-    sysO << compile(*owner, shader);
+    sysO << compile(*owner, shader, options);
 
     return 0;
 }

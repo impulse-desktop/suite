@@ -8,6 +8,7 @@ namespace stl {
 }
 
 struct VideoLayout;
+struct ShaderOptions;
 
 constexpr u32 kernelTile = 24;
 constexpr u32 kernelShared = 32768;
@@ -37,4 +38,4 @@ struct VideoShader {
     double luminance[3];
 };
 
-stl::StringView compile(stl::ObjPool& pool, const VideoShader& shader);
+stl::StringView compile(stl::ObjPool& pool, const VideoShader& shader, const ShaderOptions& options);

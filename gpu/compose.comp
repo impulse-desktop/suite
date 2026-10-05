@@ -81,7 +81,6 @@ layout(push_constant) uniform Frame {
     uint tilesX;
     uint first;
     float white;
-    uint layerWide;
 } frame;
 
 vec3 widen(vec3 c) {
@@ -177,7 +176,6 @@ void main() {
 
 #ifdef LAYER
     shown = layer(gl_LocalInvocationID.xy, origin);
-    shown.rgb = toFrame(shown.rgb, frame.layerWide != 0u);
 #endif
 
     if (pixel.x >= frame.size.x || pixel.y >= frame.size.y) {

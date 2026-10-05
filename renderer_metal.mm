@@ -57,12 +57,7 @@ namespace {
         Solid = 8,
     };
 
-    enum : u32 {
-        OutputSrgb,
-        OutputLinear,
-        OutputWideLinear,
-        Outputs,
-    };
+    constexpr u32 outputs = 4;
 
     struct Header {
         u32 base;
@@ -99,11 +94,10 @@ namespace {
     static_assert(sizeof(Triangle) == 176);
 
     struct Push {
-        i32 size[2];
+        alignas(8) i32 size[2];
         u32 tilesX;
         u32 first;
         float white;
-        u32 layerWide;
     };
 
     struct MetalTexture {
@@ -132,11 +126,7 @@ namespace {
     };
 
     struct MetalShader final: RenderShader {
-        MetalRenderer* renderer = nullptr;
-        id<MTLLibrary> library = nil;
-        id<MTLComputePipelineState> pipelines[Outputs] = {};
-
-        id<MTLComputePipelineState> pipeline(u32 output);
+        id<MTLComputePipelineState> pipeline = nil;
     };
 
     struct MetalImage final: RenderImage {
@@ -151,7 +141,7 @@ namespace {
         size_t sourceSize = 0;
         size_t bufferStride = 0;
         id<MTLBuffer> buffer = nil;
-        MetalShader* shader = nullptr;
+        ShaderFactory* factory = nullptr;
         id<MTLCommandBuffer> lastUse = nil;
         Runable* retired = nullptr;
         bool hostImported = false;
@@ -164,7 +154,7 @@ namespace {
         void draw(ImDrawList& list, ImVec2 lo, ImVec2 hi) override;
         void underlay(ImVec2 lo, ImVec2 hi) override;
         void read(int x0, int y0, int x1, int y1, ImagePixels& out) override;
-        void shadeWith(RenderShader& with) override;
+        void shadeWith(ShaderFactory& with) override;
         void readShaded(int x0, int y0, int x1, int y1, ImagePixels& out);
     };
 
@@ -253,7 +243,7 @@ namespace {
         id<CAMetalDrawable> drawable = nil;
         id<MTLCommandBuffer> last = nil;
         id<MTLLibrary> plainLibrary = nil;
-        id<MTLComputePipelineState> plain[Outputs] = {};
+        id<MTLComputePipelineState> plain[outputs] = {};
         bool edr = false;
         bool wide = false;
         float sdrWhiteNits = 203.f;
@@ -270,13 +260,12 @@ namespace {
         RenderImage* import(ObjPool& pool, SharedImage& source, bool hdr) override;
 
         RenderImage* bind(ObjPool& pool, u32 width, u32 height, const void* data, size_t size, size_t stride, Runable& retired) override;
-        RenderShader* compileShader(ObjPool& pool, const void* code, size_t size) override;
-        RenderShader* compileKernel(ObjPool& pool, const void* code, size_t size, u32 tile) override;
-        RenderImage* shade(ObjPool& pool, RenderShader& shader, u32 width, u32 height, const void* data, size_t size, bool hdr, Runable& retired) override;
+        RenderShader* compileKernel(ObjPool& pool, const void* code, size_t size, u32 tile, const ShaderOptions& options) override;
+        RenderImage* shade(ObjPool& pool, ShaderFactory& factory, u32 width, u32 height, const void* data, size_t size, bool hdr, Runable& retired) override;
         id<MTLLibrary> library(NSString* source);
-        id<MTLComputePipelineState> pipeline(id<MTLLibrary> library, u32 output, u32 side);
+        id<MTLComputePipelineState> pipeline(id<MTLLibrary> library, ShaderOutput output, u32 side);
         void updateTextures(ImDrawData* draw);
-        void encode(id<MTLCommandBuffer> command, id<MTLTexture> target, u32 output);
+        void encode(id<MTLCommandBuffer> command, id<MTLTexture> target, ShaderOutput output);
         void setMode(bool wide);
     };
 
@@ -342,7 +331,6 @@ struct Frame {
     uint tilesX;
     uint first;
     float white;
-    uint layerWide;
 };
 
 struct Textures {
@@ -432,7 +420,6 @@ kernel void compose(device const Header* headers [[buffer(0)]], device const uin
 #ifdef LAYER
     LAYER_SHARED
     shown = LAYER_CALL(inside.xy, origin, words);
-    shown.rgb = toFrame(shown.rgb, frame.layerWide != 0u);
 #endif
 
     if (pixel.x >= frame.size.x || pixel.y >= frame.size.y) {
@@ -948,15 +935,19 @@ void Tiles::addCommand(const ImDrawList& list, const ImDrawCmd& command) {
 
 void Tiles::finish() {
     u32 n = tilesX * tilesY;
-    u32 programCount = (u32)layers.length() + 1;
+    u32 programCount = (u32)layers.length() * 3 + 1;
     Vector<u32> sizes;
+    Vector<u32> program;
 
     headers.zero(n);
     sizes.zero(programCount);
+    program.zero(n);
 
     for (u32 i = 0; i < n; i++) {
         Header& h = headers.mut(i);
         u32 start = (u32)list.length();
+        const Op* video = nullptr;
+        bool alone = base[i] == composeNone;
 
         h.base = base[i];
         h.start = start;
@@ -965,16 +956,31 @@ void Tiles::finish() {
         for (u32 node = head[i]; node != composeNone; node = nodes[node * 2 + 1]) {
             u32 entry = nodes[node * 2];
             const Op& op = ops[entry & ~composeFill];
+            bool layer = !(entry & composeFill) && op.kind == OpLayer;
 
-            if (op.kind == OpLayer && op.index != layered[i]) {
+            if (layer && op.index != layered[i]) {
                 continue;
             }
 
+            video = layer ? &op : video;
+            alone = alone && layer;
             list.pushBack(entry);
         }
 
         h.count = (u32)list.length() - start;
-        sizes.mut(layered[i] == composeNone ? 0 : layered[i] + 1)++;
+
+        if (video) {
+            i32 x0 = (i32)((i % tilesX) * composeTile);
+            i32 y0 = (i32)((i / tilesX) * composeTile);
+            i32 x1 = x0 + (i32)composeTile < (i32)width ? x0 + (i32)composeTile : (i32)width;
+            i32 y1 = y0 + (i32)composeTile < (i32)height ? y0 + (i32)composeTile : (i32)height;
+            bool inside = video->rect[0] <= x0 && video->rect[1] <= y0 && video->rect[2] >= x1 && video->rect[3] >= y1;
+            ShaderTiles kind = !alone ? ShaderTiles::Mixed : inside ? ShaderTiles::Inside : ShaderTiles::Edge;
+
+            program.mut(i) = 1 + video->index * 3 + (u32)kind;
+        }
+
+        sizes.mut(program[i])++;
     }
 
     programs.zero((size_t)programCount * 2);
@@ -990,7 +996,7 @@ void Tiles::finish() {
     tiles.zero(n);
 
     for (u32 i = 0; i < n; i++) {
-        u32 p = layered[i] == composeNone ? 0 : layered[i] + 1;
+        u32 p = program[i];
 
         tiles.mut(programs[p * 2] + programs[p * 2 + 1]) = i;
         programs.mut(p * 2 + 1)++;
@@ -1109,7 +1115,7 @@ MetalImage::~MetalImage() noexcept {
 }
 
 void MetalImage::prepare() {
-    if (source && shader) {
+    if (source && factory) {
         if (!hostImported) {
             memcpy(buffer.contents, source, sourceSize);
         }
@@ -1124,15 +1130,15 @@ void MetalImage::prepare() {
     }
 }
 
-void MetalImage::shadeWith(RenderShader& with) {
-    if (!shader) {
+void MetalImage::shadeWith(ShaderFactory& with) {
+    if (!factory) {
         fail(StringView(u8"only a shaded image takes another shader"));
     }
-    shader = static_cast<MetalShader*>(&with);
+    factory = &with;
 }
 
 void MetalImage::underlay(ImVec2 lo, ImVec2 hi) {
-    if (!shader) {
+    if (!factory) {
         fail(StringView(u8"only a shaded image goes under the interface"));
     }
     renderer->drawn.pushBack(this);
@@ -1141,7 +1147,7 @@ void MetalImage::underlay(ImVec2 lo, ImVec2 hi) {
 
 void MetalImage::draw(ImDrawList& list, ImVec2 lo, ImVec2 hi) {
     renderer->drawn.pushBack(this);
-    if (shader) {
+    if (factory) {
         LayerDraw layer{this, {lo.x, lo.y}, {hi.x, hi.y}};
         list.AddCallback(drawLayer, &layer, sizeof(layer));
         return;
@@ -1150,7 +1156,7 @@ void MetalImage::draw(ImDrawList& list, ImVec2 lo, ImVec2 hi) {
 }
 
 void MetalImage::read(int x0, int y0, int x1, int y1, ImagePixels& out) {
-    if (shader) {
+    if (factory) {
         checkImageRegion(width, height, x0, y0, x1, y1);
         readShaded(x0, y0, x1, y1, out);
         return;
@@ -1194,7 +1200,7 @@ void MetalImage::readShaded(int x0, int y0, int x1, int y1, ImagePixels& out) {
         }
         whole.pushBack(Layer{this, {0.f, 0.f}, {(float)width, (float)height}});
         renderer->tiles.compose(nullptr, whole, width, height, hdr, ++renderer->frames, command, clear);
-        renderer->encode(command, target, hdr ? OutputWideLinear : OutputLinear);
+        renderer->encode(command, target, hdr ? ShaderOutput::WideLinear : ShaderOutput::Linear);
         id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
         [blit copyFromTexture:target sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(x0, y0, 0) sourceSize:MTLSizeMake(w, h, 1) toBuffer:readback destinationOffset:0 destinationBytesPerRow:stride destinationBytesPerImage:stride * h];
         [blit endEncoding];
@@ -1216,10 +1222,10 @@ id<MTLLibrary> MetalRenderer::library(NSString* source) {
     return made;
 }
 
-id<MTLComputePipelineState> MetalRenderer::pipeline(id<MTLLibrary> from, u32 output, u32 side) {
+id<MTLComputePipelineState> MetalRenderer::pipeline(id<MTLLibrary> from, ShaderOutput output, u32 side) {
     MTLFunctionConstantValues* constants = [[MTLFunctionConstantValues alloc] init];
-    int encoding = output == OutputSrgb ? 0 : 2;
-    bool wideOutput = output == OutputWideLinear;
+    int encoding = output == ShaderOutput::Srgb ? 0 : 2;
+    bool wideOutput = output == ShaderOutput::WideLinear;
     NSError* error = nil;
     [constants setConstantValue:&encoding type:MTLDataTypeInt atIndex:0];
     [constants setConstantValue:&wideOutput type:MTLDataTypeBool atIndex:1];
@@ -1240,14 +1246,7 @@ id<MTLComputePipelineState> MetalRenderer::pipeline(id<MTLLibrary> from, u32 out
     return made;
 }
 
-id<MTLComputePipelineState> MetalShader::pipeline(u32 output) {
-    if (!pipelines[output]) {
-        pipelines[output] = renderer->pipeline(library, output, composeTile);
-    }
-    return pipelines[output];
-}
-
-void MetalRenderer::encode(id<MTLCommandBuffer> command, id<MTLTexture> target, u32 output) {
+void MetalRenderer::encode(id<MTLCommandBuffer> command, id<MTLTexture> target, ShaderOutput output) {
     const Tiles& t = tiles;
     id<MTLComputeCommandEncoder> compute = [command computeCommandEncoder];
     if (!compute) {
@@ -1273,7 +1272,7 @@ void MetalRenderer::encode(id<MTLCommandBuffer> command, id<MTLTexture> target, 
     }
     [compute setBuffer:textures offset:0 atIndex:6];
     [compute setTexture:target atIndex:0];
-    Push push{{(i32)target.width, (i32)target.height}, t.tilesX, 0, sdrWhiteNits, 0};
+    Push push{{(i32)target.width, (i32)target.height}, t.tilesX, 0, sdrWhiteNits};
     for (u32 p = 0; p * 2 < t.programs.length(); p++) {
         u32 count = t.programs[p * 2 + 1];
         if (!count) {
@@ -1281,18 +1280,17 @@ void MetalRenderer::encode(id<MTLCommandBuffer> command, id<MTLTexture> target, 
         }
         push.first = t.programs[p * 2];
         if (p == 0) {
-            if (!plain[output]) {
-                plain[output] = pipeline(plainLibrary, output, composeGroup);
+            if (!plain[(u32)output]) {
+                plain[(u32)output] = pipeline(plainLibrary, output, composeGroup);
             }
-            push.layerWide = 0;
-            [compute setComputePipelineState:plain[output]];
+            [compute setComputePipelineState:plain[(u32)output]];
             [compute setBytes:&push length:sizeof(push) atIndex:5];
             [compute dispatchThreadgroups:MTLSizeMake(count, (composeTile / composeGroup) * (composeTile / composeGroup), 1) threadsPerThreadgroup:MTLSizeMake(composeGroup, composeGroup, 1)];
             continue;
         }
-        MetalImage* image = t.layers[p - 1];
-        push.layerWide = image->hdr ? 1u : 0u;
-        [compute setComputePipelineState:image->shader->pipeline(output)];
+        MetalImage* image = t.layers[(p - 1) / 3];
+        MetalShader& shader = static_cast<MetalShader&>(image->factory->shader(ShaderOptions{output, (ShaderTiles)((p - 1) % 3)}));
+        [compute setComputePipelineState:shader.pipeline];
         [compute setBuffer:image->buffer offset:0 atIndex:7];
         [compute setBytes:&push length:sizeof(push) atIndex:5];
         [compute dispatchThreadgroups:MTLSizeMake(count, 1, 1) threadsPerThreadgroup:MTLSizeMake(composeTile, composeTile, 1)];
@@ -1491,7 +1489,7 @@ bool MetalRenderer::endFrame(ImDrawData* draw) {
             fail(StringView(u8"cannot begin Metal command buffer"));
         }
         for (MetalImage* image : drawn) {
-            if (image->shader) {
+            if (image->factory) {
                 image->dirty = false;
             } else if (image->dirty) {
                 id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
@@ -1509,7 +1507,7 @@ bool MetalRenderer::endFrame(ImDrawData* draw) {
         const float clear[4] = {srgbTable[25], srgbTable[25], srgbTable[25], 1.f};
         tiles.compose(draw, underlays, (u32)drawable.texture.width, (u32)drawable.texture.height, wide, ++frames, command, clear);
         underlays.clear();
-        encode(command, drawable.texture, wide ? OutputWideLinear : OutputSrgb);
+        encode(command, drawable.texture, wide ? ShaderOutput::WideLinear : ShaderOutput::Srgb);
         Channel* done = landed;
         plt::LoopWake* completed = wake;
         [command addCompletedHandler:^(id<MTLCommandBuffer>) {
@@ -1557,7 +1555,10 @@ RenderImage* MetalRenderer::bind(ObjPool& pool, u32 width, u32 height, const voi
     }
 }
 
-RenderShader* MetalRenderer::compileShader(ObjPool& pool, const void* code, size_t size) {
+RenderShader* MetalRenderer::compileKernel(ObjPool& pool, const void* code, size_t size, u32 tile, const ShaderOptions& options) {
+    if (tile != composeTile) {
+        fail(StringView(u8"a kernel is not made for the compositor's tile"));
+    }
     if (!code || !size) {
         fail(StringView(u8"invalid shader code"));
     }
@@ -1567,20 +1568,13 @@ RenderShader* MetalRenderer::compileShader(ObjPool& pool, const void* code, size
             fail(StringView(u8"Metal shader: not UTF-8"));
         }
         MetalShader* shader = pool.make<MetalShader>();
-        shader->renderer = this;
-        shader->library = library([NSString stringWithFormat:@"#define GROUP %u\n#define LAYER 1\n%@\n%s", composeTile, layerSource, composeSource]);
+        id<MTLLibrary> made = options.tiles == ShaderTiles::Mixed ? library([NSString stringWithFormat:@"#define GROUP %u\n#define LAYER 1\n%@\n%s", composeTile, layerSource, composeSource]) : library(layerSource);
+        shader->pipeline = pipeline(made, options.output, composeTile);
         return shader;
     }
 }
 
-RenderShader* MetalRenderer::compileKernel(ObjPool& pool, const void* code, size_t size, u32 tile) {
-    if (tile != composeTile) {
-        fail(StringView(u8"a kernel is not made for the compositor's tile"));
-    }
-    return compileShader(pool, code, size);
-}
-
-RenderImage* MetalRenderer::shade(ObjPool& pool, RenderShader& shader, u32 width, u32 height, const void* data, size_t size, bool imageHdr, Runable& retired) {
+RenderImage* MetalRenderer::shade(ObjPool& pool, ShaderFactory& factory, u32 width, u32 height, const void* data, size_t size, bool imageHdr, Runable& retired) {
     checkImageSize(width, height, maxTextureSide());
     if (!data || !size || size % 4) {
         fail(StringView(u8"invalid shaded image source"));
@@ -1594,7 +1588,7 @@ RenderImage* MetalRenderer::shade(ObjPool& pool, RenderShader& shader, u32 width
         image->height = height;
         image->source = data;
         image->sourceSize = size;
-        image->shader = static_cast<MetalShader*>(&shader);
+        image->factory = &factory;
         image->retired = &retired;
         size_t page = (size_t)getpagesize();
         if ((uintptr_t)data % page == 0 && size % page == 0) {
@@ -1650,7 +1644,7 @@ Renderer* createMetalRenderer(ObjPool& pool, plt::Platform& platform, plt::Windo
     layer.presentsWithTransaction = NO;
     renderer->setMode(false);
     renderer->plainLibrary = renderer->library([NSString stringWithFormat:@"#define GROUP %u\n%s", composeGroup, composeSource]);
-    renderer->plain[OutputSrgb] = renderer->pipeline(renderer->plainLibrary, OutputSrgb, composeGroup);
+    renderer->plain[(u32)ShaderOutput::Srgb] = renderer->pipeline(renderer->plainLibrary, ShaderOutput::Srgb, composeGroup);
     renderer->wake = platform.createLoopWake(pool, *pool.make<PollMetal>(renderer));
     renderer->smallObjects = SmallObjAllocator::create(&pool);
     renderer->landed = Channel::create(&pool, 64);

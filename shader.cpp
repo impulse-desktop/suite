@@ -1,6 +1,7 @@
 #include "shader.h"
 
 #include "error.h"
+#include "renderer.h"
 
 #include <std/str/view.h>
 #include <std/lib/vector.h>
@@ -184,8 +185,8 @@ namespace {
                 hi = 2147483647.;
             }
 
-            bool uniform = op != Op::Input || (value >= 4. && value < 16.);
-            bool varies = op == Op::Shared || (op == Op::Input && value >= 8.);
+            bool uniform = op != Op::Input || (value >= 4. && value < 16.) || value >= 32.;
+            bool varies = op == Op::Shared || (op == Op::Input && value >= 8. && value < 32.);
 
             for (int i = 0; i < arity; i++) {
                 uniform = uniform && args[i]->uniform;
@@ -243,6 +244,10 @@ namespace {
 
         Node* origin(int which) {
             return make(Op::Input, Kind::Int, 0, nullptr, nullptr, nullptr, which, 0., 65535.);
+        }
+
+        Node* frame(int which, Kind kind, double hi) {
+            return make(Op::Input, kind, 0, nullptr, nullptr, nullptr, 32. + which, 0., hi);
         }
 
         Node* portion(int count) {
@@ -851,6 +856,10 @@ namespace {
             return make(Op::Load, Kind::Uint, 1, index, nullptr, nullptr, 0., 0., word);
         }
 
+        Node* fetch(int buffer, Node* index) {
+            return make(Op::Load, Kind::Uint, 1, index, nullptr, nullptr, buffer, 0., word);
+        }
+
         Node* half(Node* a) {
             return make(Op::Half, Kind::Float, 1, a, nullptr, nullptr, 0., -INFINITY, INFINITY);
         }
@@ -1000,6 +1009,18 @@ namespace {
         Node* next[4];
     };
 
+    constexpr u32 composeFill = 0x80000000u;
+    constexpr int headerWords = 8;
+    constexpr int opWords = 20;
+
+    enum ComposeBuffer {
+        Words,
+        Headers,
+        List,
+        Ops,
+        Tiles,
+    };
+
     struct Kernel {
         Vector<Store> stores[kernelPhases];
         Vector<Node*> before[kernelPhases];
@@ -1007,7 +1028,10 @@ namespace {
         int count = 0;
         u32 sizes[kernelBuffers] = {};
         u32 tile = 0;
-        Node* color[4];
+        Node* shown[4];
+        Node* encoded[4];
+        Node* pixel[2];
+        Node* drawn;
 
         int open(u32 size) {
             u32& buffer = sizes[count % kernelBuffers];
@@ -1098,6 +1122,7 @@ namespace {
         Graph& g;
         const VideoShader& s;
         const VideoLayout& l;
+        const ShaderOptions& o;
 
         bool model(const char* name) const {
             return !strcmp(l.model, name);
@@ -1760,9 +1785,20 @@ namespace {
                 fail(StringView(u8"a video layer does not fit its tile"));
             }
 
+            Node* placed = o.tiles == ShaderTiles::Mixed ? nullptr : g.fetch(Tiles, g.add(g.frame(3, Kind::Uint, word), g.invocation(4, 65535.)));
+            Node* origin[2] = {g.origin(6), g.origin(7)};
+
+            if (placed) {
+                Node* tilesAcross = g.frame(2, Kind::Uint, 65535.);
+                Node* tileRow = g.convert(g.floor(g.div(g.add(g.convert(placed, Kind::Float), 0.5), g.convert(tilesAcross, Kind::Float))), Kind::Uint);
+
+                origin[0] = g.convert(g.mul(g.sub(placed, g.mul(tileRow, tilesAcross)), (double)tile), Kind::Int);
+                origin[1] = g.convert(g.mul(tileRow, (double)tile), Kind::Int);
+            }
+
             for (int i = 0; i < 2; i++) {
                 ratio[i] = ratioOf(s, i);
-                first[i] = g.sub(g.origin(6 + i), (double)s.origin[i]);
+                first[i] = g.sub(origin[i], (double)s.origin[i]);
                 last[i] = g.i(::ceil((double)s.size[i] / box[i]) - 1.);
                 pixel[i] = g.clamp(g.add(first[i], g.convert(local[i], Kind::Int)), 0., s.target[i] - 1.);
             }
@@ -2020,8 +2056,94 @@ namespace {
                 shown[c] = sigmoid && !identity ? unsigmoidize(straight) : straight;
             }
 
-            outputOf(shown, k.color);
-            k.color[3] = identity ? light[3] : alpha;
+            Node* layer[4];
+
+            outputOf(shown, layer);
+            layer[3] = identity ? light[3] : alpha;
+            compose(k, placed, origin, local, layer);
+        }
+
+        Node* fract(Node* x) {
+            return g.sub(x, g.floor(x));
+        }
+
+        void compose(Kernel& k, Node* tile, Node* const (&origin)[2], Node* const (&local)[2], Node* const (&layer)[4]) {
+            static const double widen[3][3] = {{0.627404, 0.329283, 0.043313}, {0.069097, 0.919540, 0.011362}, {0.016391, 0.088013, 0.895595}};
+            static const double narrow[3][3] = {{1.660491, -0.587641, -0.072850}, {-0.124550, 1.132900, -0.008349}, {-0.018151, -0.100579, 1.118730}};
+            bool layerWide = strcmp(s.output, "sdr");
+            bool wide = o.output == ShaderOutput::Pq || o.output == ShaderOutput::WideLinear;
+
+            for (int c = 0; c < 3; c++) {
+                Node* toWide = g.f(0.);
+                Node* toNarrow = g.f(0.);
+
+                for (int j = 0; j < 3; j++) {
+                    toWide = g.add(toWide, g.mul(layer[j], widen[c][j]));
+                    toNarrow = g.add(toNarrow, g.mul(layer[j], narrow[c][j]));
+                }
+
+                k.shown[c] = layerWide ? (wide ? layer[c] : g.clamp(toNarrow, 0., 1.)) : (wide ? toWide : layer[c]);
+            }
+
+            k.shown[3] = layer[3];
+
+            if (o.tiles == ShaderTiles::Mixed) {
+                return;
+            }
+
+            Node* header = g.mul(tile, headerWords);
+            Node* inside = g.f(1.);
+
+            for (int i = 0; i < 2; i++) {
+                k.pixel[i] = g.add(origin[i], g.convert(local[i], Kind::Int));
+
+                Node* within = g.convert(g.lt(k.pixel[i], g.frame(i, Kind::Int, 65535.)), Kind::Float);
+
+                k.drawn = i ? g.mul(k.drawn, within) : within;
+            }
+
+            k.drawn = g.lt(0.5, k.drawn);
+
+            if (o.tiles == ShaderTiles::Edge) {
+                Node* video = g.band(g.fetch(List, g.fetch(Headers, g.add(header, 1))), (double)~composeFill);
+
+                for (int i = 0; i < 2; i++) {
+                    Node* low = g.convert(g.fetch(Ops, g.add(g.mul(video, opWords), 4 + i)), Kind::Int);
+                    Node* high = g.convert(g.fetch(Ops, g.add(g.mul(video, opWords), 6 + i)), Kind::Int);
+
+                    inside = g.mul(inside, g.mul(g.convert(g.le(low, k.pixel[i]), Kind::Float), g.convert(g.lt(k.pixel[i], high), Kind::Float)));
+                }
+            }
+
+            Node* cover = g.mul(layer[3], inside);
+            Node* keep = g.sub(1., cover);
+            Node* acc[4];
+
+            for (int c = 0; c < 4; c++) {
+                Node* color = g.bitsFloat(g.fetch(Headers, g.add(header, 4 + c)));
+
+                acc[c] = g.add(c < 3 ? g.mul(k.shown[c], cover) : cover, g.mul(color, keep));
+            }
+
+            Node* at[2] = {g.add(g.convert(k.pixel[0], Kind::Float), 0.5), g.add(g.convert(k.pixel[1], Kind::Float), 0.5)};
+            Node* noise = g.sub(fract(g.mul(fract(g.add(g.mul(at[0], 0.06711056), g.mul(at[1], 0.00583715))), 52.9829189)), 0.5);
+            Node* visible = g.lt(0., acc[3]);
+
+            for (int c = 0; c < 3; c++) {
+                if (o.output == ShaderOutput::Srgb) {
+                    Node* v = g.clamp(acc[c], 0., 1.);
+
+                    k.encoded[c] = g.add(g.select(g.le(v, 0.0031308), g.mul(v, 12.92), g.sub(g.mul(g.pow(v, 1. / 2.4), 1.055), 0.055)), g.mul(noise, 1. / 255.));
+                } else if (o.output == ShaderOutput::Pq) {
+                    Node* y = g.pow(g.clamp(g.mul(g.mul(acc[c], g.frame(4, Kind::Float, 100000.)), 1. / 10000.), 0., 1.), 2610. / 16384.);
+
+                    k.encoded[c] = g.add(g.pow(g.div(g.add(g.mul(y, 18.8515625), 0.8359375), g.add(g.mul(y, 18.6875), 1.)), 2523. / 32.), g.mul(noise, 1. / 1023.));
+                } else {
+                    k.encoded[c] = g.select(visible, g.div(acc[c], acc[3]), g.f(0.));
+                }
+            }
+
+            k.encoded[3] = o.output == ShaderOutput::Srgb || o.output == ShaderOutput::Pq ? g.f(1.) : g.select(visible, acc[3], g.f(0.));
         }
     };
 
@@ -2071,7 +2193,7 @@ namespace {
 
     static void forget(const Vector<Node*>& nodes) {
         for (Node* node : nodes) {
-            if (node->op != Op::Const && (node->op != Op::Input || node->value >= 8.)) {
+            if (node->op != Op::Const && (node->op != Op::Input || (node->value >= 8. && node->value < 32.))) {
                 node->mark = 0;
             }
         }
@@ -2116,7 +2238,11 @@ namespace {
     static void operand(StringBuilder& out, const Node* node) {
         const char* inputs[8] = {"uv.x", "uv.y", "local.x", "local.y", "group.x", "group.y", "origin.x", "origin.y"};
 
-        if (node->op == Op::Input && node->value >= 16.) {
+        if (node->op == Op::Input && node->value >= 32.) {
+            const char* frames[5] = {"frame.size.x", "frame.size.y", "frame.tilesX", "frame.first", "frame.white"};
+
+            out << StringView(frames[(int)node->value - 32]);
+        } else if (node->op == Op::Input && node->value >= 16.) {
             out << StringView(u8"carried") << (u64)(node->value - 16.);
         } else if (node->op == Op::Input && node->value >= 8.) {
             out << StringView(u8"portion");
@@ -2251,7 +2377,9 @@ namespace {
                 operand(out, node->args[0]);
                 out << StringView(u8")");
             } else if (node->op == Op::Load) {
-                out << StringView(u8"words[");
+                const char* buffers[5] = {"words[", "headers[", "list[", "ops[", "tiles["};
+
+                out << StringView(buffers[(int)node->value]);
                 operand(out, node->args[0]);
                 out << StringView(u8"]");
             } else if (node->op == Op::Half) {
@@ -2272,17 +2400,6 @@ namespace {
 
             out << StringView(u8";\n");
         }
-    }
-
-    static void finish(StringBuilder& out, Node* const* color, const char* tail) {
-        out << StringView(u8"float4(");
-
-        for (int i = 0; i < 4; i++) {
-            operand(out, color[i]);
-            out << StringView(i < 3 ? ", " : ")");
-        }
-
-        out << StringView(tail);
     }
 
     static StringView copied(ObjPool& pool, StringBuilder& out) {
@@ -2406,6 +2523,17 @@ namespace {
         }
     }
 
+    static void finish(StringBuilder& out, Node* const* color, const char* tail) {
+        out << StringView(u8"float4(");
+
+        for (int i = 0; i < 4; i++) {
+            operand(out, color[i]);
+            out << StringView(i < 3 ? ", " : ")");
+        }
+
+        out << StringView(tail);
+    }
+
     static StringView mslLayer(ObjPool& pool, const Kernel& k) {
         StringBuilder out;
         u32 next = 3;
@@ -2423,10 +2551,40 @@ namespace {
 
         Vector<Node*> nodes;
 
-        order(k.color, 4, nodes);
+        order(k.shown, 4, nodes);
         statements(out, nodes, next);
         out << StringView(u8"    return ");
-        finish(out, k.color, ";\n}\n");
+        finish(out, k.shown, ";\n}\n");
+
+        return copied(pool, out);
+    }
+
+    static StringView mslKernel(ObjPool& pool, const Kernel& k) {
+        StringBuilder out;
+        u32 next = 3;
+        Node* roots[7] = {k.encoded[0], k.encoded[1], k.encoded[2], k.encoded[3], k.pixel[0], k.pixel[1], k.drawn};
+
+        out << StringView(u8"struct Frame {\n    int2 size;\n    uint tilesX;\n    uint first;\n    float white;\n};\n");
+        out << StringView(u8"kernel void compose(device const uint* headers [[buffer(0)]], device const uint* list [[buffer(1)]], device const uint* ops [[buffer(2)]], device const uint* tiles [[buffer(4)]], constant Frame& frame [[buffer(5)]], const device uint* words [[buffer(7)]], texture2d<float, access::write> target [[texture(0)]], uint3 group [[threadgroup_position_in_grid]], uint3 local [[thread_position_in_threadgroup]]) {\n");
+
+        for (int i = 0; i < kernelBuffers; i++) {
+            out << StringView(u8"    threadgroup float ") << StringView(sharedNames[i]) << StringView(u8"[") << (u64)(k.buffer(i) ? k.buffer(i) : 1) << StringView(u8"];\n");
+        }
+
+        phases(out, k, next);
+
+        Vector<Node*> nodes;
+
+        order(roots, 7, nodes);
+        statements(out, nodes, next);
+        out << StringView(u8"    if (");
+        operand(out, k.drawn);
+        out << StringView(u8") {\n        target.write(");
+        finish(out, k.encoded, ", uint2(uint(");
+        operand(out, k.pixel[0]);
+        out << StringView(u8"), uint(");
+        operand(out, k.pixel[1]);
+        out << StringView(u8")));\n    }\n}\n");
 
         return copied(pool, out);
     }
@@ -2503,8 +2661,9 @@ namespace {
         u32 label = s.fresh();
         u32 sharedFloat = s.fresh();
         u32 arrays[kernelBuffers] = {s.fresh(), s.fresh()};
-        u32 inputs[8] = {s.fresh(), s.fresh(), s.fresh(), s.fresh(), s.fresh(), s.fresh(), s.fresh(), s.fresh()};
+        u32 inputs[48] = {};
         u32 variables[5] = {};
+        u32 buffers[5] = {bytes, s.fresh(), s.fresh(), s.fresh(), s.fresh()};
         u32 zero = 0;
         u32 one = 0;
         u32 none = 0;
@@ -2528,7 +2687,7 @@ namespace {
 
         void emit(const Vector<Node*>& nodes) {
             for (Node* node : nodes) {
-                if (node->op == Op::Input && node->value >= 8.) {
+                if (node->op == Op::Input && node->value >= 8. && node->value < 32.) {
                     node->id = s.fresh();
                     Spirv::op(s.body, 61, type(node->kind), node->id, variables[node->value == 8. ? 0 : (int)node->value - 15]);
                     continue;
@@ -2647,7 +2806,7 @@ namespace {
                     case Op::Load: {
                         u32 pointer = s.fresh();
 
-                        Spirv::op(s.body, 65, storageWord, pointer, bytes, zero, a);
+                        Spirv::op(s.body, 65, storageWord, pointer, buffers[(int)node->value], zero, a);
                         Spirv::op(s.body, 61, typeUint, node->id, pointer);
                         break;
                     }
@@ -2809,13 +2968,21 @@ namespace {
             }
         }
 
-        void common(Vector<u32>& module) {
+        void common(Vector<u32>& module, bool kernel) {
             Spirv::op(module, 71, typeWords, 6, 4);
             Spirv::op(module, 72, typeBytes, 0, 24);
             Spirv::op(module, 72, typeBytes, 0, 35, 0);
             Spirv::op(module, 71, typeBytes, 2);
             Spirv::op(module, 71, bytes, 34, 1);
             Spirv::op(module, 71, bytes, 33, 0);
+
+            const u32 bindings[5] = {0, 0, 1, 2, 4};
+
+            for (int i = 1; kernel && i < 5; i++) {
+                Spirv::op(module, 71, buffers[i], 34, 0);
+                Spirv::op(module, 71, buffers[i], 33, bindings[i]);
+                Spirv::op(module, 71, buffers[i], 24);
+            }
         }
 
         void types(Vector<u32>& module) {
@@ -2846,7 +3013,7 @@ namespace {
             return StringView(out, size);
         }
 
-        void head(Vector<u32>& module) {
+        void head(Vector<u32>& module, bool kernel) {
             Vector<u32> entry;
 
             module.pushBack(0x07230203u);
@@ -2855,6 +3022,10 @@ namespace {
             module.pushBack(0);
             module.pushBack(0);
             Spirv::op(module, 17, 1);
+
+            if (kernel) {
+                Spirv::op(module, 17, 56);
+            }
 
             entry.pushBack(glsl);
             Spirv::string(entry, "GLSL.std.450");
@@ -2883,6 +3054,10 @@ namespace {
         u32 pointerFloat = s.fresh();
         u32 pointerInt = s.fresh();
 
+        for (int which : {2, 3, 6, 7}) {
+            e.inputs[which] = s.fresh();
+        }
+
         Spirv::op(s.body, 54, e.typeVec4, e.main, 0, typeLayer);
         Spirv::op(s.body, 55, pointerUvec2, local);
         Spirv::op(s.body, 55, pointerIvec2, origin);
@@ -2904,16 +3079,16 @@ namespace {
 
         Vector<Node*> nodes;
 
-        order(k.color, 4, nodes);
+        order(k.shown, 4, nodes);
         e.emit(nodes);
-        Spirv::op(s.body, 80, e.typeVec4, color, k.color[0]->id, k.color[1]->id, k.color[2]->id, k.color[3]->id);
+        Spirv::op(s.body, 80, e.typeVec4, color, k.shown[0]->id, k.shown[1]->id, k.shown[2]->id, k.shown[3]->id);
         Spirv::op(s.body, 254, color);
         Spirv::op(s.body, 56);
 
         Vector<u32> module;
 
-        e.head(module);
-        e.common(module);
+        e.head(module, false);
+        e.common(module, false);
         e.types(module);
 
         if (k.loop.count) {
@@ -2948,12 +3123,171 @@ namespace {
 
         return e.finish(pool, module);
     }
+
+    static StringView spirvKernel(ObjPool& pool, Graph& g, const Kernel& k) {
+        Emitter e(g);
+        Spirv& s = e.s;
+        u32 typeUvec3 = s.fresh();
+        u32 typeIvec2 = s.fresh();
+        u32 inputUvec3 = s.fresh();
+        u32 typeImage = s.fresh();
+        u32 imagePointer = s.fresh();
+        u32 image = s.fresh();
+        u32 typeFrame = s.fresh();
+        u32 framePointer = s.fresh();
+        u32 frameInt = s.fresh();
+        u32 frameUint = s.fresh();
+        u32 frameFloat = s.fresh();
+        u32 frame = s.fresh();
+        u32 local = s.fresh();
+        u32 group = s.fresh();
+        u32 lengths[kernelBuffers] = {s.fresh(), s.fresh()};
+        u32 arrayTypes[kernelBuffers] = {s.fresh(), s.fresh()};
+        u32 arrayPointers[kernelBuffers] = {s.fresh(), s.fresh()};
+        u32 scope = s.fresh();
+        u32 semantics = s.fresh();
+        u32 pointerFloat = s.fresh();
+        u32 pointerInt = s.fresh();
+        u32 ids[2] = {s.fresh(), s.fresh()};
+        Node* indices[4] = {g.i(0.), g.i(1.), g.i(2.), g.i(3.)};
+        Vector<Node*> constants;
+
+        order(indices, 4, constants);
+        e.emit(constants);
+
+        for (int which : {2, 3, 4, 5, 32, 33, 34, 35, 36}) {
+            e.inputs[which] = s.fresh();
+        }
+
+        Spirv::op(s.body, 54, e.typeVoid, e.main, 0, e.typeFunction);
+        Spirv::op(s.body, 248, e.label);
+
+        for (int i = 0; k.loop.count && i <= k.loop.carried; i++) {
+            e.variables[i] = s.fresh();
+            Spirv::op(s.body, 59, i ? pointerFloat : pointerInt, e.variables[i], 7);
+        }
+
+        Spirv::op(s.body, 61, typeUvec3, ids[0], local);
+        Spirv::op(s.body, 81, e.typeUint, e.inputs[2], ids[0], 0);
+        Spirv::op(s.body, 81, e.typeUint, e.inputs[3], ids[0], 1);
+        Spirv::op(s.body, 61, typeUvec3, ids[1], group);
+        Spirv::op(s.body, 81, e.typeUint, e.inputs[4], ids[1], 0);
+        Spirv::op(s.body, 81, e.typeUint, e.inputs[5], ids[1], 1);
+
+        const u32 members[5][2] = {{0, 0}, {0, 1}, {1, 0}, {2, 0}, {3, 0}};
+        const u32 kinds[5] = {e.typeInt, e.typeInt, e.typeUint, e.typeUint, e.typeFloat};
+        const u32 pointers[5] = {frameInt, frameInt, frameUint, frameUint, frameFloat};
+
+        for (int i = 0; i < 5; i++) {
+            u32 pointer = s.fresh();
+
+            if (i < 2) {
+                Spirv::op(s.body, 65, pointers[i], pointer, frame, indices[members[i][0]]->id, indices[members[i][1]]->id);
+            } else {
+                Spirv::op(s.body, 65, pointers[i], pointer, frame, indices[members[i][0]]->id);
+            }
+
+            Spirv::op(s.body, 61, kinds[i], e.inputs[32 + i], pointer);
+        }
+
+        e.phases(k, scope, semantics);
+
+        Node* roots[7] = {k.encoded[0], k.encoded[1], k.encoded[2], k.encoded[3], k.pixel[0], k.pixel[1], k.drawn};
+        Vector<Node*> nodes;
+        u32 merge = s.fresh();
+        u32 store = s.fresh();
+        u32 coordinate = s.fresh();
+        u32 loaded = s.fresh();
+        u32 texel = s.fresh();
+
+        order(roots, 7, nodes);
+        e.emit(nodes);
+        Spirv::op(s.body, 247, merge, 0);
+        Spirv::op(s.body, 250, k.drawn->id, store, merge);
+        Spirv::op(s.body, 248, store);
+        Spirv::op(s.body, 80, typeIvec2, coordinate, k.pixel[0]->id, k.pixel[1]->id);
+        Spirv::op(s.body, 61, typeImage, loaded, image);
+        Spirv::op(s.body, 80, e.typeVec4, texel, k.encoded[0]->id, k.encoded[1]->id, k.encoded[2]->id, k.encoded[3]->id);
+        Spirv::op(s.body, 99, loaded, coordinate, texel);
+        Spirv::op(s.body, 249, merge);
+        Spirv::op(s.body, 248, merge);
+        Spirv::op(s.body, 253);
+        Spirv::op(s.body, 56);
+
+        Vector<u32> module;
+        Vector<u32> entry;
+
+        e.head(module, true);
+        entry.pushBack(5);
+        entry.pushBack(e.main);
+        Spirv::string(entry, "main");
+        entry.pushBack(local);
+        entry.pushBack(group);
+        Spirv::put(module, 15, entry.data(), (u32)entry.length());
+        Spirv::op(module, 16, e.main, 17, k.tile, k.tile, 1);
+        Spirv::op(module, 71, local, 11, 27);
+        Spirv::op(module, 71, group, 11, 26);
+        e.common(module, true);
+        Spirv::op(module, 71, image, 34, 0);
+        Spirv::op(module, 71, image, 33, 5);
+        Spirv::op(module, 71, image, 25);
+        Spirv::op(module, 71, typeFrame, 2);
+        Spirv::op(module, 72, typeFrame, 0, 35, 0);
+        Spirv::op(module, 72, typeFrame, 1, 35, 8);
+        Spirv::op(module, 72, typeFrame, 2, 35, 12);
+        Spirv::op(module, 72, typeFrame, 3, 35, 16);
+        e.types(module);
+        Spirv::op(module, 23, typeUvec3, e.typeUint, 3);
+        Spirv::op(module, 23, typeIvec2, e.typeInt, 2);
+        Spirv::op(module, 32, inputUvec3, 1, typeUvec3);
+        Spirv::op(module, 25, typeImage, e.typeFloat, 1, 0, 0, 0, 2, 0);
+        Spirv::op(module, 32, imagePointer, 0, typeImage);
+        Spirv::op(module, 30, typeFrame, typeIvec2, e.typeUint, e.typeUint, e.typeFloat);
+        Spirv::op(module, 32, framePointer, 9, typeFrame);
+        Spirv::op(module, 32, frameInt, 9, e.typeInt);
+        Spirv::op(module, 32, frameUint, 9, e.typeUint);
+        Spirv::op(module, 32, frameFloat, 9, e.typeFloat);
+
+        if (k.loop.count) {
+            Spirv::op(module, 32, pointerFloat, 7, e.typeFloat);
+            Spirv::op(module, 32, pointerInt, 7, e.typeInt);
+        }
+
+        for (int i = 0; i < kernelBuffers; i++) {
+            if (k.buffer(i)) {
+                Spirv::op(module, 43, e.typeUint, lengths[i], k.buffer(i));
+                Spirv::op(module, 28, arrayTypes[i], e.typeFloat, lengths[i]);
+                Spirv::op(module, 32, arrayPointers[i], 4, arrayTypes[i]);
+            }
+        }
+
+        Spirv::op(module, 32, e.sharedFloat, 4, e.typeFloat);
+        Spirv::op(module, 43, e.typeUint, scope, 2);
+        Spirv::op(module, 43, e.typeUint, semantics, 264);
+        Spirv::op(module, 59, inputUvec3, local, 1);
+        Spirv::op(module, 59, inputUvec3, group, 1);
+
+        for (int i = 0; i < 5; i++) {
+            Spirv::op(module, 59, e.storageBytes, e.buffers[i], 12);
+        }
+
+        Spirv::op(module, 59, imagePointer, image, 0);
+        Spirv::op(module, 59, framePointer, frame, 9);
+
+        for (int i = 0; i < kernelBuffers; i++) {
+            if (k.buffer(i)) {
+                Spirv::op(module, 59, arrayPointers[i], e.arrays[i], 4);
+            }
+        }
+
+        return e.finish(pool, module);
+    }
 }
 #endif
 
-StringView compile(ObjPool& pool, const VideoShader& shader) {
+StringView compile(ObjPool& pool, const VideoShader& shader, const ShaderOptions& options) {
     Graph g(pool);
-    Video video{g, shader, *shader.layout};
+    Video video{g, shader, *shader.layout, options};
     Kernel layer;
 
     if (!shader.tile || shader.tile > 32) {
@@ -2964,8 +3298,8 @@ StringView compile(ObjPool& pool, const VideoShader& shader) {
     video.kernel(layer);
 
 #if defined(__APPLE__)
-    return mslLayer(pool, layer);
+    return options.tiles == ShaderTiles::Mixed ? mslLayer(pool, layer) : mslKernel(pool, layer);
 #else
-    return spirvLayer(pool, g, layer);
+    return options.tiles == ShaderTiles::Mixed ? spirvLayer(pool, g, layer) : spirvKernel(pool, g, layer);
 #endif
 }

@@ -100,12 +100,23 @@ namespace {
         void forget();
     };
 
-    struct CompiledShader {
-        VideoShader facts;
+    struct Screen;
+
+    struct VideoFactory final: public ShaderFactory {
+        struct Made {
+            ShaderOptions options;
+            RenderShader* shader;
+        };
+
+        Screen* screen;
         ObjPool* pool;
-        RenderShader* shader;
-        size_t bytes;
-        u64 used;
+        VideoShader facts;
+        Vector<Made> made;
+        size_t bytes = 0;
+        u64 used = 0;
+
+        VideoFactory(Screen* screen, ObjPool* pool, const VideoShader& facts);
+        RenderShader& shader(const ShaderOptions& options) override;
     };
 
     struct Control final: public Typed<Kind::Control> {
@@ -253,7 +264,7 @@ namespace {
         bool hasVideo;
         bool hasAudio;
         double duration;
-        Vector<CompiledShader> compiled;
+        Vector<VideoFactory*> factories;
         size_t compiledBytes = 0;
         u64 compiledClock = 0;
         u32 targetX = 0;
@@ -295,7 +306,8 @@ namespace {
         void retired(VideoImage* image);
         void applyClock(const Clock& clock);
         void makeRender(VideoImage* image);
-        RenderShader& shaderFor(const VideoShader& facts);
+        VideoFactory& factoryFor(const VideoShader& facts);
+        void trim(const VideoFactory* keep);
         void seek(double to, bool play);
         void toggle();
         void sendControl(Channel* to);
@@ -1498,8 +1510,8 @@ Screen::~Screen() noexcept {
 
     delete shown;
 
-    for (const CompiledShader& known : compiled) {
-        delete known.pool;
+    for (VideoFactory* known : factories) {
+        delete known->pool;
     }
 }
 
@@ -1722,53 +1734,84 @@ void Screen::makeRender(VideoImage* image) {
         aim(image->facts, targetX, targetY, targetWidth, targetHeight);
     }
 
-    RenderShader& shader = shaderFor(image->facts);
+    VideoFactory& factory = factoryFor(image->facts);
     ScopedPtr<ObjPool> owner{ObjPool::fromMemoryRaw()};
 
-    image->render = player->ui->shadeImage(*owner.ptr, shader, (u32)frame->width, (u32)frame->height, frame->buf[0]->data, frame->buf[0]->size, hdr, *image);
+    image->render = player->ui->shadeImage(*owner.ptr, factory, (u32)frame->width, (u32)frame->height, frame->buf[0]->data, frame->buf[0]->size, hdr, *image);
     image->render->prepare();
     image->pool = owner.ptr;
     owner.drop();
 }
 
-RenderShader& Screen::shaderFor(const VideoShader& facts) {
-    compiledClock++;
+VideoFactory::VideoFactory(Screen* screen_, ObjPool* pool_, const VideoShader& facts_)
+    : screen(screen_)
+    , pool(pool_)
+    , facts(facts_)
+{
+}
 
-    for (size_t i = 0; i < compiled.length(); i++) {
-        if (!memcmp(&compiled[i].facts, &facts, sizeof(facts))) {
-            compiled.mut(i).used = compiledClock;
+RenderShader& VideoFactory::shader(const ShaderOptions& options) {
+    static const char* outputs[4] = {"srgb", "pq", "linear", "wide"};
+    static const char* tiles[3] = {"inside", "edge", "mixed"};
 
-            return *compiled[i].shader;
+    used = ++screen->compiledClock;
+
+    for (const Made& known : made) {
+        if (known.options.output == options.output && known.options.tiles == options.tiles) {
+            return *known.shader;
         }
     }
 
     u64 start = monotonicNowUs();
     ScopedPtr<ObjPool> scratch{ObjPool::fromMemoryRaw()};
-    StringView code = compile(*scratch.ptr, facts);
+    StringView code = compile(*scratch.ptr, facts, options);
     u64 built = monotonicNowUs();
-    ScopedPtr<ObjPool> owner{ObjPool::fromMemoryRaw()};
-    RenderShader* shader = player->ui->compileKernel(*owner.ptr, code.data(), code.length(), facts.tile);
+    RenderShader* compiled = screen->player->ui->compileKernel(*pool, code.data(), code.length(), facts.tile, options);
     u64 done = monotonicNowUs();
 
-    while (!compiled.empty() && compiledBytes + code.length() > shaderBudget) {
-        size_t oldest = 0;
+    made.pushBack(Made{options, compiled});
+    bytes += code.length();
+    screen->compiledBytes += code.length();
+    screen->trim(this);
+    screen->player->ui->trace(StringView(StringBuilder() << StringView(u8"compiled video shader ") << StringView(facts.layout->name) << StringView(u8" ") << StringView(facts.system) << StringView(u8" ") << StringView(facts.transfer) << StringView(u8" ") << StringView(facts.conversion) << StringView(u8" ") << StringView(facts.output) << StringView(u8" ") << (u64)facts.target[0] << StringView(u8"x") << (u64)facts.target[1] << StringView(u8" ") << StringView(outputs[(int)options.output]) << StringView(u8" ") << StringView(tiles[(int)options.tiles]) << StringView(u8" compile_us=") << (built - start) << StringView(u8" driver_us=") << (done - built)));
 
-        for (size_t i = 1; i < compiled.length(); i++) {
-            oldest = compiled[i].used < compiled[oldest].used ? i : oldest;
+    return *compiled;
+}
+
+VideoFactory& Screen::factoryFor(const VideoShader& facts) {
+    compiledClock++;
+
+    for (VideoFactory* known : factories) {
+        if (!memcmp(&known->facts, &facts, sizeof(facts))) {
+            known->used = compiledClock;
+
+            return *known;
         }
-
-        compiledBytes -= compiled[oldest].bytes;
-        delete compiled[oldest].pool;
-        compiled.mut(oldest) = compiled.back();
-        compiled.popBack();
     }
 
-    compiled.pushBack(CompiledShader{facts, owner.ptr, shader, code.length(), compiledClock});
-    compiledBytes += code.length();
-    owner.drop();
-    player->ui->trace(StringView(StringBuilder() << StringView(u8"compiled video shader ") << StringView(facts.layout->name) << StringView(u8" ") << StringView(facts.system) << StringView(u8" ") << StringView(facts.transfer) << StringView(u8" ") << StringView(facts.conversion) << StringView(u8" ") << StringView(facts.output) << StringView(u8" ") << (u64)facts.target[0] << StringView(u8"x") << (u64)facts.target[1] << StringView(u8" compile_us=") << (built - start) << StringView(u8" driver_us=") << (done - built)));
+    ScopedPtr<ObjPool> owner{ObjPool::fromMemoryRaw()};
+    VideoFactory* made = owner.ptr->make<VideoFactory>(this, owner.ptr, facts);
 
-    return *shader;
+    made->used = compiledClock;
+    factories.pushBack(made);
+    owner.drop();
+
+    return *made;
+}
+
+void Screen::trim(const VideoFactory* keep) {
+    while (compiledBytes > shaderBudget && factories.length() > 1) {
+        size_t oldest = factories[0] == keep ? 1 : 0;
+
+        for (size_t i = 0; i < factories.length(); i++) {
+            oldest = factories[i] != keep && factories[i]->used < factories[oldest]->used ? i : oldest;
+        }
+
+        compiledBytes -= factories[oldest]->bytes;
+        delete factories[oldest]->pool;
+        factories.mut(oldest) = factories.back();
+        factories.popBack();
+    }
 }
 
 void Screen::seek(double to, bool play) {
@@ -1930,14 +1973,8 @@ void Screen::draw() {
         targetWidth = (u32)(p1.x - p0.x);
         targetHeight = (u32)(p1.y - p0.y);
 
-        VideoShader aimed = image->facts;
-
-        aim(aimed, targetX, targetY, targetWidth, targetHeight);
-
-        if (memcmp(&aimed, &image->facts, sizeof(aimed))) {
-            image->facts = aimed;
-            image->render->shadeWith(shaderFor(image->facts));
-        }
+        aim(image->facts, targetX, targetY, targetWidth, targetHeight);
+        image->render->shadeWith(factoryFor(image->facts));
 
         image->draws++;
         image->render->underlay(p0, p1);

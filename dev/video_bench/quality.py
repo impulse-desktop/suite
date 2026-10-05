@@ -11,9 +11,9 @@ scales it back to 960x540; a factor below 1 stores the crop itself and
 shrinks it to 960f x 540f, the truth then being the crop's area average in
 linear light. YUV formats are BT.709 limited range with left-sited chroma
 and the sRGB transfer, so both sides decode the same curve; bgra is sRGB.
-Ours is what the player draws: compile()'s layer merged into the
-compositor of gpu/compose.comp, run by dev/compositor's harness over a
-frame the video fills; libplacebo draws with its fast, default and
+Ours is what the player draws: compile()'s kernels for the tiles the video
+covers and its edge, with gpu/compose.comp, run by dev/compositor's harness
+over a frame the video fills; libplacebo draws with its fast, default and
 high-quality presets. Both write 8-bit sRGB, as a display takes it, each
 with its own dithering. Each result is compared with its truth: PSNR and
 RMSE in linear light over RGB, the mean OKLab difference and its chroma
@@ -58,7 +58,9 @@ def case(fmt, source, target):
 
 
 def shader(corpus, compiler, host, fmt, source, target, directory):
-    """The player's layer for the frame, merged into the compositor."""
+    """The player's programs for the frame's video tiles: the kernels of the
+    tiles it covers and of its edge, and its layer merged into the
+    compositor."""
     import bench
 
     spec = importlib.util.spec_from_file_location("compositor", HERE.parent / "compositor" / "bench.py")
@@ -67,9 +69,11 @@ def shader(corpus, compiler, host, fmt, source, target, directory):
     words = subprocess.run([corpus, "layout", fmt, *map(str, source)], check=True, capture_output=True, text=True).stdout.split()
     offsets, lines = [int(word) for word in words[1:5]], [int(word) for word in words[6:10]]
     _, layout, components = bench.layout_of(fmt)
-    layer = subprocess.run([compiler, *bench.facts(case(fmt, source, target), layout, components, offsets, lines)], check=True, capture_output=True).stdout
+    facts = bench.facts(case(fmt, source, target), layout, components, offsets, lines)
     directory.mkdir(parents=True, exist_ok=True)
-    (directory / "layer.spv").write_bytes(compositor.merge(Path(host).read_bytes(), layer))
+    for tiles in ("inside", "edge", "mixed"):
+        code = subprocess.run([compiler, "--output", "srgb", "--tiles", tiles, *facts], check=True, capture_output=True).stdout
+        (directory / f"{tiles}.spv").write_bytes(compositor.merge(Path(host).read_bytes(), code) if tiles == "mixed" else code)
 
 
 def filled(path, size):
@@ -77,8 +81,8 @@ def filled(path, size):
     path.write_bytes(struct.pack("<6I4f", 0x46434D49, size[0], size[1], 0, 0, 1, 0.0, 0.0, float(size[0]), float(size[1])))
 
 
-def compose(args, directory, layer, rounds):
-    text = subprocess.run([args.compositor, args.plain, str(rounds), str(directory / "frame.bin"), str(directory), str(layer), str(directory / "data.bin")], check=True, capture_output=True, text=True).stdout
+def compose(args, directory, layers, rounds):
+    text = subprocess.run([args.compositor, args.plain, str(rounds), str(directory / "frame.bin"), str(directory), str(layers), str(directory / "data.bin")], check=True, capture_output=True, text=True).stdout
     return float(re.search(r"^compose gpu ([\d.]+) us", text, re.M).group(1))
 
 
@@ -100,7 +104,7 @@ def render(args):
         if args.variant == "ours":
             for directory in directories:
                 filled(directory / "frame.bin", target)
-                compose(args, directory, args.layer, 1)
+                compose(args, directory, args.layers, 1)
             drawn = "composed.ppm"
         else:
             subprocess.run([args.placebo, args.variant[len("placebo_"):], "0", *map(str, directories)], check=True)
@@ -142,7 +146,7 @@ def pair_of(text):
 
 def cases(args):
     """The CPU side of one format's timings: every video and screen size's
-    description, compositor frame and layer, and a noise frame of each video
+    description, compositor frame and video programs, and a noise frame of each video
     size."""
     root = Path(args.directory)
     (root / "frames").mkdir(parents=True, exist_ok=True)
@@ -178,7 +182,7 @@ def speed(args):
             for name in ("size", "placebo.txt", "frame.bin"):
                 os.link(root / "cases" / directory.name / name, directory / name)
             cases.append((video, screen, directory))
-        times = {(str(directory), "ours"): compose(args, directory, root / "cases" / directory.name / "layer.spv", args.rounds) for _, _, directory in cases}
+        times = {(str(directory), "ours"): compose(args, directory, root / "cases" / directory.name, args.rounds) for _, _, directory in cases}
         for preset in args.presets:
             text = subprocess.run([args.placebo, preset, str(args.rounds), *(str(directory) for _, _, directory in cases)], check=True, capture_output=True, text=True).stdout
             times.update({(directory, f"placebo_{preset}"): float(value) for directory, value in re.findall(rf"^placebo (\S+) {preset} gpu ([\d.]+)", text, re.M)})
@@ -215,7 +219,7 @@ def main():
     one.add_argument("sizes", type=int, nargs=4)
     one.add_argument("pictures", nargs="+", help="NAME SOURCE.ppm TRUTH.ppm for each picture")
     one.add_argument("--corpus", required=True)
-    one.add_argument("--layer", default="")
+    one.add_argument("--layers", default="")
     one.add_argument("--compositor", default="")
     one.add_argument("--plain", default="")
     one.add_argument("--placebo", default="")

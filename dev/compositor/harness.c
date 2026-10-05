@@ -386,14 +386,14 @@ typedef struct {
     Triangle* triangles;
     uint32_t triangleCount;
     uint32_t* tiles;
-    uint32_t programs[2][2];
+    uint32_t programs[4][2];
     uint32_t width, height, tilesX, tilesY, tileCount, capacity;
     uint32_t* base;
     float* color;
     uint32_t* head;
     uint32_t* tail;
     uint32_t* count;
-    uint8_t* layered;
+    uint8_t* kind;
     uint32_t* nodes;
     uint32_t nodeCount, nodeCapacity;
     float scale[2];
@@ -514,7 +514,6 @@ static void place(Program* p, const Op* op, uint32_t index, const int32_t box[4]
             uint32_t tile = row + (uint32_t)tx;
             if (inside && tx >= fx0 && tx <= fx1) cover(p, tile, op, index, opaque);
             else append(p, tile, index);
-            if (op->kind == OP_LAYER) p->layered[tile] = 1;
         }
     }
 }
@@ -536,7 +535,7 @@ static void buildProgram(const Frame* f, Program* p) {
         p->head = realloc(p->head, tileCount * sizeof(uint32_t));
         p->tail = realloc(p->tail, tileCount * sizeof(uint32_t));
         p->count = realloc(p->count, tileCount * sizeof(uint32_t));
-        p->layered = realloc(p->layered, tileCount);
+        p->kind = realloc(p->kind, tileCount);
     }
     p->width = f->width;
     p->height = f->height;
@@ -554,7 +553,7 @@ static void buildProgram(const Frame* f, Program* p) {
     memset(p->tail, 0xff, tileCount * sizeof(uint32_t));
     memset(p->base, 0xff, tileCount * sizeof(uint32_t));
     memset(p->count, 0, tileCount * sizeof(uint32_t));
-    memset(p->layered, 0, tileCount);
+    memset(p->kind, 0, tileCount);
     float clear = srgbLinear[25];
     for (uint32_t i = 0; i < tileCount; i++) {
         p->color[i * 4] = p->color[i * 4 + 1] = p->color[i * 4 + 2] = clear;
@@ -678,25 +677,42 @@ static void buildProgram(const Frame* f, Program* p) {
         p->list = realloc(p->list, p->listCapacity * sizeof(uint32_t));
     }
     p->listCount = listCount;
-    uint32_t at = 0, plain = 0, layered = 0;
+    uint32_t at = 0, sizes[4] = {0};
     for (uint32_t i = 0; i < tileCount; i++) {
         Header* h = &p->headers[i];
+        const Op* video = NULL;
+        int alone = p->base[i] == NONE;
         h->base = p->base[i];
         h->start = at;
         h->count = p->count[i];
         h->pad = 0;
         memcpy(h->color, &p->color[i * 4], sizeof(h->color));
-        for (uint32_t node = p->head[i]; node != NONE; node = p->nodes[node * 2 + 1]) p->list[at++] = p->nodes[node * 2];
-        plain += !p->layered[i];
+        for (uint32_t node = p->head[i]; node != NONE; node = p->nodes[node * 2 + 1]) {
+            uint32_t entry = p->nodes[node * 2];
+            int layer = !(entry & FILL) && p->ops[entry & ~FILL].kind == OP_LAYER;
+            video = layer ? &p->ops[entry & ~FILL] : video;
+            alone = alone && layer;
+            p->list[at++] = entry;
+        }
+        p->kind[i] = 0;
+        if (video) {
+            int32_t x0 = (int32_t)(i % p->tilesX * TILE), y0 = (int32_t)(i / p->tilesX * TILE);
+            int32_t x1 = x0 + TILE < (int32_t)p->width ? x0 + TILE : (int32_t)p->width;
+            int32_t y1 = y0 + TILE < (int32_t)p->height ? y0 + TILE : (int32_t)p->height;
+            int inside = video->rect[0] <= x0 && video->rect[1] <= y0 && video->rect[2] >= x1 && video->rect[3] >= y1;
+            p->kind[i] = (uint8_t)(!alone ? 3 : inside ? 1 : 2);
+        }
+        sizes[p->kind[i]]++;
+    }
+    for (uint32_t k = 0, first = 0; k < 4; k++) {
+        p->programs[k][0] = first;
+        p->programs[k][1] = 0;
+        first += sizes[k];
     }
     for (uint32_t i = 0; i < tileCount; i++) {
-        if (p->layered[i]) p->tiles[plain + layered++] = i;
-        else p->tiles[i - layered] = i;
+        uint32_t k = p->kind[i];
+        p->tiles[p->programs[k][0] + p->programs[k][1]++] = i;
     }
-    p->programs[0][0] = 0;
-    p->programs[0][1] = plain;
-    p->programs[1][0] = plain;
-    p->programs[1][1] = layered;
 }
 
 static void writePpm(const char* path, const uint8_t* rgba, uint32_t w, uint32_t h) {
@@ -725,7 +741,6 @@ typedef struct {
     uint32_t tilesX;
     uint32_t first;
     float white;
-    uint32_t layerWide;
 } Push;
 
 static VkPipeline composePipeline(VkPipelineLayout layout, const char* path) {
@@ -742,14 +757,14 @@ static VkPipeline composePipeline(VkPipelineLayout layout, const char* path) {
 
 int main(int argc, char** argv) {
     if (argc != 5 && argc != 7) {
-        fprintf(stderr, "usage: harness PLAIN.spv ROUNDS FRAME.bin OUTDIR [LAYER.spv VIDEO.bin]\n");
+        fprintf(stderr, "usage: harness PLAIN.spv ROUNDS FRAME.bin OUTDIR [LAYERS VIDEO.bin]\n");
         return 2;
     }
     const char* plain = argv[1];
     int rounds = atoi(argv[2]);
     Frame f = loadFrame(argv[3]);
     const char* outdir = argv[4];
-    const char* layerProgram = argc == 7 ? argv[5] : NULL;
+    const char* layers = argc == 7 ? argv[5] : NULL;
     const char* frameWords = argc == 7 ? argv[6] : NULL;
     for (int i = 0; i < 256; i++) {
         double c = i / 255.0;
@@ -814,7 +829,7 @@ int main(int argc, char** argv) {
         double us = (seconds() - t0) * 1e6;
         building = us < building ? us : building;
     }
-    printf("program cpu %.1f us, %u ops (%u triangles), %u list entries, %u tiles: %u plain, %u layered\n", building, program.opCount, program.triangleCount, program.listCount, program.tileCount, program.programs[0][1], program.programs[1][1]);
+    printf("program cpu %.1f us, %u ops (%u triangles), %u list entries, %u tiles: %u plain, %u inside, %u edge, %u mixed\n", building, program.opCount, program.triangleCount, program.listCount, program.tileCount, program.programs[0][1], program.programs[1][1], program.programs[2][1], program.programs[3][1]);
 
     Buffer headerBuffer = makeBuffer((VkDeviceSize)program.tileCount * sizeof(Header), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     memcpy(headerBuffer.map, program.headers, (size_t)program.tileCount * sizeof(Header));
@@ -830,7 +845,7 @@ int main(int argc, char** argv) {
     Image composed = makeImage(f.width, f.height, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
     VkDescriptorSetLayout setLayouts[2];
     VkPipelineLayout composeLayout;
-    VkPipeline plainPipeline, layerPipeline = VK_NULL_HANDLE;
+    VkPipeline pipelines[4] = {VK_NULL_HANDLE};
     VkDescriptorSet sets[2];
     {
         VkDescriptorSetLayoutBinding bindings[7] = {
@@ -863,8 +878,13 @@ int main(int argc, char** argv) {
         cpl.pushConstantRangeCount = 1;
         cpl.pPushConstantRanges = &range;
         CHECK(vkCreatePipelineLayout(device, &cpl, NULL, &composeLayout));
-        plainPipeline = composePipeline(composeLayout, plain);
-        if (f.hasVideo) layerPipeline = composePipeline(composeLayout, layerProgram);
+        pipelines[0] = composePipeline(composeLayout, plain);
+        const char* kinds[4] = {"", "inside", "edge", "mixed"};
+        for (int k = 1; f.hasVideo && k < 4; k++) {
+            char path[1024];
+            snprintf(path, sizeof(path), "%s/%s.spv", layers, kinds[k]);
+            pipelines[k] = composePipeline(composeLayout, path);
+        }
         for (int s = 0; s < 2; s++) {
             VkDescriptorSetAllocateInfo ca = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
             ca.descriptorPool = pool;
@@ -906,18 +926,13 @@ int main(int argc, char** argv) {
         barrier(cmd, composed.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 0, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
         vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, queries, 0);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, composeLayout, 0, 2, sets, 0, NULL);
-        Push push = {{(int32_t)f.width, (int32_t)f.height}, program.tilesX, 0, 203.0f, 0};
-        if (program.programs[0][1]) {
-            push.first = program.programs[0][0];
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, plainPipeline);
+        Push push = {{(int32_t)f.width, (int32_t)f.height}, program.tilesX, 0, 203.0f};
+        for (int k = 0; k < 4; k++) {
+            if (!program.programs[k][1]) continue;
+            push.first = program.programs[k][0];
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipelines[k]);
             vkCmdPushConstants(cmd, composeLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
-            vkCmdDispatch(cmd, program.programs[0][1], (TILE / GROUP) * (TILE / GROUP), 1);
-        }
-        if (program.programs[1][1]) {
-            push.first = program.programs[1][0];
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, layerPipeline);
-            vkCmdPushConstants(cmd, composeLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
-            vkCmdDispatch(cmd, program.programs[1][1], 1, 1);
+            vkCmdDispatch(cmd, program.programs[k][1], k ? 1 : (TILE / GROUP) * (TILE / GROUP), 1);
         }
         vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queries, 1);
         finish(cmd);
@@ -933,16 +948,20 @@ int main(int argc, char** argv) {
             vkCmdResetQueryPool(cmd, queries, 0, 2);
             vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, queries, 0);
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, composeLayout, 0, 2, sets, 0, NULL);
-            Push push = {{(int32_t)f.width, (int32_t)f.height}, program.tilesX, program.programs[1][0], 203.0f, 0};
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, layerPipeline);
-            vkCmdPushConstants(cmd, composeLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
-            vkCmdDispatch(cmd, program.programs[1][1], 1, 1);
+            Push push = {{(int32_t)f.width, (int32_t)f.height}, program.tilesX, 0, 203.0f};
+            for (int k = 1; k < 4; k++) {
+                if (!program.programs[k][1]) continue;
+                push.first = program.programs[k][0];
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipelines[k]);
+                vkCmdPushConstants(cmd, composeLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+                vkCmdDispatch(cmd, program.programs[k][1], 1, 1);
+            }
             vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queries, 1);
             finish(cmd);
             double us = elapsed();
             layerBest = us < layerBest ? us : layerBest;
         }
-        printf("alone: layer tiles %.1f us\n", layerBest);
+        printf("alone: video tiles %.1f us\n", layerBest);
     }
     char path[1024];
     snprintf(path, sizeof(path), "%s/composed.ppm", outdir);

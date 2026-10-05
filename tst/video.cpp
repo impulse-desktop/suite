@@ -89,15 +89,25 @@ namespace {
         double scale;
     };
 
-    struct CompiledShader {
+    struct VideoFactory final: public ShaderFactory {
+        struct Made {
+            ShaderOptions options;
+            RenderShader* shader;
+        };
+
+        ObjPool* pool;
+        Ui* ui;
         VideoShader facts;
-        RenderShader* shader;
+        Vector<Made> made;
+
+        VideoFactory(ObjPool* pool, Ui* ui, const VideoShader& facts);
+        RenderShader& shader(const ShaderOptions& options) override;
     };
 
     struct FormatCheck {
         ObjPool* pool;
         Ui* ui;
-        Vector<CompiledShader> compiled;
+        Vector<VideoFactory*> factories;
         Ignored retired;
         Vector<double> expected;
         int checked = 0;
@@ -107,7 +117,7 @@ namespace {
 
         FormatCheck(ObjPool* pool, Ui* ui);
         VideoShader describe(const AVFrame* frame, const char* output);
-        RenderShader& shaderFor(const VideoShader& facts);
+        VideoFactory& factoryFor(const VideoShader& facts);
         AVFrame* frame(const Case& kase);
         void write(AVFrame* frame, const Case& kase);
         void writePalette(AVFrame* frame);
@@ -806,20 +816,41 @@ VideoShader FormatCheck::describe(const AVFrame* frame, const char* output) {
     return out;
 }
 
-RenderShader& FormatCheck::shaderFor(const VideoShader& facts) {
-    for (const CompiledShader& known : compiled) {
-        if (!memcmp(&known.facts, &facts, sizeof(facts))) {
+VideoFactory::VideoFactory(ObjPool* pool_, Ui* ui_, const VideoShader& facts_)
+    : pool(pool_)
+    , ui(ui_)
+    , facts(facts_)
+{
+}
+
+RenderShader& VideoFactory::shader(const ShaderOptions& options) {
+    for (const Made& known : made) {
+        if (known.options.output == options.output && known.options.tiles == options.tiles) {
             return *known.shader;
         }
     }
 
     ScopedPtr<ObjPool> scratch{ObjPool::fromMemoryRaw()};
-    StringView code = compile(*scratch.ptr, facts);
-    RenderShader* shader = ui->compileKernel(*pool, code.data(), code.length(), facts.tile);
+    StringView code = compile(*scratch.ptr, facts, options);
+    RenderShader* compiled = ui->compileKernel(*pool, code.data(), code.length(), facts.tile, options);
 
-    compiled.pushBack(CompiledShader{facts, shader});
+    made.pushBack(Made{options, compiled});
 
-    return *shader;
+    return *compiled;
+}
+
+VideoFactory& FormatCheck::factoryFor(const VideoShader& facts) {
+    for (VideoFactory* known : factories) {
+        if (!memcmp(&known->facts, &facts, sizeof(facts))) {
+            return *known;
+        }
+    }
+
+    VideoFactory* made = pool->make<VideoFactory>(pool, ui, facts);
+
+    factories.pushBack(made);
+
+    return *made;
 }
 
 AVFrame* FormatCheck::frame(const Case& kase) {
@@ -1098,7 +1129,7 @@ void FormatCheck::shade(AVFrame* frame, const char* output, Vector<double>& out)
 
 void FormatCheck::shade(AVFrame* frame, const VideoShader& facts, bool hdr, Vector<double>& out) {
     ScopedPtr<ObjPool> owner{ObjPool::fromMemoryRaw()};
-    RenderImage* image = ui->shadeImage(*owner.ptr, shaderFor(facts), (u32)frame->width, (u32)frame->height, frame->buf[0]->data, frame->buf[0]->size, hdr, retired);
+    RenderImage* image = ui->shadeImage(*owner.ptr, factoryFor(facts), (u32)frame->width, (u32)frame->height, frame->buf[0]->data, frame->buf[0]->size, hdr, retired);
     ImagePixels pixels;
 
     image->prepare();
@@ -1335,7 +1366,7 @@ void FormatCheck::underlay() {
     facts.origin[1] = 1;
 
     ScopedPtr<ObjPool> owner{ObjPool::fromMemoryRaw()};
-    RenderImage* image = ui->shadeImage(*owner.ptr, shaderFor(facts), (u32)frame->width, (u32)frame->height, frame->buf[0]->data, frame->buf[0]->size, false, retired);
+    RenderImage* image = ui->shadeImage(*owner.ptr, factoryFor(facts), (u32)frame->width, (u32)frame->height, frame->buf[0]->data, frame->buf[0]->size, false, retired);
     UiEvent event;
     int frames = 0;
 

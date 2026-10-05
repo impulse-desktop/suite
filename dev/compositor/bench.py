@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 
 """Composes headless ImGui frames (compositor_dump) through the tiled
-compute compositor of gpu/compose.comp, with the video layer that compile()
-makes merged into it, and prints its GPU time, the CPU time of its tile
-programs and, for a scene with video, the layer's tiles alone; composed.ppm
-is what it drew.
+compute compositor of gpu/compose.comp and the video programs that compile()
+makes: a kernel for tiles the video covers, one for its edge, and its layer
+merged into the compositor for tiles where the interface lies over it. It
+prints the GPU time, the CPU time of the tile programs and, for a scene with
+video, the video's tiles alone; composed.ppm is what it drew.
 
 The video is a yuv420p BT.709 frame of a chart, drawn into the scene's
 video rectangle the way the player draws it. The scene native is play with
@@ -224,13 +225,16 @@ def programs(compiler, work, rect, source, host):
         planes.write_text(json.dumps([offsets, lines]))
     offsets, lines = json.loads(planes.read_text())
 
-    def compiled(**facts):
-        arguments = video.facts(dict(case, **facts), layout, components, offsets, lines)
-        return subprocess.run([compiler, *arguments], check=True, capture_output=True).stdout
+    def compiled(tiles):
+        arguments = video.facts(dict(case, tile=24), layout, components, offsets, lines)
+        return subprocess.run([compiler, "--output", "srgb", "--tiles", tiles, *arguments], check=True, capture_output=True).stdout
 
-    layer = work / ("layer_%d_%d_%d_%d_%dx%d.spv" % (*rect, *source))
-    layer.write_bytes(merge(host.read_bytes(), compiled(tile=24)))
-    return [layer, data]
+    layers = work / ("layers_%d_%d_%d_%d_%dx%d" % (*rect, *source))
+    layers.mkdir(exist_ok=True)
+    (layers / "inside.spv").write_bytes(compiled("inside"))
+    (layers / "edge.spv").write_bytes(compiled("edge"))
+    (layers / "mixed.spv").write_bytes(merge(host.read_bytes(), compiled("mixed")))
+    return [layers, data]
 
 
 def main():

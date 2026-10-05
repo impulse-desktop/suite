@@ -45,6 +45,28 @@ void checkImageRegion(u32 width, u32 height, int x0, int y0, int x1, int y1);
 
 struct RenderShader {};
 
+enum class ShaderOutput : u8 {
+    Srgb,
+    Pq,
+    Linear,
+    WideLinear
+};
+
+enum class ShaderTiles : u8 {
+    Inside,
+    Edge,
+    Mixed
+};
+
+struct ShaderOptions {
+    ShaderOutput output;
+    ShaderTiles tiles;
+};
+
+struct ShaderFactory {
+    virtual RenderShader& shader(const ShaderOptions& options) = 0;
+};
+
 struct RenderImage {
     // A bound image's producer calls prepare after filling its CPU buffer,
     // before transferring the image to the UI through a Channel.
@@ -52,7 +74,7 @@ struct RenderImage {
     virtual void draw(ImDrawList& list, ImVec2 lo, ImVec2 hi) = 0;
     virtual void underlay(ImVec2 lo, ImVec2 hi) = 0;
     virtual void read(int x0, int y0, int x1, int y1, ImagePixels& out) = 0;
-    virtual void shadeWith(RenderShader& shader) = 0;
+    virtual void shadeWith(ShaderFactory& factory) = 0;
 };
 
 struct RendererOptions {
@@ -70,10 +92,9 @@ struct Renderer {
     virtual RenderImage* upload(stl::ObjPool& pool, u32 width, u32 height, const void* rgba, bool hdr) = 0;
     virtual RenderImage* import(stl::ObjPool& pool, SharedImage& source, bool hdr) = 0;
     virtual RenderImage* bind(stl::ObjPool& pool, u32 width, u32 height, const void* data, size_t size, size_t stride, stl::Runable& retired) = 0;
-    virtual RenderImage* shade(stl::ObjPool& pool, RenderShader& shader, u32 width, u32 height, const void* data, size_t size, bool hdr, stl::Runable& retired) = 0;
+    virtual RenderImage* shade(stl::ObjPool& pool, ShaderFactory& factory, u32 width, u32 height, const void* data, size_t size, bool hdr, stl::Runable& retired) = 0;
 
-    virtual RenderShader* compileShader(stl::ObjPool& pool, const void* code, size_t size) = 0;
-    virtual RenderShader* compileKernel(stl::ObjPool& pool, const void* code, size_t size, u32 tile) = 0;
+    virtual RenderShader* compileKernel(stl::ObjPool& pool, const void* code, size_t size, u32 tile, const ShaderOptions& options) = 0;
 
     static Renderer* create(stl::ObjPool& pool, plt::Platform& platform, plt::Window& window, const RendererOptions& options = {});
 };
