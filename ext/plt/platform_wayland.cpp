@@ -11,6 +11,8 @@
 #include "pointer_grab.h"
 #include "xdg-shell-client-protocol.h"
 #include "viewporter-client-protocol.h"
+#include "presentation-time-client-protocol.h"
+#include "presentation-time-client-protocol-code.h"
 #include "xdg-shell-client-protocol-code.h"
 #include "cursor-shape-v1-client-protocol.h"
 #include "viewporter-client-protocol-code.h"
@@ -30,6 +32,7 @@
 
 #include <std/sys/crt.h>
 #include <std/ios/input.h>
+#include <time.h>
 #include <std/sym/i_map.h>
 #include <std/ios/output.h>
 #include <std/sys/throw.h>
@@ -239,6 +242,9 @@ namespace {
         void pointerFrame();
         void frameReady(struct wl_callback* callback);
         void cancelFrame();
+        void presented(struct wp_presentation_feedback* done, u64 at, u64 refresh);
+        void feedbackDiscarded(struct wp_presentation_feedback* done);
+        u64 nextPresentTime() const;
         void updateCursor();
         u32 pixelWidth() const;
         u32 pixelHeight() const;
@@ -259,6 +265,9 @@ namespace {
         struct wp_viewport* viewport = nullptr;
         struct wp_fractional_scale_v1* fractionalScale = nullptr;
         struct wl_callback* frameCallback = nullptr;
+        struct wp_presentation_feedback* feedback = nullptr;
+        u64 presentedAt = 0;
+        u64 presentedRefresh = 0;
         struct xdg_activation_token_v1* activationToken = nullptr;
         ClipboardImpl primarySelection;
         ClipboardImpl clipboardSelection;
@@ -386,6 +395,9 @@ namespace {
         struct zwp_primary_selection_device_v1* primaryDevice = nullptr;
         struct zwp_primary_selection_source_v1* primarySource = nullptr;
         struct wp_viewporter* viewporter = nullptr;
+        struct wp_presentation* presentation = nullptr;
+        u32 presentationClock = 0;
+        bool presentationClockKnown = false;
         struct wp_fractional_scale_manager_v1* fractionalScaleManager = nullptr;
         struct zxdg_decoration_manager_v1* decorationManager = nullptr;
         struct xdg_activation_v1* activation = nullptr;
@@ -1117,6 +1129,26 @@ namespace {
     },
     };
 
+    const struct wp_presentation_listener presentationListener{
+        .clock_id = [](void* data, struct wp_presentation*, u32 clock) {
+        PlatformImpl& platform = *(PlatformImpl*)(data);
+        platform.presentationClock = clock;
+        platform.presentationClockKnown = true;
+    },
+    };
+
+    const struct wp_presentation_feedback_listener feedbackListener{
+        .sync_output = [](void*, struct wp_presentation_feedback*, struct wl_output*) {},
+        .presented =
+            [](void* data, struct wp_presentation_feedback* done, u32 secHi, u32 secLo, u32 nsec, u32 refresh, u32, u32, u32) {
+        const u64 seconds = (u64)(secHi) << 32 | secLo;
+        ((WindowImpl*)(data))->presented(done, seconds * 1'000'000ULL + nsec / 1000, refresh / 1000);
+    },
+        .discarded = [](void* data, struct wp_presentation_feedback* done) {
+        ((WindowImpl*)(data))->feedbackDiscarded(done);
+    },
+    };
+
     const struct wl_callback_listener frameListener{
         .done = [](void* data, struct wl_callback* callback, u32) {
         ((WindowImpl*)(data))->frameReady(callback);
@@ -1470,6 +1502,9 @@ PlatformImpl::~PlatformImpl() {
     if (viewporter != nullptr) {
         wp_viewporter_destroy(viewporter);
     }
+    if (presentation != nullptr) {
+        wp_presentation_destroy(presentation);
+    }
     if (primaryManager != nullptr) {
         zwp_primary_selection_device_manager_v1_destroy(primaryManager);
     }
@@ -1594,6 +1629,9 @@ void PlatformImpl::bindRegistry(u32 name, const char* interface, u32 version) {
         primaryManager = (struct zwp_primary_selection_device_manager_v1*)(wl_registry_bind(registry, name, &zwp_primary_selection_device_manager_v1_interface, 1));
     } else if (StringView(interface) == StringView(wp_viewporter_interface.name)) {
         viewporter = (struct wp_viewporter*)(wl_registry_bind(registry, name, &wp_viewporter_interface, 1));
+    } else if (StringView(interface) == StringView(wp_presentation_interface.name)) {
+        presentation = (struct wp_presentation*)(wl_registry_bind(registry, name, &wp_presentation_interface, 1));
+        wp_presentation_add_listener(presentation, &presentationListener, this);
     } else if (StringView(interface) == StringView(wp_fractional_scale_manager_v1_interface.name)) {
         fractionalScaleManager = (struct wp_fractional_scale_manager_v1*)(wl_registry_bind(registry, name, &wp_fractional_scale_manager_v1_interface, 1));
     } else if (StringView(interface) == StringView(zxdg_decoration_manager_v1_interface.name)) {
@@ -2759,11 +2797,8 @@ void WindowImpl::ready() {
         return;
     }
     frameRequested = false;
-    // Without wp_presentation the next refresh is the moment to aim at:
-    // one period of the output's current mode (mHz) from now, or now where
-    // no output has told its mode.
     WindowInfo current = info();
-    current.presentTime = monotonicNowUs() + (platform.outputRefresh ? 1'000'000'000ULL / platform.outputRefresh : 0);
+    current.presentTime = nextPresentTime();
     if (!frame->frame(current)) {
         if (frameRequested) {
             // The callback re-requested while failing.  Retry once
@@ -2781,16 +2816,58 @@ void WindowImpl::ready() {
     if (frameCallback != nullptr) {
         wl_callback_add_listener(frameCallback, &frameListener, this);
     }
+    // The compositor reports when this frame's contents reached the glass
+    // and when the output refreshes next; one feedback in flight at a time,
+    // its answer or discard frees the slot. Only a clock the program shares
+    // (CLOCK_MONOTONIC) is usable, which is what compositors give.
+    if (platform.presentation != nullptr && feedback == nullptr && platform.presentationClockKnown && platform.presentationClock == CLOCK_MONOTONIC) {
+        feedback = wp_presentation_feedback(platform.presentation, surface);
+        if (feedback != nullptr) {
+            wp_presentation_feedback_add_listener(feedback, &feedbackListener, this);
+        }
+    }
     // The renderer's Vulkan WSI owns buffer attachment for this surface; this
     // is a state-only commit which latches the frame callback. Both run on
     // this thread, so the commit cannot interleave with a WSI present.
     wl_surface_commit(surface);
 }
 
+void WindowImpl::presented(struct wp_presentation_feedback* done, u64 at, u64 refresh) {
+    if (done == feedback) {
+        feedback = nullptr;
+    }
+    wp_presentation_feedback_destroy(done);
+    presentedAt = at;
+    presentedRefresh = refresh;
+}
+
+void WindowImpl::feedbackDiscarded(struct wp_presentation_feedback* done) {
+    if (done == feedback) {
+        feedback = nullptr;
+    }
+    wp_presentation_feedback_destroy(done);
+}
+
+u64 WindowImpl::nextPresentTime() const {
+    // The next refresh after now: from the last reported presentation and
+    // the compositor's refresh prediction when there is one, else one
+    // period of the output's current mode (mHz) from now, else now.
+    const u64 now = monotonicNowUs();
+    if (presentedRefresh != 0 && presentedAt != 0) {
+        const u64 elapsed = now > presentedAt ? now - presentedAt : 0;
+        return presentedAt + (elapsed / presentedRefresh + 1) * presentedRefresh;
+    }
+    return now + (platform.outputRefresh ? 1'000'000'000ULL / platform.outputRefresh : 0);
+}
+
 void WindowImpl::cancelFrame() {
     if (frameCallback != nullptr) {
         wl_callback_destroy(frameCallback);
         frameCallback = nullptr;
+    }
+    if (feedback != nullptr) {
+        wp_presentation_feedback_destroy(feedback);
+        feedback = nullptr;
     }
 }
 

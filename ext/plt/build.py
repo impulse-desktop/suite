@@ -51,6 +51,7 @@ elif system == "Linux":
     protocol_root = pkg_config_variable("wayland-protocols", "pkgdatadir")
     protocol_paths = [
         "stable/viewporter/viewporter",
+        "stable/presentation-time/presentation-time",
         "stable/xdg-shell/xdg-shell",
         "staging/fractional-scale/fractional-scale-v1",
         "unstable/xdg-decoration/xdg-decoration-unstable-v1",
@@ -76,6 +77,7 @@ elif system == "Linux":
         if protocol in {
             "xdg-shell",
             "viewporter",
+            "presentation-time",
             "fractional-scale-v1",
             "xdg-decoration-unstable-v1",
             "xdg-activation-v1",
