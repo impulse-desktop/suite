@@ -19,7 +19,7 @@ static id<MTLLibrary> loadLibrary(id<MTLDevice> device, NSString* path) {
     return library;
 }
 
-static void check(id<MTLDevice> device, id<MTLComputePipelineState> pipeline) {
+static void check(id<MTLDevice> device, id<MTLComputePipelineState> pipeline, bool exact) {
     MTLTextureDescriptor* format = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA32Float width:48 height:48 mipmapped:NO];
 
     format.usage = MTLTextureUsageShaderWrite;
@@ -74,13 +74,45 @@ static void check(id<MTLDevice> device, id<MTLComputePipelineState> pipeline) {
         for (int x = 0; x < 48; x++) {
             const float* p = pixels + (y * 48 + x) * 4;
 
-            if (p[1] != (float)(y / 24 * 24 - 7) || p[2] != 0.0f || p[3] != 1.0f) {
+            int lane = y % 24 * 24 + x % 24;
+
+            if (p[1] != (float)(y / 24 * 24 - 7) || p[2] != 0.0f || p[3] != 1.0f || (exact && p[0] != (float)((lane + 1) % 576 + x / 24 * 24 - 5))) {
                 wrong++;
             }
         }
     }
 
     printf("  dispatch: %d of 2304 pixels wrong; pixel (30, 30) = %g %g %g %g\n", wrong, pixels[(30 * 48 + 30) * 4], pixels[(30 * 48 + 30) * 4 + 1], pixels[(30 * 48 + 30) * 4 + 2], pixels[(30 * 48 + 30) * 4 + 3]);
+}
+
+static void linkLayer(id<MTLDevice> device, NSString* text, NSString* label, id<MTLFunction> layer, bool exact) {
+    NSError* error = nil;
+    MTLCompileOptions* options = [MTLCompileOptions new];
+
+    options.languageVersion = MTLLanguageVersion3_0;
+
+    id<MTLLibrary> hosts = [device newLibraryWithSource:text options:options error:&error];
+
+    printf("host with '%s': %s\n", label.UTF8String, hosts ? "compiled" : error.description.UTF8String);
+
+    if (!hosts || !layer) {
+        return;
+    }
+
+    MTLComputePipelineDescriptor* descriptor = [MTLComputePipelineDescriptor new];
+    MTLLinkedFunctions* linked = [MTLLinkedFunctions linkedFunctions];
+
+    linked.privateFunctions = @[layer];
+    descriptor.computeFunction = [hosts newFunctionWithName:@"host"];
+    descriptor.linkedFunctions = linked;
+
+    id<MTLComputePipelineState> pipeline = [device newComputePipelineStateWithDescriptor:descriptor options:MTLPipelineOptionNone reflection:nil error:&error];
+
+    printf("  linked pipeline: %s\n", pipeline ? "built" : error.description.UTF8String);
+
+    if (pipeline) {
+        check(device, pipeline, exact);
+    }
 }
 
 int main(void) {
@@ -114,34 +146,14 @@ int main(void) {
         NSArray<NSString*>* variants = @[@"extern float4 layer", @"[[visible]] float4 layer", @"[[visible]] extern float4 layer"];
 
         for (NSString* declaration in variants) {
-            NSString* text = [source stringByReplacingOccurrencesOfString:@"extern float4 layer" withString:declaration];
-            MTLCompileOptions* options = [MTLCompileOptions new];
-
-            options.languageVersion = MTLLanguageVersion3_0;
-
-            id<MTLLibrary> hosts = [device newLibraryWithSource:text options:options error:&error];
-
-            printf("host with '%s': %s\n", declaration.UTF8String, hosts ? "compiled" : error.description.UTF8String);
-
-            if (!hosts || !layer) {
-                continue;
-            }
-
-            MTLComputePipelineDescriptor* descriptor = [MTLComputePipelineDescriptor new];
-            MTLLinkedFunctions* linked = [MTLLinkedFunctions linkedFunctions];
-
-            linked.privateFunctions = @[layer];
-            descriptor.computeFunction = [hosts newFunctionWithName:@"host"];
-            descriptor.linkedFunctions = linked;
-
-            id<MTLComputePipelineState> pipeline = [device newComputePipelineStateWithDescriptor:descriptor options:MTLPipelineOptionNone reflection:nil error:&error];
-
-            printf("  linked pipeline: %s\n", pipeline ? "built" : error.description.UTF8String);
-
-            if (pipeline) {
-                check(device, pipeline);
-            }
+            linkLayer(device, [source stringByReplacingOccurrencesOfString:@"extern float4 layer" withString:declaration], declaration, layer, false);
         }
+
+        id<MTLLibrary> owned = loadLibrary(device, @"probe_owned.metallib");
+        NSString* text = [source stringByReplacingOccurrencesOfString:@"extern float4 layer(uint2 local, int2 origin, const device uint* words, threadgroup float* sharedA, threadgroup float* sharedB, threadgroup float* sharedW)" withString:@"[[visible]] float4 layer(uint2 local, int2 origin, const device uint* words)"];
+
+        text = [text stringByReplacingOccurrencesOfString:@"words, sharedA, sharedB, sharedW)" withString:@"words)"];
+        linkLayer(device, text, @"a layer owning its threadgroup memory", [owned newFunctionWithName:@"layer"], true);
     }
 
     return 0;

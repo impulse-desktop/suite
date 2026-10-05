@@ -10,7 +10,14 @@ for name in probe_kernel probe_layer probe_host; do
         xcrun -sdk macosx metallib "$name.air" -o "$name.metallib" >> "$name.log" 2>&1
     fi
 done
+ls "$(dirname "$(xcrun -sdk macosx -f metal)")" > tools.txt 2>&1
+rm -f probe_owned.air probe_owned.metallib
+xcrun -sdk macosx metal -c probe_owned.ll -o probe_owned.air > probe_owned.log 2>&1
+if [ -f probe_owned.air ]; then
+    xcrun -sdk macosx metallib probe_owned.air -o probe_owned.metallib >> probe_owned.log 2>&1
+fi
 ls -l
+cat tools.txt probe_owned.log
 if xcrun -sdk macosx clang -fobjc-arc -framework Foundation -framework Metal link.m -o link > link.txt 2>&1; then
     ./link >> link.txt 2>&1
 fi
