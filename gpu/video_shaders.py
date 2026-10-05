@@ -2,9 +2,10 @@
 
 """Renders the tables the player matches frames against and shader.cpp
 compiles its video shaders from: the storage layouts and the codes of
-H.273 in tables.py.
+H.273 in tables.py, as the data codes.cpp includes for the declarations
+of codes.h.
 
-  video_shaders.py codes HEADER
+  video_shaders.py codes codes.inc
 """
 
 import sys
@@ -110,9 +111,6 @@ def check(name, layout):
             raise ValueError(f"component {c} of {name} straddles a word")
 
 
-HEADER = ["#pragma once", "", "#include <stddef.h>", "#include <stdint.h>", ""]
-
-
 def matrix(rows):
     return "{" + ", ".join("{" + ", ".join(f"{value:.12g}" for value in row) + "}" for row in rows) + "}"
 
@@ -121,27 +119,9 @@ def numbers(values):
     return "{" + ", ".join(f"{value:.12g}" for value in values) + "}"
 
 
-def codes(header):
+def codes(path):
     module = tables()
-    lines = list(HEADER)
-    lines += [
-        "struct VideoLayout {",
-        "    const char* name;",
-        "    const char* shape;",
-        "    const char* model;",
-        "    bool bigEndian;",
-        "    bool alpha;",
-        "    bool floating;",
-        "    bool bits;",
-        "    bool inverted;",
-        "    int count;",
-        "    int components[4][5];",
-        "    int padding[4];",
-        "    int luma[5];",
-        "};",
-        "",
-        "static constexpr VideoLayout videoLayouts[] = {",
-    ]
+    lines = ["const VideoLayout layouts[] = {"]
     every = layouts(module)
     for name, layout in every.items():
         check(name, layout)
@@ -153,61 +133,31 @@ def codes(header):
         padding = ", ".join(str(component[3] - whole[3]) for component, whole in zip(components, layout["components"]))
         luma = ", ".join(str(value) for value in ([layout["luma"][0], *layout["luma"][1]] if "luma" in layout else [0] * 5))
         lines.append(f'    {{"{formats[0]}", "{name}", "{layout["model"]}", {flags}, {len(components)}, {{{fields}}}, {{{padding}}}, {{{luma}}}}},')
-    lines += ["};", ""]
-    lines += ["struct VideoFormat {", "    const char* name;", "    int layout;", "};", "", "static constexpr VideoFormat videoFormats[] = {"]
+    lines += ["};", "", "const VideoFormat formats[] = {"]
     for index, (name, layout, formats, components) in enumerate(members):
         lines += [f'    {{"{format}", {index}}},' for format in formats]
-    lines += ["};", ""]
-    lines += [
-        "struct VideoMatrix {",
-        "    uint8_t code;",
-        "    const char* system;",
-        "    const char* weights;",
-        "    double kr;",
-        "    double kb;",
-        "    double toSignal[3][3];",
-        "    int lumaBits;",
-        "};",
-        "",
-        "static constexpr VideoMatrix videoMatrices[] = {",
-    ]
+    lines += ["};", "", "const VideoMatrix matrices[] = {"]
     for code, entry in module.matrices.items():
         weights = entry.get("weights", "fixed" if "toSignal" in entry else "none")
         kr, kb = weights if isinstance(weights, list) else (0, 0)
         kind = "given" if isinstance(weights, list) else weights
         rows = entry.get("toSignal", [[0, 0, 0]] * 3)
         lines.append(f'    {{{code}, "{entry["system"]}", "{kind}", {kr}, {kb}, {matrix(rows)}, {entry.get("lumaBits", 0)}}},')
-    lines += ["};", ""]
-    lines += [
-        "struct VideoTransfer {",
-        "    uint8_t code;",
-        "    const char* shape;",
-        "    double eotf[11];",
-        "    double oetf[11];",
-        "    double inverse[11];",
-        "    double decades;",
-        "};",
-        "",
-        "static constexpr VideoTransfer videoTransfers[] = {",
-    ]
+    lines += ["};", "", "const VideoTransfer transfers[] = {"]
     flat = lambda piece: numbers([*segments(piece)[0], *segments(piece)[1], segments(piece)[2]]) if piece else numbers([0] * 11)
     for code, entry in module.transfers.items():
         lines.append(f'    {{{code}, "{entry["shape"]}", {flat(entry.get("eotf"))}, {flat(entry.get("oetf"))}, {flat(entry.get("inverse"))}, {entry.get("decades", 0)}}},')
-    lines += ["};", ""]
-    lines += ["struct VideoPrimaries {", "    uint8_t code;", "    double toXyz[3][3];", "};", "", "static constexpr VideoPrimaries videoPrimaries[] = {"]
+    lines += ["};", "", "const VideoPrimaries primaries[] = {"]
     for code, chromaticities in module.primaries.items():
         lines.append(f"    {{{code}, {matrix(to_xyz(chromaticities))}}},")
-    lines += ["};", ""]
-    lines += ["struct VideoOutput {", "    const char* name;", "    double fromXyz[3][3];", "};", "", "static constexpr VideoOutput videoOutputs[] = {"]
+    lines += ["};", "", "const VideoOutput outputs[] = {"]
     for name, code in module.outputs.items():
         lines.append(f'    {{"{name}", {matrix(inverse(to_xyz(module.primaries[code])))}}},')
-    lines += ["};", ""]
-    lines += ["struct VideoLocation {", "    uint8_t code;", "    double site[2];", "};", "", "static constexpr VideoLocation videoLocations[] = {"]
+    lines += ["};", "", "const VideoLocation locations[] = {"]
     for code, site in module.locations.items():
         lines.append(f"    {{{code}, {numbers(site)}}},")
-    lines += ["};", ""]
-    lines += [f"static constexpr uint8_t videoRanges[] = {{{', '.join(str(value) for value in module.ranges)}}};", ""]
-    Path(header).write_text("\n".join(lines), encoding="utf-8")
+    lines += ["};", "", f"const u8 ranges[] = {{{', '.join(str(value) for value in module.ranges)}}};", ""]
+    Path(path).write_text("\n".join(lines), encoding="utf-8")
 
 
 def main():

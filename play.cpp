@@ -1,6 +1,7 @@
 #include "play.h"
 
 #include "ui.h"
+#include "codes.h"
 #include "error.h"
 #include "pooled.h"
 #include "shader.h"
@@ -27,7 +28,6 @@
 #include <sys/mman.h>
 #include <plt/fiber.h>
 #include <plt/poller.h>
-#include <video_codes.h>
 #include <plt/platform.h>
 #include <plt/loop_wake.h>
 
@@ -425,8 +425,8 @@ namespace {
         raiseError(StringView(StringBuilder() << StringView(u8"video ") << StringView(what) << StringView(u8" ") << (i64)code << StringView(u8" is not supported")));
     }
 
-    template <class Entry, size_t N>
-    static const Entry* entryOf(const Entry (&entries)[N], int code) {
+    template <class Entry>
+    static const Entry* entryOf(const VideoTable<Entry>& entries, int code) {
         for (const Entry& entry : entries) {
             if (entry.code == code) {
                 return &entry;

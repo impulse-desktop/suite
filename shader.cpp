@@ -1,6 +1,7 @@
 #include "shader.h"
 
 #include "air.h"
+#include "codes.h"
 #include "error.h"
 #include "renderer.h"
 
@@ -10,7 +11,6 @@
 
 #include <math.h>
 #include <string.h>
-#include <video_codes.h>
 
 using namespace stl;
 

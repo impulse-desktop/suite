@@ -1,4 +1,5 @@
 #include "ui.h"
+#include "codes.h"
 #include "error.h"
 #include "shader.h"
 #include "renderer.h"
@@ -15,7 +16,6 @@
 
 #include <math.h>
 #include <string.h>
-#include <video_codes.h>
 
 extern "C" {
 #include <libavutil/frame.h>
@@ -439,8 +439,8 @@ namespace {
         return nullptr;
     }
 
-    template <class Entry, size_t N>
-    static const Entry& entryOf(const Entry (&entries)[N], int code) {
+    template <class Entry>
+    static const Entry& entryOf(const VideoTable<Entry>& entries, int code) {
         for (const Entry& entry : entries) {
             if (entry.code == code) {
                 return entry;

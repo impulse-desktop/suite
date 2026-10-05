@@ -115,14 +115,15 @@ for shader, defines in [] if darwin else [
 
 
 # the player's color conversion is compiled at run time (shader.cpp) from
-# each frame's facts; video_shaders.py lists the storage layouts and the
-# codes of gpu/tables.py for the player to match
-video_codes = command(
-    name="video_codes",
+# each frame's facts; video_shaders.py renders the storage layouts and the
+# codes of gpu/tables.py for the player to match as codes.inc, the data
+# codes.cpp includes for the tables codes.h declares
+codes = command(
+    name="codes",
     inputs=["$(S)/gpu/video_shaders.py", "$(S)/gpu/tables.py"],
-    outputs=["$(B)/shaders/video_codes.h"],
+    outputs=["$(B)/shaders/codes.inc"],
     descr="SH",
-    cmd=["python3", "$(S)/gpu/video_shaders.py", "codes", "$(B)/shaders/video_codes.h"],
+    cmd=["python3", "$(S)/gpu/video_shaders.py", "codes", "$(B)/shaders/codes.inc"],
 )
 
 
@@ -228,7 +229,7 @@ if darwin:
 # the vendored libraries' own dependencies come along by name: an imported
 # graph hands over its archive, not what the archive wants linked
 im_deps = [
-    *shader_rules, video_codes, imgui, decode, plt, libstd,
+    *shader_rules, codes, imgui, decode, plt, libstd,
     *platform_deps, *encoders, *media, system,
 ]
 
@@ -266,7 +267,7 @@ renderer_test = program(
 video_test = program(
     name="video_test",
     output="$(B)/e2e/video_test",
-    srcs=["$(S)/tst/video.cpp", "$(S)/shader.cpp", "$(S)/air.cpp", "$(S)/renderer.cpp", "$(S)/ui.cpp", "$(S)/error.cpp", "$(S)/number.cpp", "$(S)/timing.cpp", *(["$(S)/renderer_metal.mm"] if darwin else ["$(S)/renderer_vulkan.cpp"])],
+    srcs=["$(S)/tst/video.cpp", "$(S)/shader.cpp", "$(S)/air.cpp", "$(S)/codes.cpp", "$(S)/renderer.cpp", "$(S)/ui.cpp", "$(S)/error.cpp", "$(S)/number.cpp", "$(S)/timing.cpp", *(["$(S)/renderer_metal.mm"] if darwin else ["$(S)/renderer_vulkan.cpp"])],
     cflags=warning_flags,
     deps=im_deps,
 )
@@ -275,9 +276,9 @@ video_test = program(
 video_shader = program(
     name="video_shader",
     output="$(B)/dev/video_shader",
-    srcs=["$(S)/dev/video_bench/emit.cpp", "$(S)/shader.cpp", "$(S)/air.cpp", "$(S)/error.cpp"],
+    srcs=["$(S)/dev/video_bench/emit.cpp", "$(S)/shader.cpp", "$(S)/air.cpp", "$(S)/codes.cpp", "$(S)/error.cpp"],
     cflags=warning_flags,
-    deps=[video_codes, imgui, libstd],
+    deps=[codes, imgui, libstd],
 )
 
 # the headless ImGui frames compositor_speed times the compositor over

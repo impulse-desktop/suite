@@ -1,3 +1,4 @@
+#include "codes.h"
 #include "error.h"
 #include "shader.h"
 #include "renderer.h"
@@ -9,7 +10,6 @@
 #include <std/mem/obj_pool.h>
 
 #include <string.h>
-#include <video_codes.h>
 
 using namespace stl;
 
