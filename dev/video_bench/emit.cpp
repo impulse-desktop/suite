@@ -94,17 +94,17 @@ namespace {
 
 int main(int argc, char** argv) {
     if (argc < 14) {
-        sysE << StringView(u8"usage: video_shader --target spirv|msl --output srgb|pq|linear|wide --tiles inside|edge|mixed --size WxH FORMAT SYSTEM TRANSFER CONVERSION OUTPUT HEX...") << endL;
+        sysE << StringView(u8"usage: video_shader --target spirv|msl|air --output srgb|pq|linear|wide --tiles inside|edge|mixed --size WxH FORMAT SYSTEM TRANSFER CONVERSION OUTPUT HEX...") << endL;
 
         return 2;
     }
 
-    static const char* const targets[2] = {"spirv", "msl"};
+    static const char* const targets[3] = {"spirv", "msl", "air"};
     static const char* const outputs[4] = {"srgb", "pq", "linear", "wide"};
     static const char* const tiles[3] = {"inside", "edge", "mixed"};
     ObjPool::Ref owner = ObjPool::fromMemory();
     VideoShader shader;
-    ShaderOptions options{(ShaderTarget)pick("--target", argv[1], argv[2], targets, 2), (ShaderOutput)pick("--output", argv[3], argv[4], outputs, 4), (ShaderTiles)pick("--tiles", argv[5], argv[6], tiles, 3), {0, 0}};
+    ShaderOptions options{(ShaderTarget)pick("--target", argv[1], argv[2], targets, 3), (ShaderOutput)pick("--output", argv[3], argv[4], outputs, 4), (ShaderTiles)pick("--tiles", argv[5], argv[6], tiles, 3), {0, 0}};
     Arguments numbers{argv + 14, argv + argc};
 
     if (strcmp(argv[7], "--size")) {

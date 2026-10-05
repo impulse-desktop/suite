@@ -1,5 +1,6 @@
 #include "shader.h"
 
+#include "air.h"
 #include "error.h"
 #include "renderer.h"
 
@@ -3455,6 +3456,530 @@ namespace {
     }
 }
 
+namespace {
+    enum : u32 {
+        AirAdd = 0,
+        AirSub = 1,
+        AirMul = 2,
+        AirUdiv = 3,
+        AirSdiv = 4,
+        AirShl = 7,
+        AirLshr = 8,
+        AirAnd = 10,
+        AirOr = 11,
+    };
+
+    enum : u32 {
+        AirZext = 1,
+        AirFpext = 8,
+        AirBitcast = 11,
+    };
+
+    enum : u32 {
+        AirFeq = 1,
+        AirFlt = 4,
+        AirFle = 5,
+        AirEq = 32,
+        AirUlt = 36,
+        AirUle = 37,
+        AirSlt = 40,
+        AirSle = 41,
+    };
+
+    struct Meta {
+        u32 handle;
+    };
+
+    struct Lowering {
+        AirModule m;
+        const Kernel& k;
+        u32 typeVoid = m.none;
+        u32 typeBool = m.integer(1);
+        u32 typeInt = m.integer(32);
+        u32 typeLong = m.integer(64);
+        u32 typeFloat = m.real();
+        u32 typeHalf = m.half();
+        u32 typePair = m.vector(2, typeHalf);
+        u32 typeInt2 = m.vector(2, typeInt);
+        u32 typeInt3 = m.vector(3, typeInt);
+        u32 typeFloat4 = m.vector(4, typeFloat);
+        u32 typeWords = m.pointer(typeInt, 1);
+        u32 typeShared = m.pointer(typeFloat, 3);
+        u32 intZero = m.integerConstant(typeInt, 0);
+        u32 intOne = m.integerConstant(typeInt, 1);
+        u32 intTwo = m.integerConstant(typeInt, 2);
+        u32 longZero = m.integerConstant(typeLong, 0);
+        u32 realZero = m.realConstant(typeFloat, 0);
+        u32 realOne = m.realConstant(typeFloat, 0x3f800000u);
+        u32 realNegativeZero = m.realConstant(typeFloat, 0x80000000u);
+        u32 inputs[48] = {};
+        u32 buffers[5] = {};
+        u32 arrays[kernelBuffers] = {};
+        u32 arrayTypes[kernelBuffers] = {};
+        Vector<u32> numbers;
+
+        explicit Lowering(const Kernel& kernel)
+            : k(kernel)
+        {
+            for (int i = 0; i < kernelBuffers; i++) {
+                if (k.buffer(i)) {
+                    arrayTypes[i] = m.array(k.buffer(i), typeFloat);
+                    arrays[i] = m.global(sharedNames[i], arrayTypes[i], 3);
+                }
+            }
+        }
+
+        u32 type(Kind kind) const {
+            return kind == Kind::Float ? typeFloat : kind == Kind::Bool ? typeBool : typeInt;
+        }
+
+        u32 call(const char* name, u32 result, const u32* args, u32 count, AirAttributes attributes) {
+            u32 params[8];
+
+            for (u32 i = 0; i < count; i++) {
+                params[i] = m.typeOf(args[i]);
+            }
+
+            return m.call(m.declare(name, m.function(result, params, count), attributes), args, count);
+        }
+
+        u32 constant(const Node* node) {
+            if (node->kind == Kind::Float) {
+                float value = (float)node->value;
+                u32 bits;
+
+                memcpy(&bits, &value, sizeof(bits));
+
+                return m.realConstant(typeFloat, bits);
+            }
+
+            if (node->kind == Kind::Bool) {
+                return m.integerConstant(typeBool, node->value != 0. ? -1 : 0);
+            }
+
+            return m.integerConstant(typeInt, node->kind == Kind::Uint ? (i32)(u32)node->value : (i32)node->value);
+        }
+
+        u32 shared(int buffer, u32 index) {
+            const u32 indices[2] = {longZero, m.cast(AirZext, index, typeLong)};
+
+            return m.element(arrayTypes[buffer], arrays[buffer], indices, 2, typeShared);
+        }
+
+        u32 convert(const Node* node, u32 a, Kind from) {
+            if (from == Kind::Bool && node->kind == Kind::Float) {
+                return m.select(a, realOne, realZero);
+            }
+
+            if (from == Kind::Float) {
+                return call(node->kind == Kind::Int ? "air.convert.s.i32.f.f32" : "air.convert.u.i32.f.f32", typeInt, &a, 1, AirAttributes::Pure);
+            }
+
+            if (node->kind == Kind::Float) {
+                return call(from == Kind::Int ? "air.convert.f.f32.s.i32" : "air.convert.f.f32.u.i32", typeFloat, &a, 1, AirAttributes::Pure);
+            }
+
+            if (from == Kind::Bool) {
+                fail(StringView(u8"a video shader converts a condition to an integer"));
+            }
+
+            return a;
+        }
+
+        u32 lower(const Node* node) {
+            bool real = node->kind == Kind::Float;
+            bool sign = node->kind == Kind::Int;
+            u32 a = node->arity > 0 ? node->args[0]->id : 0;
+            u32 b = node->arity > 1 ? node->args[1]->id : 0;
+            Kind from = node->arity > 0 ? node->args[0]->kind : Kind::Float;
+            const u32 pair[2] = {a, b};
+            u32 result = type(node->kind);
+
+            switch (node->op) {
+                case Op::Add:
+                    return m.binary(AirAdd, a, b);
+                case Op::Sub:
+                    return m.binary(AirSub, a, b);
+                case Op::Neg:
+                    return m.binary(AirSub, real ? realNegativeZero : intZero, a);
+                case Op::Mul:
+                    return m.binary(AirMul, a, b);
+                case Op::Div:
+                    return m.binary(real || sign ? AirSdiv : AirUdiv, a, b);
+                case Op::Abs:
+                    return call(real ? "air.fast_fabs.f32" : "air.abs.s.i32", result, pair, 1, AirAttributes::Pure);
+                case Op::Min:
+                    return call(real ? "air.fast_fmin.f32" : sign ? "air.min.s.i32" : "air.min.u.i32", result, pair, 2, AirAttributes::Pure);
+                case Op::Max:
+                    return call(real ? "air.fast_fmax.f32" : sign ? "air.max.s.i32" : "air.max.u.i32", result, pair, 2, AirAttributes::Pure);
+                case Op::Shr:
+                    return m.binary(AirLshr, a, b);
+                case Op::Shl:
+                    return m.binary(AirShl, a, b);
+                case Op::And:
+                    return m.binary(AirAnd, a, b);
+                case Op::Or:
+                    return m.binary(AirOr, a, b);
+                case Op::Le:
+                    return m.compare(from == Kind::Float ? AirFle : from == Kind::Int ? AirSle : AirUle, a, b);
+                case Op::Lt:
+                    return m.compare(from == Kind::Float ? AirFlt : from == Kind::Int ? AirSlt : AirUlt, a, b);
+                case Op::Eq:
+                    return m.compare(from == Kind::Float ? AirFeq : AirEq, a, b);
+                case Op::Select:
+                    return m.select(a, b, node->args[2]->id);
+                case Op::Floor:
+                    return call("air.fast_floor.f32", result, pair, 1, AirAttributes::Pure);
+                case Op::Exp2:
+                    return call("air.fast_exp2.f32", result, pair, 1, AirAttributes::Pure);
+                case Op::Exp:
+                    return call("air.fast_exp.f32", result, pair, 1, AirAttributes::Pure);
+                case Op::Log2:
+                    return call("air.fast_log2.f32", result, pair, 1, AirAttributes::Pure);
+                case Op::Log:
+                    return call("air.fast_log.f32", result, pair, 1, AirAttributes::Pure);
+                case Op::Sqrt:
+                    return call("air.fast_sqrt.f32", result, pair, 1, AirAttributes::Pure);
+                case Op::Convert:
+                    return convert(node, a, from);
+                case Op::Load: {
+                    u32 index = m.cast(AirZext, a, typeLong);
+
+                    return m.load(typeInt, m.element(typeInt, buffers[(int)node->value], &index, 1, typeWords), 4);
+                }
+                case Op::Half:
+                    return m.cast(AirFpext, m.extract(m.cast(AirBitcast, a, typePair), intZero), typeFloat);
+                case Op::BitsFloat:
+                    return m.cast(AirBitcast, a, typeFloat);
+                case Op::Shared:
+                    return m.load(typeFloat, shared((int)node->value % kernelBuffers, a), 4);
+                default:
+                    fail(StringView(u8"a video shader node has no AIR form"));
+            }
+        }
+
+        void emit(const Vector<Node*>& nodes) {
+            for (Node* node : nodes) {
+                if (node->op == Op::Input) {
+                    node->id = inputs[(int)node->value];
+                } else if (node->op == Op::Const) {
+                    node->id = constant(node);
+                } else {
+                    node->id = lower(node);
+                }
+            }
+        }
+
+        void barrier() {
+            const u32 args[2] = {intTwo, intOne};
+
+            call("air.wg.barrier", typeVoid, args, 2, AirAttributes::Convergent);
+        }
+
+        void phase(int phase) {
+            const Vector<Store>& stores = k.stores[phase];
+
+            if (!k.before[phase].empty()) {
+                Vector<Node*> nodes;
+
+                order(k.before[phase].data(), k.before[phase].length(), nodes);
+                emit(nodes);
+            }
+
+            if (stores.empty()) {
+                return;
+            }
+
+            for (size_t first = 0; first < stores.length();) {
+                Node* guard = stores[first].guard;
+                size_t end = first;
+                u32 merge = 0;
+                Vector<Node*> roots;
+                Vector<Node*> nodes;
+
+                for (; end < stores.length() && stores[end].guard == guard; end++) {
+                    roots.pushBack(stores[end].index);
+                    roots.pushBack(stores[end].value);
+                }
+
+                Vector<Node*> condition;
+
+                if (guard) {
+                    order(&guard, 1, condition);
+                }
+
+                order(roots.data(), roots.length(), nodes);
+
+                if (guard) {
+                    Vector<Node*> inside;
+                    u32 taken = m.block();
+
+                    merge = m.block();
+                    emit(condition);
+                    hoist(nodes, inside);
+                    emit(nodes);
+                    nodes.xchg(inside);
+                    m.branch(guard->id, taken, merge);
+                    m.enter(taken);
+                }
+
+                emit(nodes);
+
+                for (size_t i = first; i < end; i++) {
+                    m.store(stores[i].value->id, shared(phase % kernelBuffers, stores[i].index->id), 4);
+                }
+
+                if (guard) {
+                    m.branch(merge);
+                    m.enter(merge);
+                    forget(nodes);
+                }
+
+                first = end;
+            }
+
+            barrier();
+        }
+
+        void loop() {
+            const Loop& l = k.loop;
+            Vector<Node*> steady;
+            Vector<Node*> varying;
+            Vector<Node*> updates;
+
+            steadyFirst(k, steady, varying);
+            emit(steady);
+
+            u32 before = m.current();
+            u32 header = m.block();
+            u32 body = m.block();
+            u32 merge = m.block();
+            u32 count = m.integerConstant(typeInt, l.count);
+            u32 carried[4];
+
+            m.branch(header);
+            m.enter(header);
+
+            u32 portion = m.phi(typeInt);
+
+            for (int c = 0; c < l.carried; c++) {
+                carried[c] = m.phi(typeFloat);
+                inputs[16 + c] = carried[c];
+                m.arrive(carried[c], l.start[c]->id, before);
+            }
+
+            inputs[8] = portion;
+            m.arrive(portion, intZero, before);
+            m.branch(m.compare(AirSlt, portion, count), body, merge);
+            m.enter(body);
+
+            for (int p = l.first; p <= l.last; p++) {
+                phase(p);
+            }
+
+            order(l.next, l.carried, updates);
+            emit(updates);
+
+            u32 latch = m.current();
+
+            m.arrive(portion, m.binary(AirAdd, portion, intOne), latch);
+
+            for (int c = 0; c < l.carried; c++) {
+                m.arrive(carried[c], l.next[c]->id, latch);
+            }
+
+            m.branch(header);
+            m.enter(merge);
+            forget(varying);
+            forget(updates);
+        }
+
+        void phases() {
+            for (int p = 0; p < k.count; p++) {
+                if (p == k.loop.first) {
+                    loop();
+                    p = k.loop.last;
+                    continue;
+                }
+
+                phase(p);
+            }
+        }
+
+        u32 color(Node* const* channels) {
+            u32 vector = m.undef(typeFloat4);
+
+            for (int i = 0; i < 4; i++) {
+                vector = m.insert(vector, channels[i]->id, i == 0 ? intZero : i == 1 ? intOne : i == 2 ? intTwo : m.integerConstant(typeInt, 3));
+            }
+
+            return vector;
+        }
+
+        u32 number(i64 value) {
+            return m.value(m.integerConstant(typeInt, value));
+        }
+
+        u32 item(int value) {
+            return number(value);
+        }
+
+        u32 item(const char* text) {
+            return m.text(text);
+        }
+
+        u32 item(Meta node) {
+            return node.handle;
+        }
+
+        template <class... A>
+        Meta tuple(A... items) {
+            const u32 handles[sizeof...(A)] = {item(items)...};
+
+            return Meta{m.node(handles, sizeof...(A))};
+        }
+
+        StringView finish(ObjPool& pool, const char* name, AirFunction kind, Meta descriptor) {
+            const u32 sdk[2] = {m.integerConstant(typeInt, 14), m.integerConstant(typeInt, 0)};
+            Meta version{m.value(m.aggregate(m.array(2, typeInt), sdk, 2))};
+            const char* limits[6] = {"air.max_device_buffers", "air.max_constant_buffers", "air.max_threadgroup_buffers", "air.max_textures", "air.max_read_write_textures", "air.max_samplers"};
+            const int counts[6] = {31, 31, 31, 128, 8, 16};
+            u32 flags[9] = {tuple(2, "SDK Version", version).handle, tuple(1, "wchar_size", 4).handle, tuple(7, "frame-pointer", 2).handle};
+
+            for (int i = 0; i < 6; i++) {
+                flags[3 + i] = tuple(7, limits[i], counts[i]).handle;
+            }
+
+            const u32 options[3] = {tuple("air.compile.denorms_disable").handle, tuple("air.compile.fast_math_enable").handle, tuple("air.compile.framebuffer_fetch_enable").handle};
+            const u32 air = tuple(2, 6, 0).handle;
+            const u32 language = tuple("Metal", 3, 0, 0).handle;
+
+            m.name("llvm.module.flags", flags, 9);
+            m.name(kind == AirFunction::Kernel ? "air.kernel" : "air.visible", &descriptor.handle, 1);
+            m.name("air.compile_options", options, 3);
+            m.name("air.version", &air, 1);
+            m.name("air.language_version", &language, 1);
+
+            return m.library(pool, name, kind);
+        }
+    };
+
+    static StringView airLayer(ObjPool& pool, const Kernel& k) {
+        Lowering e(k);
+        AirModule& m = e.m;
+        const u32 params[3] = {e.typeInt2, e.typeInt2, e.typeWords};
+        u32 function = m.define("layer", m.function(e.typeFloat4, params, 3), AirAttributes::Convergent);
+        u32 local = m.argument(0);
+        u32 origin = m.argument(1);
+
+        e.buffers[Words] = m.argument(2);
+        m.enter(m.block());
+        e.inputs[2] = m.extract(local, e.intZero);
+        e.inputs[3] = m.extract(local, e.intOne);
+        e.inputs[6] = m.extract(origin, e.intZero);
+        e.inputs[7] = m.extract(origin, e.intOne);
+        e.phases();
+
+        Vector<Node*> nodes;
+
+        order(k.shown, 4, nodes);
+        e.emit(nodes);
+        m.ret(e.color(k.shown));
+
+        Meta output = e.tuple("air.visible_output", "air.arg_type_name", "float4");
+        const u32 inputs[3] = {
+            e.tuple(0, "air.visible_input", "air.arg_type_name", "uint2", "air.arg_name", "local").handle,
+            e.tuple(1, "air.visible_input", "air.arg_type_name", "int2", "air.arg_name", "origin").handle,
+            e.tuple(2, "air.visible_input", "air.arg_type_name", "uint", "air.arg_name", "words").handle,
+        };
+        Meta descriptor = e.tuple(Meta{m.value(function)}, Meta{m.node(&output.handle, 1)}, Meta{m.node(inputs, 3)});
+
+        return e.finish(pool, "layer", AirFunction::Visible, descriptor);
+    }
+
+    static StringView airKernel(ObjPool& pool, const Kernel& k) {
+        Lowering e(k);
+        AirModule& m = e.m;
+        const u32 members[5] = {e.typeInt2, e.typeInt2, e.typeInt, e.typeInt, e.typeFloat};
+        u32 typeFrame = m.structure("struct.Frame", members, 5);
+        u32 typeTexture = m.opaque("struct._texture_2d_t");
+        const u32 params[9] = {e.typeWords, e.typeWords, e.typeWords, e.typeWords, m.pointer(typeFrame, 2), e.typeWords, m.pointer(typeTexture, 1), e.typeInt3, e.typeInt3};
+        u32 function = m.define("compose", m.function(e.typeVoid, params, 9), AirAttributes::Convergent);
+        u32 args[9];
+
+        for (u32 i = 0; i < 9; i++) {
+            args[i] = m.argument(i);
+        }
+
+        e.buffers[Words] = args[5];
+        e.buffers[Headers] = args[0];
+        e.buffers[List] = args[1];
+        e.buffers[Ops] = args[2];
+        e.buffers[Tiles] = args[3];
+        m.enter(m.block());
+        e.inputs[2] = m.extract(args[8], e.intZero);
+        e.inputs[3] = m.extract(args[8], e.intOne);
+        e.inputs[4] = m.extract(args[7], e.intZero);
+        e.inputs[5] = m.extract(args[7], e.intOne);
+
+        u32 fields[5];
+
+        for (int i = 0; i < 5; i++) {
+            const u32 indices[2] = {e.intZero, m.integerConstant(e.typeInt, i)};
+            u32 kind = members[i];
+
+            fields[i] = m.load(kind, m.element(typeFrame, args[4], indices, 2, m.pointer(kind, 2)), i < 2 ? 8 : 4);
+        }
+
+        e.inputs[32] = m.extract(fields[0], e.intZero);
+        e.inputs[33] = m.extract(fields[0], e.intOne);
+        e.inputs[34] = fields[2];
+        e.inputs[35] = fields[3];
+        e.inputs[36] = fields[4];
+        e.inputs[37] = m.extract(fields[1], e.intZero);
+        e.inputs[38] = m.extract(fields[1], e.intOne);
+        e.phases();
+
+        Node* roots[7] = {k.encoded[0], k.encoded[1], k.encoded[2], k.encoded[3], k.pixel[0], k.pixel[1], k.drawn};
+        Vector<Node*> nodes;
+        u32 store = m.block();
+        u32 done = m.block();
+
+        order(roots, 7, nodes);
+        e.emit(nodes);
+        m.branch(k.drawn->id, store, done);
+        m.enter(store);
+
+        u32 coordinate = m.insert(m.insert(m.undef(e.typeInt2), k.pixel[0]->id, e.intZero), k.pixel[1]->id, e.intOne);
+        const u32 written[5] = {args[6], coordinate, e.color(k.encoded), e.intZero, e.intTwo};
+
+        e.call("air.write_texture_2d.v4f32", e.typeVoid, written, 5, AirAttributes::None);
+        m.branch(done);
+        m.enter(done);
+        m.ret();
+
+        const char* names[4] = {"headers", "list", "ops", "tiles"};
+        const int locations[4] = {0, 1, 2, 4};
+        u32 described[9];
+
+        for (int i = 0; i < 4; i++) {
+            described[i] = e.tuple(i, "air.buffer", "air.location_index", locations[i], 1, "air.read", "air.address_space", 1, "air.arg_type_size", 4, "air.arg_type_align_size", 4, "air.arg_type_name", "uint", "air.arg_name", names[i]).handle;
+        }
+
+        Meta layout = e.tuple(0, 8, 0, "int2", "size", 8, 8, 0, "int2", "video", 16, 4, 0, "uint", "tilesX", 20, 4, 0, "uint", "first", 24, 4, 0, "float", "white");
+
+        described[4] = e.tuple(4, "air.buffer", "air.buffer_size", 32, "air.location_index", 5, 1, "air.read", "air.address_space", 2, "air.struct_type_info", layout, "air.arg_type_size", 32, "air.arg_type_align_size", 8, "air.arg_type_name", "Frame", "air.arg_name", "frame").handle;
+        described[5] = e.tuple(5, "air.buffer", "air.location_index", 7, 1, "air.read", "air.address_space", 1, "air.arg_type_size", 4, "air.arg_type_align_size", 4, "air.arg_type_name", "uint", "air.arg_name", "words").handle;
+        described[6] = e.tuple(6, "air.texture", "air.location_index", 0, 1, "air.write", "air.arg_type_name", "texture2d<float, write>", "air.arg_name", "target").handle;
+        described[7] = e.tuple(7, "air.threadgroup_position_in_grid", "air.arg_type_name", "uint3", "air.arg_name", "group").handle;
+        described[8] = e.tuple(8, "air.thread_position_in_threadgroup", "air.arg_type_name", "uint3", "air.arg_name", "local").handle;
+
+        Meta descriptor = e.tuple(Meta{m.value(function)}, Meta{m.node(nullptr, 0)}, Meta{m.node(described, 9)});
+
+        return e.finish(pool, "compose", AirFunction::Kernel, descriptor);
+    }
+}
+
 StringView compile(ObjPool& pool, const VideoShader& shader, const ShaderOptions& options) {
     Graph g(pool);
     Video video{g, shader, *shader.layout, options};
@@ -3474,6 +3999,10 @@ StringView compile(ObjPool& pool, const VideoShader& shader, const ShaderOptions
         video.native(layer);
     } else {
         video.kernel(layer);
+    }
+
+    if (options.target == ShaderTarget::Air) {
+        return options.tiles == ShaderTiles::Mixed ? airLayer(pool, layer) : airKernel(pool, layer);
     }
 
     if (options.target == ShaderTarget::Msl) {

@@ -47,7 +47,8 @@ struct RenderShader {};
 
 enum class ShaderTarget : u8 {
     Spirv,
-    Msl
+    Msl,
+    Air
 };
 
 enum class ShaderOutput : u8 {
