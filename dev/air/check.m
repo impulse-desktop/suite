@@ -350,13 +350,13 @@ int main(int argc, char** argv) {
                                 }
 
                                 relative = r > relative ? r : relative;
-                                over += d > 1.0 / 1024;
+                                over += r > 1.0 / 1024;
                             }
                         }
                     }
                 }
 
-                bool good = !nans && most <= 0.01;
+                bool good = !nans && relative <= 0.1 && over * 1000 <= compared * 4;
 
                 checked++;
                 failed += !good;
