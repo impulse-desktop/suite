@@ -1170,6 +1170,13 @@ void WindowImpl::draw(CAMetalDisplayLinkUpdate* update) {
         }
         return;
     }
+    // A tick without a drawable (every one of the layer's is still on its
+    // way to the glass) is no frame: the request stands for the next tick.
+    // Rendering it would send the renderer to nextDrawable on a layer the
+    // link owns, which throws, inside the link's own callback.
+    if (update.drawable == nil) {
+        return;
+    }
     idleFrames = 0;
     frameRequested = false;
     WindowInfo current = info();
