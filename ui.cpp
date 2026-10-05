@@ -764,6 +764,9 @@ bool UiImpl::frame(const plt::WindowInfo& info) {
     frameBegan = began;
     framePresentUs = info.presentTime;
     if (!renderer->beginFrame(info)) {
+        if (traceFrames) {
+            sysE << StringView(u8"im skip: gap ") << MS{gap} << endL;
+        }
         return false;
     }
 
