@@ -702,8 +702,14 @@ void UiImpl::releaseTexture(ImTextureRef ref) {
     }
 
     texture->WantDestroyNextFrame = true;
-    texture->SetStatus(ImTextureStatus_WantDestroy);
-    texture->UnusedFrames = 0;
+
+    if (texture->Status == ImTextureStatus_WantCreate) {
+        texture->SetStatus(ImTextureStatus_Destroyed);
+    } else {
+        texture->SetStatus(ImTextureStatus_WantDestroy);
+        texture->UnusedFrames = 0;
+    }
+
     window->requestFrame();
 }
 
