@@ -1,8 +1,9 @@
 """What the viewer does with what it cannot show: no arguments is a usage
-error, a path that is not there, a directory without images or one that
-cannot be read opens the error panel, a file no coder takes or a truncated
-one is reported in the properties panel and stays in the list, its neighbours
-showing all the same; a Vulkan that fails ends the tool with the error."""
+error; a path that is not there, a directory without images or one that
+cannot be read leaves the viewer empty, the path's trouble reported; a file
+no coder takes or a truncated one is reported in the properties panel and
+stays in the list, its neighbours showing all the same; a Vulkan that fails
+ends the tool with the error."""
 
 import os
 
@@ -12,17 +13,18 @@ with Session("view_errors", tool="view") as s:
     code, log = s.run()
     assert code == 2 and "usage: im view" in log, f"no arguments did not give the usage (rc={code}):\n{log}"
 
-    s.launch(str(s.artifacts / "nowhere"))
+    nowhere = s.artifacts / "nowhere"
+    s.launch(str(nowhere))
     s.focus()
-    assert s.size() == (480, 180), f"a missing path did not open the error panel ({s.size()})"
+    s.said("listed 0")
+    s.said(f"{nowhere}: No such file or directory")
     s.close()
-    assert "no images to show" in s.client_log(), "the missing path was not reported"
 
     empty = s.artifacts / "empty"
     empty.mkdir()
     s.launch(str(empty))
     s.focus()
-    assert s.size() == (480, 180), f"an empty directory did not open the error panel ({s.size()})"
+    s.said("listed 0")
     s.close()
 
     locked = s.artifacts / "locked"
@@ -30,7 +32,7 @@ with Session("view_errors", tool="view") as s:
     locked.chmod(0)
     s.launch(str(locked))
     s.focus()
-    assert s.size() == (480, 180), f"an unreadable directory did not open the error panel ({s.size()})"
+    s.said("listed 0")
     s.close()
     assert "opendir() failed" in s.client_log(), "the unreadable directory was not reported"
 
