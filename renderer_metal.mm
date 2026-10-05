@@ -25,11 +25,6 @@
 #import <AppKit/AppKit.h>
 #import <IOSurface/IOSurface.h>
 #import <QuartzCore/CAMetalLayer.h>
-#import <QuartzCore/CAMetalDisplayLink.h>
-
-@interface ImMetalDisplayTarget: NSObject <CAMetalDisplayLinkDelegate>
-@property(nonatomic, assign) void* owner;
-@end
 
 using namespace stl;
 
@@ -231,12 +226,9 @@ namespace {
     struct MetalRenderer final: Renderer {
         plt::Window* host = nullptr;
         plt::LoopWake* wake = nullptr;
-        CAMetalDisplayLink* displayLink = nil;
-        ImMetalDisplayTarget* target = nil;
         Vector<MetalImage*> drawn;
         SmallObjAllocator* smallObjects = nullptr;
         Channel* landed = nullptr;
-        bool waiting = false;
         CAMetalLayer* layer = nil;
         NSWindow* window = nil;
         id<MTLDevice> device = nil;
@@ -253,7 +245,6 @@ namespace {
         Tiles tiles;
 
         bool beginFrame(u32 width, u32 height) override;
-        void drawableReady(id<CAMetalDrawable> value);
         void poll();
         bool endFrame(ImDrawData* draw) override;
         u32 maxTextureSide() override;
@@ -1392,15 +1383,6 @@ RenderImage* MetalRenderer::import(ObjPool& pool, SharedImage& shared, bool imag
     }
 }
 
-@implementation ImMetalDisplayTarget
-
-- (void)metalDisplayLink:(CAMetalDisplayLink*)link needsUpdate:(CAMetalDisplayLinkUpdate*)update {
-    (void)link;
-    ((MetalRenderer*)self.owner)->drawableReady(update.drawable);
-}
-
-@end
-
 PollMetal::PollMetal(MetalRenderer* value)
     : renderer(value)
 {
@@ -1434,29 +1416,14 @@ void MetalRenderer::poll() {
     }
 }
 
-void MetalRenderer::drawableReady(id<CAMetalDrawable> value) {
-    if (waiting) {
-        drawable = value;
-        waiting = false;
-        displayLink.paused = YES;
-        host->requestFrame();
-    }
-}
-
 bool MetalRenderer::beginFrame(u32 width, u32 height) {
     @autoreleasepool {
         poll();
         checkCommand(last);
         layer.drawableSize = CGSizeMake(width, height);
-        if (drawable && (drawable.texture.width != width || drawable.texture.height != height)) {
-            drawable = nil;
-        }
-        if (!drawable) {
-            waiting = true;
-            displayLink.paused = NO;
-            return false;
-        }
-        return true;
+        layer.presentsWithTransaction = window.inLiveResize;
+        drawable = [layer nextDrawable];
+        return drawable != nil;
     }
 }
 
@@ -1516,8 +1483,14 @@ bool MetalRenderer::endFrame(ImDrawData* draw) {
           done->enqueue(flight);
           completed->signal();
         }];
-        [command presentDrawable:drawable];
-        [command commit];
+        if (layer.presentsWithTransaction) {
+            [command commit];
+            [command waitUntilScheduled];
+            [drawable present];
+        } else {
+            [command presentDrawable:drawable];
+            [command commit];
+        }
         last = command;
         drawable = nil;
     }
@@ -1655,6 +1628,7 @@ Renderer* createMetalRenderer(ObjPool& pool, plt::Platform& platform, plt::Windo
     layer.device = renderer->device;
     layer.framebufferOnly = NO;
     layer.maximumDrawableCount = drawables;
+    layer.allowsNextDrawableTimeout = NO;
     layer.presentsWithTransaction = NO;
     renderer->setMode(false);
     renderer->plainLibrary = renderer->library([NSString stringWithFormat:@"#define GROUP %u\n%s", composeGroup, composeSource]);
@@ -1662,15 +1636,6 @@ Renderer* createMetalRenderer(ObjPool& pool, plt::Platform& platform, plt::Windo
     renderer->wake = platform.createLoopWake(pool, *pool.make<PollMetal>(renderer));
     renderer->smallObjects = SmallObjAllocator::create(&pool);
     renderer->landed = Channel::create(&pool, 64);
-    renderer->target = [ImMetalDisplayTarget new];
-    renderer->target.owner = renderer;
-    renderer->displayLink = [[CAMetalDisplayLink alloc] initWithMetalLayer:layer];
-    renderer->displayLink.delegate = renderer->target;
-    renderer->displayLink.paused = YES;
-    [renderer->displayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
-    pooledGuard(pool, [renderer] {
-        [renderer->displayLink invalidate];
-    });
     ImGuiIO& io = ImGui::GetIO();
     ImGuiPlatformIO& pio = ImGui::GetPlatformIO();
     io.BackendRendererName = "im_compose";
