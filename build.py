@@ -267,7 +267,7 @@ renderer_test = program(
 video_test = program(
     name="video_test",
     output="$(B)/e2e/video_test",
-    srcs=["$(S)/tst/video.cpp", "$(S)/shader.cpp", "$(S)/codes.cpp", "$(S)/renderer.cpp", "$(S)/ui.cpp", "$(S)/error.cpp", "$(S)/number.cpp", "$(S)/timing.cpp", *(["$(S)/renderer_metal.mm"] if darwin else ["$(S)/renderer_vulkan.cpp"])],
+    srcs=["$(S)/tst/video.cpp", "$(S)/shader.cpp", "$(S)/air.cpp", "$(S)/codes.cpp", "$(S)/renderer.cpp", "$(S)/ui.cpp", "$(S)/error.cpp", "$(S)/number.cpp", "$(S)/timing.cpp", *(["$(S)/renderer_metal.mm"] if darwin else ["$(S)/renderer_vulkan.cpp"])],
     cflags=warning_flags,
     deps=im_deps,
 )
@@ -276,7 +276,7 @@ video_test = program(
 video_shader = program(
     name="video_shader",
     output="$(B)/dev/video_shader",
-    srcs=["$(S)/dev/video_bench/emit.cpp", "$(S)/shader.cpp", "$(S)/codes.cpp", "$(S)/error.cpp"],
+    srcs=["$(S)/dev/video_bench/emit.cpp", "$(S)/shader.cpp", "$(S)/air.cpp", "$(S)/codes.cpp", "$(S)/error.cpp"],
     cflags=warning_flags,
     deps=[codes, imgui, libstd],
 )
