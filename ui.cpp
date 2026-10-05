@@ -357,7 +357,6 @@ namespace {
         plt::LoopWake* wake = nullptr;
         Renderer* renderer = nullptr;
         u64 frameUs = 0;
-        u64 framePresentUs = 0;
         plt::PointerIcon icon = plt::PointerIcon::Text;
         bool shown = false;
         u32 presentedWidth = 0;
@@ -389,7 +388,6 @@ namespace {
         ImTextureRef loadTexture(u32 width, u32 height, const void* rgba) override;
         void releaseTexture(ImTextureRef texture) override;
         u32 maxTextureSide() override;
-        u64 presentTime() override;
         bool drawErrorPanel(StringView message) override;
         void trace(StringView what) override;
         void timing(StringView line) override;
@@ -704,23 +702,13 @@ void UiImpl::releaseTexture(ImTextureRef ref) {
     }
 
     texture->WantDestroyNextFrame = true;
-
-    if (texture->Status == ImTextureStatus_WantCreate) {
-        texture->SetStatus(ImTextureStatus_Destroyed);
-    } else {
-        texture->SetStatus(ImTextureStatus_WantDestroy);
-        texture->UnusedFrames = 0;
-    }
-
+    texture->SetStatus(ImTextureStatus_WantDestroy);
+    texture->UnusedFrames = 0;
     window->requestFrame();
 }
 
 u32 UiImpl::maxTextureSide() {
     return renderer->maxTextureSide();
-}
-
-u64 UiImpl::presentTime() {
-    return framePresentUs;
 }
 
 bool UiImpl::drawErrorPanel(StringView message) {
@@ -762,11 +750,7 @@ bool UiImpl::frame(const plt::WindowInfo& info) {
     u64 gap = frameBegan ? began - frameBegan : 0;
 
     frameBegan = began;
-    framePresentUs = info.presentTime;
-    if (!renderer->beginFrame(info)) {
-        if (traceFrames) {
-            sysE << StringView(u8"im skip: gap ") << MS{gap} << endL;
-        }
+    if (!renderer->beginFrame(info.width, info.height)) {
         return false;
     }
 
@@ -799,8 +783,6 @@ bool UiImpl::frame(const plt::WindowInfo& info) {
         text << StringView(u8" tool ") << MS{drew - opened};
         text << StringView(u8" render ") << MS{rendered - drew};
         text << StringView(u8" end ") << MS{monotonicNowUs() - rendered};
-
-        text << StringView(u8" present +") << MS{framePresentUs > began ? framePresentUs - began : 0};
 
         if (!presented) {
             text << StringView(u8" unpresented");

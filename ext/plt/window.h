@@ -74,14 +74,6 @@ namespace plt {
         u32 screenPixelWidth = 0;
         u32 screenPixelHeight = 0;
         float contentScale = 1.0f;
-        // When this frame's contents reach the glass, in stl::monotonicNowUs()
-        // units: the platform's best knowledge, always on the program's own
-        // clock, never zero. A platform that is told the moment by its display
-        // (Cocoa's display link) carries it over from the display's clock; one
-        // that knows the display's period alone (Wayland, from the output's
-        // mode) gives the next refresh from now; one that knows nothing gives
-        // now. A renderer or a player targets this moment, not the draw's.
-        u64 presentTime = 0;
         bool focused = false;
         bool iconified = false;
         bool maximized = false;

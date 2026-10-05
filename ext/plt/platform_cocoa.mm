@@ -24,7 +24,6 @@
 
 #import <AppKit/AppKit.h>
 #import <mach/mach.h>
-#import <mach/mach_time.h>
 #import <Carbon/Carbon.h>
 #import <CoreVideo/CVDisplayLink.h>
 #import <IOKit/hidsystem/IOLLEvent.h>
@@ -92,7 +91,7 @@ namespace plt::cocoa_detail {
 
 void cocoaCloseImpl(void* owner);
 void cocoaResizeImpl(void* owner);
-void cocoaFrameImpl(void* owner, u64 hostTime);
+void cocoaFrameImpl(void* owner);
 void cocoaDisplayLayerImpl(void* owner);
 void cocoaInvalidateImpl(void* owner);
 void cocoaScreenChangedImpl(void* owner);
@@ -569,9 +568,7 @@ namespace {
         void startDisplayLink();
         void screenChanged();
         NSRect textInputScreenRect() const;
-        void draw(u64 hostTime);
-        u64 presentTime(u64 hostTime) const;
-        u64 nextPresentTime() const;
+        void draw();
         void stopDisplayLink();
         NSSize willResize(NSSize frameSize) const;
         void focused(bool value);
@@ -794,17 +791,16 @@ namespace {
         return [NSCursor arrowCursor];
     }
 
-    CVReturn displayLinkCallback(CVDisplayLinkRef, const CVTimeStamp*, const CVTimeStamp* outputTime, CVOptionFlags, CVOptionFlags*, void* context) {
+    CVReturn displayLinkCallback(CVDisplayLinkRef, const CVTimeStamp*, const CVTimeStamp*, CVOptionFlags, CVOptionFlags*, void* context) {
         PltDisplayLinkTarget* const target = (__bridge PltDisplayLinkTarget*)(context);
         if (!target->gate.schedule()) {
             return kCVReturnSuccess;
         }
-        const u64 hostTime = outputTime->hostTime;
         CFRunLoopPerformBlock(CFRunLoopGetMain(), kCFRunLoopCommonModes, ^{
           target->gate.dispatched();
           void* const owner = target->gate.owner();
           if (owner != nullptr) {
-              cocoaFrameImpl(owner, hostTime);
+              cocoaFrameImpl(owner);
           }
         });
         CFRunLoopWakeUp(CFRunLoopGetMain());
@@ -1213,28 +1209,7 @@ void WindowImpl::startDisplayLink() {
     }
 }
 
-u64 WindowImpl::presentTime(u64 hostTime) const {
-    // The link stamps frames on the host clock (mach_absolute_time, which
-    // stops while the machine sleeps); the program's clock is
-    // CLOCK_MONOTONIC, which keeps counting. The two drift apart by the
-    // time slept, so the stamp is carried over on the difference read now.
-    mach_timebase_info_data_t timebase;
-    mach_timebase_info(&timebase);
-    const i64 hostUs = (i64)(hostTime * timebase.numer / timebase.denom / 1000);
-    timespec monotonic;
-    timespec uptime;
-    clock_gettime(CLOCK_MONOTONIC, &monotonic);
-    clock_gettime(CLOCK_UPTIME_RAW, &uptime);
-    const i64 skewUs = ((i64)monotonic.tv_sec - (i64)uptime.tv_sec) * 1000000 + ((i64)monotonic.tv_nsec - (i64)uptime.tv_nsec) / 1000;
-    return (u64)(hostUs + skewUs);
-}
-
-u64 WindowImpl::nextPresentTime() const {
-    NSScreen* const screen = window.screen != nil ? window.screen : [NSScreen mainScreen];
-    return monotonicNowUs() + 1000000 / (u64)(max((NSInteger)(1), screen.maximumFramesPerSecond));
-}
-
-void WindowImpl::draw(u64 hostTime) {
+void WindowImpl::draw() {
     if (!frameRequested || frame == nullptr) {
         // Idle frames coast for a while before the link stops. Starting
         // one costs a thread wake and a sync to the display, and a
@@ -1251,9 +1226,7 @@ void WindowImpl::draw(u64 hostTime) {
     }
     idleFrames = 0;
     frameRequested = false;
-    WindowInfo current = info();
-    current.presentTime = presentTime(hostTime);
-    frame->frame(current);
+    frame->frame(info());
 }
 
 void WindowImpl::stopDisplayLink() {
@@ -1590,9 +1563,7 @@ void WindowImpl::resizeFrame() {
     stopDisplayLink();
     frameRequested = false;
     if (frame != nullptr) {
-        WindowInfo current = info();
-        current.presentTime = nextPresentTime();
-        frame->frame(current);
+        frame->frame(info());
     }
     startDisplayLink();
 }
@@ -1974,8 +1945,8 @@ void cocoaResizeImpl(void* owner) {
     ((WindowImpl*)(owner))->resized();
 }
 
-void cocoaFrameImpl(void* owner, u64 hostTime) {
-    ((WindowImpl*)(owner))->draw(hostTime);
+void cocoaFrameImpl(void* owner) {
+    ((WindowImpl*)(owner))->draw();
 }
 
 void cocoaDisplayLayerImpl(void* owner) {

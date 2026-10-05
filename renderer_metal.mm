@@ -252,7 +252,7 @@ namespace {
         u64 frames = 0;
         Tiles tiles;
 
-        bool beginFrame(const plt::WindowInfo& info) override;
+        bool beginFrame(u32 width, u32 height) override;
         void drawableReady(id<CAMetalDrawable> value);
         void poll();
         bool endFrame(ImDrawData* draw) override;
@@ -1443,12 +1443,12 @@ void MetalRenderer::drawableReady(id<CAMetalDrawable> value) {
     }
 }
 
-bool MetalRenderer::beginFrame(const plt::WindowInfo& info) {
+bool MetalRenderer::beginFrame(u32 width, u32 height) {
     @autoreleasepool {
         poll();
         checkCommand(last);
-        layer.drawableSize = CGSizeMake(info.width, info.height);
-        if (drawable && (drawable.texture.width != info.width || drawable.texture.height != info.height)) {
+        layer.drawableSize = CGSizeMake(width, height);
+        if (drawable && (drawable.texture.width != width || drawable.texture.height != height)) {
             drawable = nil;
         }
         if (!drawable) {

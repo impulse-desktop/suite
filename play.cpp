@@ -57,9 +57,6 @@ namespace {
     constexpr int bufferRate = 20;
     constexpr size_t sampleBytes = 4;
     constexpr double seekStep = 10.;
-    constexpr double clockBandwidth = 0.5;
-    constexpr double clockSlip = 0.1;
-    constexpr double clockGap = 0.25;
 
     enum class Kind : u8 {
         Control,
@@ -282,10 +279,8 @@ namespace {
         bool videoEnded = false;
         bool audioEnded = false;
         double clockBase = 0.;
-        double clockRate = 1.;
         u64 clockAt = 0;
         bool clockRunning = false;
-        bool clockLocked = false;
         i64 drawnSecond = -1;
         bool scrubbing = false;
         float scrub = 0.f;
@@ -302,7 +297,6 @@ namespace {
         u64 present();
         void finishIfEnded(u64 now);
         void show(Frame* frame);
-        void advance(double at);
         Frame* takeFirst();
         void release(VideoImage* image);
         void retired(VideoImage* image);
@@ -1501,9 +1495,7 @@ Screen::~Screen() noexcept {
         delete frame;
     }
 
-    if (shown) {
-        delete shown;
-    }
+    delete shown;
 
     for (VideoFactory* known : factories) {
         delete known->pool;
@@ -1596,7 +1588,19 @@ u64 Screen::present() {
 
     double at = position(now);
 
-    advance(at);
+    if (clockRunning) {
+        while (!waiting.empty() && waiting[0]->pts <= at) {
+            Frame* frame = takeFirst();
+
+            if (!waiting.empty() && waiting[0]->pts <= at) {
+                release(frame->image);
+                delete frame;
+            } else {
+                show(frame);
+            }
+        }
+    }
+
     finishIfEnded(now);
     at = position(now);
 
@@ -1640,23 +1644,6 @@ void Screen::finishIfEnded(u64 now) {
     setClock(position(now), false, now);
     player->ui->trace(StringView(StringBuilder() << StringView(u8"ended generation=") << (i64)generation));
     player->ui->requestFrame();
-}
-
-void Screen::advance(double at) {
-    if (!clockRunning) {
-        return;
-    }
-
-    while (!waiting.empty() && waiting[0]->pts <= at) {
-        Frame* frame = takeFirst();
-
-        if (!waiting.empty() && waiting[0]->pts <= at) {
-            release(frame->image);
-            delete frame;
-        } else {
-            show(frame);
-        }
-    }
 }
 
 void Screen::show(Frame* frame) {
@@ -1713,23 +1700,7 @@ void Screen::applyClock(const Clock& clock) {
     }
 
     audioEnded = clock.ended;
-
-    bool running = clock.running && !clock.ended;
-    double elapsed = clock.at > clockAt ? (double)(clock.at - clockAt) / 1e6 : 0.;
-    double error = clock.position - position(clock.at);
-
-    if (!running || !clockRunning || !clockLocked || elapsed <= 0. || elapsed > clockGap || fabs(error) > clockSlip) {
-        setClock(clock.position, running, clock.at);
-        clockLocked = running;
-
-        return;
-    }
-
-    double omega = 2. * 3.14159265358979 * clockBandwidth * elapsed;
-
-    clockBase = position(clock.at) + sqrt(2.) * omega * error;
-    clockRate += omega * omega * error / elapsed;
-    clockAt = clock.at;
+    setClock(clock.position, clock.running && !clock.ended, clock.at);
 }
 
 void Screen::makeRender(VideoImage* image) {
@@ -1907,15 +1878,13 @@ double Screen::position(u64 now) const {
         return clockBase;
     }
 
-    return clockBase + clockRate * (double)(now - clockAt) / 1e6;
+    return clockBase + (double)(now - clockAt) / 1e6;
 }
 
 void Screen::setClock(double base, bool running, u64 at) {
     clockBase = base;
-    clockRate = 1.;
     clockAt = at;
     clockRunning = running;
-    clockLocked = false;
 }
 
 void Screen::keys() {
@@ -1948,9 +1917,8 @@ void Screen::draw() {
     ImGuiViewport* vp = ImGui::GetMainViewport();
     float pad = ui.px(barPadding);
     float bar = ImGui::GetFrameHeight() + 2.f * pad;
-    double at = position(ui.presentTime());
+    double at = position(monotonicNowUs());
 
-    advance(at);
     ImGui::SetNextWindowPos(vp->Pos);
     ImGui::SetNextWindowSize(vp->Size);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
