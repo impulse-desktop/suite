@@ -24,8 +24,9 @@
 
 #import <AppKit/AppKit.h>
 #import <mach/mach.h>
+#import <mach/mach_time.h>
 #import <Carbon/Carbon.h>
-#import <QuartzCore/CAMetalDisplayLink.h>
+#import <CoreVideo/CVDisplayLink.h>
 #import <IOKit/hidsystem/IOLLEvent.h>
 #import <QuartzCore/CAMetalLayer.h>
 
@@ -60,9 +61,38 @@ bool plt::cocoaResizeUsesExactProposal(bool fullscreen, bool viewAvailable, bool
     return fullscreen || (viewAvailable && !liveResize);
 }
 
+namespace plt::cocoa_detail {
+    struct DisplayLinkGate {
+        void attach(void* owner) {
+            __atomic_store_n(&owner_, owner, __ATOMIC_RELEASE);
+        }
+
+        void detach() {
+            __atomic_store_n(&owner_, nullptr, __ATOMIC_RELEASE);
+        }
+
+        void* owner() const {
+            return __atomic_load_n(&owner_, __ATOMIC_ACQUIRE);
+        }
+
+        bool schedule() {
+            bool expected = false;
+            return __atomic_compare_exchange_n(&scheduled_, &expected, true, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+        }
+
+        void dispatched() {
+            __atomic_store_n(&scheduled_, false, __ATOMIC_RELEASE);
+        }
+
+        void* owner_ = nullptr;
+        bool scheduled_ = false;
+    };
+
+}
+
 void cocoaCloseImpl(void* owner);
 void cocoaResizeImpl(void* owner);
-void cocoaFrameImpl(void* owner, CAMetalDisplayLinkUpdate* update);
+void cocoaFrameImpl(void* owner, u64 hostTime);
 void cocoaDisplayLayerImpl(void* owner);
 void cocoaInvalidateImpl(void* owner);
 void cocoaScreenChangedImpl(void* owner);
@@ -102,8 +132,10 @@ void cocoaWakeReady(CFMachPortRef port, void* message, CFIndex size, void* owner
 @end
 
 
-@interface PltDisplayLinkTarget: NSObject <CAMetalDisplayLinkDelegate>
-@property(nonatomic, assign) void* owner;
+@interface PltDisplayLinkTarget: NSObject {
+@public
+    plt::cocoa_detail::DisplayLinkGate gate;
+}
 @end
 
 @implementation PltWindow
@@ -394,14 +426,6 @@ void cocoaWakeReady(CFMachPortRef port, void* message, CFIndex size, void* owner
 @end
 
 @implementation PltDisplayLinkTarget
-
-- (void)metalDisplayLink:(CAMetalDisplayLink*)link needsUpdate:(CAMetalDisplayLinkUpdate*)update {
-    (void)link;
-    if (self.owner != nullptr) {
-        cocoaFrameImpl(self.owner, update);
-    }
-}
-
 @end
 
 namespace {
@@ -545,9 +569,10 @@ namespace {
         void startDisplayLink();
         void screenChanged();
         NSRect textInputScreenRect() const;
-        void draw(CAMetalDisplayLinkUpdate* update);
+        void draw(u64 hostTime);
+        u64 presentTime(u64 hostTime) const;
+        u64 nextPresentTime() const;
         void stopDisplayLink();
-        void dropDisplayLink();
         NSSize willResize(NSSize frameSize) const;
         void focused(bool value);
         void key(NSEvent* event, bool pressed);
@@ -574,8 +599,9 @@ namespace {
         NSWindow* window = nil;
         PltView* view = nil;
         PltWindowDelegate* delegate = nil;
-        CAMetalDisplayLink* displayLink = nil;
+        CVDisplayLinkRef displayLink = nullptr;
         PltDisplayLinkTarget* displayLinkTarget = nil;
+        void* displayLinkContext = nullptr;
         i32 textInputX = 0;
         i32 textInputY = 0;
         u32 textInputWidth = 0;
@@ -768,6 +794,22 @@ namespace {
         return [NSCursor arrowCursor];
     }
 
+    CVReturn displayLinkCallback(CVDisplayLinkRef, const CVTimeStamp*, const CVTimeStamp* outputTime, CVOptionFlags, CVOptionFlags*, void* context) {
+        PltDisplayLinkTarget* const target = (__bridge PltDisplayLinkTarget*)(context);
+        if (!target->gate.schedule()) {
+            return kCVReturnSuccess;
+        }
+        const u64 hostTime = outputTime->hostTime;
+        CFRunLoopPerformBlock(CFRunLoopGetMain(), kCFRunLoopCommonModes, ^{
+          target->gate.dispatched();
+          void* const owner = target->gate.owner();
+          if (owner != nullptr) {
+              cocoaFrameImpl(owner, hostTime);
+          }
+        });
+        CFRunLoopWakeUp(CFRunLoopGetMain());
+        return kCVReturnSuccess;
+    }
 
 }
 
@@ -1107,10 +1149,38 @@ WindowImpl::WindowImpl(PlatformImpl& platform_, const WindowOptions& options)
     [view registerForDraggedTypes:@[ NSPasteboardTypeString, NSPasteboardTypeFileURL ]];
     requestTitle(options.title);
     requestMinimumSize(options.minimumWidth, options.minimumHeight);
+    // CVDisplayLink drives frame pacing. NSView.displayLink (CADisplayLink)
+    // was tried here but broke atomic resize: with a view-owned display link
+    // AppKit stops servicing the layer's synchronous display pass inside the
+    // resize commit, so the new-size surface lands a tick after the bounds
+    // change and the old surface flashes at the new size. screenChanged()
+    // retargets this link across displays.
+    if (CVDisplayLinkCreateWithActiveCGDisplays(&displayLink) == kCVReturnSuccess && displayLink != nullptr) {
+        displayLinkTarget = [PltDisplayLinkTarget new];
+        displayLinkTarget->gate.attach(this);
+        displayLinkContext = (__bridge_retained void*)(displayLinkTarget);
+        if (CVDisplayLinkSetOutputCallback(displayLink, displayLinkCallback, displayLinkContext) != kCVReturnSuccess) {
+            displayLinkTarget->gate.detach();
+            CFBridgingRelease(displayLinkContext);
+            displayLinkContext = nullptr;
+            displayLinkTarget = nil;
+            CVDisplayLinkRelease(displayLink);
+            displayLink = nullptr;
+        }
+    }
 }
 
 WindowImpl::~WindowImpl() {
-    dropDisplayLink();
+    if (displayLinkTarget != nil) {
+        displayLinkTarget->gate.detach();
+    }
+    stopDisplayLink();
+    if (displayLink != nullptr) {
+        CVDisplayLinkRelease(displayLink);
+    }
+    if (displayLinkContext != nullptr) {
+        CFBridgingRelease(displayLinkContext);
+    }
     window.delegate = nil;
     view.owner = nullptr;
     delegate.owner = nullptr;
@@ -1138,24 +1208,33 @@ void WindowImpl::requestFrame() {
 
 void WindowImpl::startDisplayLink() {
     idleFrames = 0;
-    // CAMetalDisplayLink paces frames to the display the window is on and
-    // hands each frame its drawable with the time it is due on the glass,
-    // so the renderer never blocks on nextDrawable. It is made at the first
-    // request, once the renderer has given the layer its device (a link on
-    // a device-less layer throws); paused between requests; a live resize
-    // renders outside it, synchronously, inside AppKit's own transaction
-    // (see resizeFrame()).
-    if (displayLink == nil) {
-        displayLinkTarget = [PltDisplayLinkTarget new];
-        displayLinkTarget.owner = this;
-        displayLink = [[CAMetalDisplayLink alloc] initWithMetalLayer:(CAMetalLayer*)(view.layer)];
-        displayLink.delegate = displayLinkTarget;
-        [displayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+    if (displayLink != nullptr && !CVDisplayLinkIsRunning(displayLink)) {
+        CVDisplayLinkStart(displayLink);
     }
-    displayLink.paused = NO;
 }
 
-void WindowImpl::draw(CAMetalDisplayLinkUpdate* update) {
+u64 WindowImpl::presentTime(u64 hostTime) const {
+    // The link stamps frames on the host clock (mach_absolute_time, which
+    // stops while the machine sleeps); the program's clock is
+    // CLOCK_MONOTONIC, which keeps counting. The two drift apart by the
+    // time slept, so the stamp is carried over on the difference read now.
+    mach_timebase_info_data_t timebase;
+    mach_timebase_info(&timebase);
+    const i64 hostUs = (i64)(hostTime * timebase.numer / timebase.denom / 1000);
+    timespec monotonic;
+    timespec uptime;
+    clock_gettime(CLOCK_MONOTONIC, &monotonic);
+    clock_gettime(CLOCK_UPTIME_RAW, &uptime);
+    const i64 skewUs = ((i64)monotonic.tv_sec - (i64)uptime.tv_sec) * 1000000 + ((i64)monotonic.tv_nsec - (i64)uptime.tv_nsec) / 1000;
+    return (u64)(hostUs + skewUs);
+}
+
+u64 WindowImpl::nextPresentTime() const {
+    NSScreen* const screen = window.screen != nil ? window.screen : [NSScreen mainScreen];
+    return monotonicNowUs() + 1000000 / (u64)(max((NSInteger)(1), screen.maximumFramesPerSecond));
+}
+
+void WindowImpl::draw(u64 hostTime) {
     if (!frameRequested || frame == nullptr) {
         // Idle frames coast for a while before the link stops. Starting
         // one costs a thread wake and a sync to the display, and a
@@ -1170,41 +1249,17 @@ void WindowImpl::draw(CAMetalDisplayLinkUpdate* update) {
         }
         return;
     }
-    // A tick without a drawable (every one of the layer's is still on its
-    // way to the glass) is no frame: the request stands for the next tick.
-    // Rendering it would send the renderer to nextDrawable on a layer the
-    // link owns, which throws, inside the link's own callback.
-    if (update.drawable == nil) {
-        return;
-    }
     idleFrames = 0;
     frameRequested = false;
     WindowInfo current = info();
-    current.surface = (__bridge void*)(update.drawable);
-    // The link's timestamps are CACurrentMediaTime (mach_absolute_time,
-    // which stops while the machine sleeps); the program's clock is
-    // CLOCK_MONOTONIC, which keeps counting. The two drift apart by the
-    // time slept, so the target is carried over on the difference read now.
-    timespec monotonic;
-    timespec uptime;
-    clock_gettime(CLOCK_MONOTONIC, &monotonic);
-    clock_gettime(CLOCK_UPTIME_RAW, &uptime);
-    const double skew = (double)(monotonic.tv_sec - uptime.tv_sec) + (double)(monotonic.tv_nsec - uptime.tv_nsec) / 1e9;
-    current.presentTime = (u64)((update.targetPresentationTimestamp + skew) * 1e6);
+    current.presentTime = presentTime(hostTime);
     frame->frame(current);
 }
 
 void WindowImpl::stopDisplayLink() {
-    displayLink.paused = YES;
-}
-
-void WindowImpl::dropDisplayLink() {
-    if (displayLinkTarget != nil) {
-        displayLinkTarget.owner = nullptr;
+    if (displayLink != nullptr && CVDisplayLinkIsRunning(displayLink)) {
+        CVDisplayLinkStop(displayLink);
     }
-    [displayLink invalidate];
-    displayLink = nil;
-    displayLinkTarget = nil;
 }
 
 void WindowImpl::requestTitle(StringView value) {
@@ -1529,30 +1584,29 @@ void WindowImpl::resized() {
 void WindowImpl::resizeFrame() {
     // A frame the window system asked for during layout. Render synchronously in
     // the current (resize) transaction so bounds and contents commit together.
-    // No surface comes with it: the renderer takes one from the layer itself
-    // and presents it with the transaction, and a layer bound to a
-    // CAMetalDisplayLink refuses nextDrawable, so the link is dropped for this
-    // frame and made again at the next request (a link tick would present in
-    // its own transaction anyway, one step out of sync with the bounds).
-    // frame() never re-enters (request* are async).
-    dropDisplayLink();
+    // Stop the display link for this frame: a link tick would present in its own
+    // transaction, one step out of sync with the bounds. frame() rebuilds the
+    // vterm to the new size and renders; it never re-enters (request* are async).
+    stopDisplayLink();
     frameRequested = false;
     if (frame != nullptr) {
-        frame->frame(info());
+        WindowInfo current = info();
+        current.presentTime = nextPresentTime();
+        frame->frame(current);
     }
-    // The link made again here would be born inside CoreAnimation's commit
-    // and never tick; it is made on the next pass of the run loop.
-    frameRequested = true;
-    CFRunLoopPerformBlock(CFRunLoopGetMain(), kCFRunLoopCommonModes, ^{
-      if (view.owner != nullptr && frameRequested) {
-          startDisplayLink();
-      }
-    });
-    CFRunLoopWakeUp(CFRunLoopGetMain());
+    startDisplayLink();
 }
 
 void WindowImpl::screenChanged() {
-    // CAMetalDisplayLink follows the layer's display by itself.
+    // CVDisplayLink must be retargeted to the window's new display, or it
+    // keeps pacing frames at the previous display's refresh rate.
+    if (displayLink != nullptr) {
+        NSScreen* const screen = window.screen;
+        NSNumber* const number = screen == nil ? nil : screen.deviceDescription[@"NSScreenNumber"];
+        if (number != nil) {
+            CVDisplayLinkSetCurrentCGDisplay(displayLink, (CGDirectDisplayID)(number.unsignedIntValue));
+        }
+    }
     requestFrame();
 }
 
@@ -1920,8 +1974,8 @@ void cocoaResizeImpl(void* owner) {
     ((WindowImpl*)(owner))->resized();
 }
 
-void cocoaFrameImpl(void* owner, CAMetalDisplayLinkUpdate* update) {
-    ((WindowImpl*)(owner))->draw(update);
+void cocoaFrameImpl(void* owner, u64 hostTime) {
+    ((WindowImpl*)(owner))->draw(hostTime);
 }
 
 void cocoaDisplayLayerImpl(void* owner) {

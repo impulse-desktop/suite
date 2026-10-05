@@ -25,6 +25,11 @@
 #import <AppKit/AppKit.h>
 #import <IOSurface/IOSurface.h>
 #import <QuartzCore/CAMetalLayer.h>
+#import <QuartzCore/CAMetalDisplayLink.h>
+
+@interface ImMetalDisplayTarget: NSObject <CAMetalDisplayLinkDelegate>
+@property(nonatomic, assign) void* owner;
+@end
 
 using namespace stl;
 
@@ -226,10 +231,12 @@ namespace {
     struct MetalRenderer final: Renderer {
         plt::Window* host = nullptr;
         plt::LoopWake* wake = nullptr;
+        CAMetalDisplayLink* displayLink = nil;
+        ImMetalDisplayTarget* target = nil;
         Vector<MetalImage*> drawn;
         SmallObjAllocator* smallObjects = nullptr;
         Channel* landed = nullptr;
-        bool transaction = false;
+        bool waiting = false;
         CAMetalLayer* layer = nil;
         NSWindow* window = nil;
         id<MTLDevice> device = nil;
@@ -246,6 +253,7 @@ namespace {
         Tiles tiles;
 
         bool beginFrame(const plt::WindowInfo& info) override;
+        void drawableReady(id<CAMetalDrawable> value);
         void poll();
         bool endFrame(ImDrawData* draw) override;
         u32 maxTextureSide() override;
@@ -1384,6 +1392,15 @@ RenderImage* MetalRenderer::import(ObjPool& pool, SharedImage& shared, bool imag
     }
 }
 
+@implementation ImMetalDisplayTarget
+
+- (void)metalDisplayLink:(CAMetalDisplayLink*)link needsUpdate:(CAMetalDisplayLinkUpdate*)update {
+    (void)link;
+    ((MetalRenderer*)self.owner)->drawableReady(update.drawable);
+}
+
+@end
+
 PollMetal::PollMetal(MetalRenderer* value)
     : renderer(value)
 {
@@ -1417,22 +1434,27 @@ void MetalRenderer::poll() {
     }
 }
 
+void MetalRenderer::drawableReady(id<CAMetalDrawable> value) {
+    if (waiting) {
+        drawable = value;
+        waiting = false;
+        displayLink.paused = YES;
+        host->requestFrame();
+    }
+}
+
 bool MetalRenderer::beginFrame(const plt::WindowInfo& info) {
     @autoreleasepool {
         poll();
         checkCommand(last);
         layer.drawableSize = CGSizeMake(info.width, info.height);
-        drawable = (__bridge id<CAMetalDrawable>)info.surface;
-        transaction = drawable == nil;
-        if (transaction) {
-            layer.presentsWithTransaction = YES;
-            drawable = [layer nextDrawable];
-            if (!drawable) {
-                layer.presentsWithTransaction = NO;
-                return false;
-            }
-        } else {
-            layer.presentsWithTransaction = NO;
+        if (drawable && (drawable.texture.width != info.width || drawable.texture.height != info.height)) {
+            drawable = nil;
+        }
+        if (!drawable) {
+            waiting = true;
+            displayLink.paused = NO;
+            return false;
         }
         return true;
     }
@@ -1460,8 +1482,11 @@ bool MetalRenderer::endFrame(ImDrawData* draw) {
         want = want && edr;
         if (want != wide) {
             setMode(want);
+            drawable = [layer nextDrawable];
+            if (!drawable) {
+                fail(StringView(u8"Metal gives no drawable in the frame's new mode"));
+            }
         }
-        bool wideDrawable = drawable.texture.pixelFormat == MTLPixelFormatRGBA16Float;
         id<MTLCommandBuffer> command = [queue commandBuffer];
         if (!command) {
             fail(StringView(u8"cannot begin Metal command buffer"));
@@ -1483,22 +1508,16 @@ bool MetalRenderer::endFrame(ImDrawData* draw) {
         Flight* flight = smallObjects->make<Flight>(drawn);
         drawn.clear();
         const float clear[4] = {srgbTable[25], srgbTable[25], srgbTable[25], 1.f};
-        tiles.compose(draw, Vector<Layer>(), (u32)drawable.texture.width, (u32)drawable.texture.height, wideDrawable, ++frames, command, clear);
-        encode(command, drawable.texture, wideDrawable ? ShaderOutput::WideLinear : ShaderOutput::Srgb);
+        tiles.compose(draw, Vector<Layer>(), (u32)drawable.texture.width, (u32)drawable.texture.height, wide, ++frames, command, clear);
+        encode(command, drawable.texture, wide ? ShaderOutput::WideLinear : ShaderOutput::Srgb);
         Channel* done = landed;
         plt::LoopWake* completed = wake;
         [command addCompletedHandler:^(id<MTLCommandBuffer>) {
           done->enqueue(flight);
           completed->signal();
         }];
-        if (transaction) {
-            [command commit];
-            [command waitUntilScheduled];
-            [drawable present];
-        } else {
-            [command presentDrawable:drawable];
-            [command commit];
-        }
+        [command presentDrawable:drawable];
+        [command commit];
         last = command;
         drawable = nil;
     }
@@ -1643,6 +1662,15 @@ Renderer* createMetalRenderer(ObjPool& pool, plt::Platform& platform, plt::Windo
     renderer->wake = platform.createLoopWake(pool, *pool.make<PollMetal>(renderer));
     renderer->smallObjects = SmallObjAllocator::create(&pool);
     renderer->landed = Channel::create(&pool, 64);
+    renderer->target = [ImMetalDisplayTarget new];
+    renderer->target.owner = renderer;
+    renderer->displayLink = [[CAMetalDisplayLink alloc] initWithMetalLayer:layer];
+    renderer->displayLink.delegate = renderer->target;
+    renderer->displayLink.paused = YES;
+    [renderer->displayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+    pooledGuard(pool, [renderer] {
+        [renderer->displayLink invalidate];
+    });
     ImGuiIO& io = ImGui::GetIO();
     ImGuiPlatformIO& pio = ImGui::GetPlatformIO();
     io.BackendRendererName = "im_compose";

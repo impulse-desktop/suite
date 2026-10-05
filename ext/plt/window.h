@@ -82,10 +82,6 @@ namespace plt {
         // mode) gives the next refresh from now; one that knows nothing gives
         // now. A renderer or a player targets this moment, not the draw's.
         u64 presentTime = 0;
-        // The frame's presentation surface where the platform hands one out
-        // (Cocoa: a CAMetalDrawable), null where the renderer acquires its own
-        // (Wayland, headless).
-        void* surface = nullptr;
         bool focused = false;
         bool iconified = false;
         bool maximized = false;
