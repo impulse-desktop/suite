@@ -52,7 +52,7 @@ else
         export LDFLAGS="${LDFLAGS:-} -fuse-ld=lld"
     fi
 fi
-if [ "$mode" != build ]; then
+if [ "$mode" != build ] && [ "$mode" != air ]; then
     # the scenarios' compositor, drawn by pixman, with grim for its pixels;
     # the tool's own Vulkan is lavapipe, under the validation layer the
     # scenarios' fixture reads for errors; gdb reads a hung tool's stacks

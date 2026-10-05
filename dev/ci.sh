@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # One CI job: build the tools, or build them and run every scenario, under
-# the toolchain CC/CXX name and the instrumentation the mode asks for. The
+# the toolchain CC/CXX name and the instrumentation the mode asks for; or
+# build video_shader and make the AIR samples a Mac checks (air). The
 # container recipe (dev/ci_linux.sh) installs the packages and sets CC/CXX
 # first; on a developer's box the same modes run with the host's tools.
 set -euo pipefail
@@ -11,7 +12,7 @@ build_dir="$root/.build/ci-$mode"
 jobs=${CI_JOBS:-$(getconf _NPROCESSORS_ONLN)}
 
 case "$mode" in
-    build|test) ;;
+    build|test|air) ;;
     asan|ubsan)
         "$CXX" --version | grep -qi clang
         sanitizer=address
@@ -41,10 +42,14 @@ case "$mode" in
         chmod 1777 "$build_dir/profiles"
         export LLVM_PROFILE_FILE="$build_dir/profiles/%p.profraw"
         ;;
-    *) echo "usage: $0 build|test|asan|ubsan|coverage" >&2; exit 2 ;;
+    *) echo "usage: $0 build|test|air|asan|ubsan|coverage" >&2; exit 2 ;;
 esac
 
 "$CXX" --version
+if [[ "$mode" == air ]]; then
+    python3 ./build -B "$build_dir" -j "$jobs" video_shader
+    exec python3 dev/air/samples.py "$build_dir/dev/video_shader" renderer_metal.mm "$root/.build/air-samples"
+fi
 # One graph for the tools and the scenarios: a second invocation for the
 # scenarios rebuilt the tools (the generated decoder above all) instead of
 # taking them from the cache. -k: a scenario node never fails, but a build
