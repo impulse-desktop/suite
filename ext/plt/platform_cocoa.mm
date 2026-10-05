@@ -547,6 +547,7 @@ namespace {
         NSRect textInputScreenRect() const;
         void draw(CAMetalDisplayLinkUpdate* update);
         void stopDisplayLink();
+        void dropDisplayLink();
         NSSize willResize(NSSize frameSize) const;
         void focused(bool value);
         void key(NSEvent* event, bool pressed);
@@ -1109,8 +1110,7 @@ WindowImpl::WindowImpl(PlatformImpl& platform_, const WindowOptions& options)
 }
 
 WindowImpl::~WindowImpl() {
-    displayLinkTarget.owner = nullptr;
-    [displayLink invalidate];
+    dropDisplayLink();
     window.delegate = nil;
     view.owner = nullptr;
     delegate.owner = nullptr;
@@ -1180,6 +1180,15 @@ void WindowImpl::draw(CAMetalDisplayLinkUpdate* update) {
 
 void WindowImpl::stopDisplayLink() {
     displayLink.paused = YES;
+}
+
+void WindowImpl::dropDisplayLink() {
+    if (displayLinkTarget != nil) {
+        displayLinkTarget.owner = nullptr;
+    }
+    [displayLink invalidate];
+    displayLink = nil;
+    displayLinkTarget = nil;
 }
 
 void WindowImpl::requestTitle(StringView value) {
@@ -1505,16 +1514,18 @@ void WindowImpl::resized() {
 void WindowImpl::resizeFrame() {
     // A frame the window system asked for during layout. Render synchronously in
     // the current (resize) transaction so bounds and contents commit together.
-    // Pause the display link for this frame: a link tick would present in its
-    // own transaction, one step out of sync with the bounds. No surface comes
-    // with it: the renderer takes one itself and presents it with the
-    // transaction. frame() never re-enters (request* are async).
-    stopDisplayLink();
+    // No surface comes with it: the renderer takes one from the layer itself
+    // and presents it with the transaction, and a layer bound to a
+    // CAMetalDisplayLink refuses nextDrawable, so the link is dropped for this
+    // frame and made again at the next request (a link tick would present in
+    // its own transaction anyway, one step out of sync with the bounds).
+    // frame() never re-enters (request* are async).
+    dropDisplayLink();
     frameRequested = false;
     if (frame != nullptr) {
         frame->frame(info());
     }
-    startDisplayLink();
+    requestFrame();
 }
 
 void WindowImpl::screenChanged() {
