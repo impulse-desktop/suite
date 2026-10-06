@@ -17,10 +17,19 @@ for mode in ("av", "video", "audio"):
         s.launch(str(path), ALSOFT_DRIVERS="null", IM_TRACE_FRAMES="1")
         s.focus()
         s.said("ended generation=1")
-        time.sleep(0.5)
+        # the end asks for one more frame, which a software renderer may take
+        # a second to finish, and the compositor's pointer entering and
+        # leaving the mapped window draws too: the frames must stop, not
+        # have stopped already
+        deadline = time.monotonic() + 10
         before = s.client_log().count("im frame ")
-        time.sleep(0.7)
-        assert before == s.client_log().count("im frame "), "EOF keeps rendering"
+        while True:
+            time.sleep(0.7)
+            after = s.client_log().count("im frame ")
+            if after == before:
+                break
+            assert time.monotonic() < deadline, "EOF keeps rendering"
+            before = after
         s.tap(KEY_SPACE)
         s.said("seek generation=2 position_ms=0")
         s.said("ended generation=2")
