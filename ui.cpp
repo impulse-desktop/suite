@@ -467,6 +467,10 @@ void UiImpl::key(const plt::KeyInput& input) {
 
     ImGuiKey key = input.key == plt::InputKey::Printable ? printableKey(input.baseCodepoint) : namedKeys[(int)input.key];
 
+    if (traceFrames) {
+        sysE << StringView(u8"im key: ") << (i64)key << (input.action == plt::InputAction::Press ? StringView(u8" press") : StringView(u8" release")) << StringView(u8" down ") << (i64)ImGui::IsKeyDown(key) << endL;
+    }
+
     if (key != ImGuiKey_None) {
         io.AddKeyEvent(key, input.action == plt::InputAction::Press);
     }
@@ -521,6 +525,10 @@ void UiImpl::scroll(const plt::ScrollInput& input) {
 }
 
 void UiImpl::focus(bool focused) {
+    if (traceFrames) {
+        sysE << StringView(u8"im focus: ") << (i64)focused << endL;
+    }
+
     ImGui::GetIO().AddFocusEvent(focused);
 }
 
