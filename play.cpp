@@ -306,6 +306,7 @@ namespace {
         bool scrubbing = false;
         float scrub = 0.f;
         bool fullscreen = false;
+        u64 clicked = 0;
         bool failed = false;
         Buffer error;
 
@@ -2164,6 +2165,25 @@ void Screen::draw() {
         ImVec2 extent = ImGui::CalcTextSize(text);
 
         dl->AddText(ImVec2(lo.x + (width - extent.x) / 2.f, lo.y + (height - extent.y) / 2.f), ImGui::GetColorU32(ImGuiCol_TextDisabled), text);
+    }
+
+    if (ImGui::IsMouseHoveringRect(lo, hi) && !ImGui::IsAnyItemActive()) {
+        if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+            clicked = 0;
+            fullscreen = !fullscreen;
+            player->ui->requestFullscreen(fullscreen);
+        } else if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            clicked = monotonicNowUs();
+        }
+    }
+
+    if (clicked) {
+        if (monotonicNowUs() - clicked > microseconds(ImGui::GetIO().MouseDoubleClickTime)) {
+            clicked = 0;
+            toggle();
+        } else {
+            ui.requestFrame();
+        }
     }
 
     ImGui::SetCursorScreenPos(ImVec2(lo.x + pad, hi.y + pad));
