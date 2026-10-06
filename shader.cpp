@@ -4627,6 +4627,7 @@ namespace {
         u32 conversion;
         u32 target;
         u32 tile;
+        u32 chromaTaps;
         i32 luma[5];
         i32 components[20];
         u32 planeOffset[4];
@@ -4649,7 +4650,7 @@ namespace {
         float clPositive[2];
     };
 
-    static_assert(sizeof(Facts) == 544);
+    static_assert(sizeof(Facts) == 548);
 
     double segmentValue(double v, const double* k) {
         return k[0] * ::pow(v * k[2] + k[3], k[1]) - k[4];
@@ -4705,6 +4706,7 @@ namespace {
         f.conversion = !strcmp(s.conversion, "convert") ? 1 : 0;
         f.target = strcmp(s.output, "sdr") ? 1 : 0;
         f.tile = s.tile;
+        f.chromaTaps = lanczosTaps;
 
         for (int i = 0; i < 5; i++) {
             f.luma[i] = l.luma[i];
