@@ -238,18 +238,20 @@ decode = library(
 # Linux builds every tool over Vulkan; macOS the runtime's tools over Metal.
 # renderer.cpp holds both renderers under one #if; its Metal half is
 # Objective-C++, which clang compiles by the .mm extension alone, so macOS
-# compiles the file through a copy named renderer.mm
+# compiles the file through a copy named renderer.mm. A generated source
+# is not scanned for its includes; the original is, as the copy's input,
+# and names the generated video_generic.inc the Metal half includes
 wayland_only = ["screenshot.cpp", "chaos_monkey.cpp"]
 renderer_source = "$(S)/renderer.cpp"
 if darwin:
-    renderer_source = "$(B)/renderer.mm"
     command(
         name="renderer_mm",
         inputs=["$(S)/renderer.cpp"],
-        outputs=[renderer_source],
-        cmd=["cp", "$(S)/renderer.cpp", renderer_source],
+        outputs=["$(B)/renderer.mm"],
+        cmd=["cp", "$(S)/renderer.cpp", "$(B)/renderer.mm"],
         descr="CP",
     )
+    renderer_source = {"src": "$(B)/renderer.mm", "inputs": ["$(S)/renderer.cpp"]}
 im_sources = [renderer_source if os.path.basename(path) == "renderer.cpp" else path for path in build.glob("$(S)/*.cpp") if not (darwin and os.path.basename(path) in wayland_only)]
 if darwin:
     warning_flags = [*warning_flags, "-fobjc-arc", "-fblocks"]
