@@ -1160,16 +1160,19 @@ Video::Video(Player* player_)
     for (size_t i = 0; i < framePermits; i++) {
         idle.pushBack(player->pool->make<VideoImage>(player));
     }
-
-    player->post(stream.describeFile());
-
-    if (stream.index >= 0) {
-        player->post(stream.describeVideo());
-    }
 }
 
+// The thread tells the screen about the file and its stream first. The
+// constructor does not: a message it posted would stay in the inbox if a
+// later part of the player failed to construct, as nothing drains it then.
 void Video::run() {
     try {
+        player->post(stream.describeFile());
+
+        if (stream.index >= 0) {
+            player->post(stream.describeVideo());
+        }
+
         for (;;) {
             void* item;
 
@@ -1398,14 +1401,14 @@ Audio::Audio(Player* player_)
     for (ALuint buffer : buffers) {
         idle.pushBack(buffer);
     }
-
-    if (stream.index >= 0) {
-        player->post(stream.describeAudio());
-    }
 }
 
 void Audio::run() {
     try {
+        if (stream.index >= 0) {
+            player->post(stream.describeAudio());
+        }
+
         for (;;) {
             void* item;
 
