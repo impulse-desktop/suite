@@ -789,11 +789,6 @@ bool UiImpl::frame(const plt::WindowInfo& info) {
         text << StringView(u8" tool ") << MS{drew - opened};
         text << StringView(u8" render ") << MS{rendered - drew};
         text << StringView(u8" end ") << MS{monotonicNowUs() - rendered};
-        text << StringView(u8" size ") << (i64)info.width << StringView(u8"x") << (i64)info.height;
-
-        if (window->inLiveResize()) {
-            text << StringView(u8" live");
-        }
 
         if (!presented) {
             text << StringView(u8" unpresented");
