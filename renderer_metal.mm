@@ -34,6 +34,7 @@ using namespace stl;
 
 namespace {
     constexpr u32 drawables = 3;
+    u32 drawablesInFlight = 0;
     constexpr u32 maxTextureSize = 16384;
     constexpr u32 composeTile = 24;
     constexpr u32 composeGroup = 8;
@@ -294,6 +295,8 @@ namespace {
         float sdrWhiteNits = 203.f;
         u64 frames = 0;
         u64 drawableUs = 0;
+        u32 drawableInFlight = 0;
+        double drawableTaken = 0;
         Tiles tiles;
 
         bool beginFrame(u32 width, u32 height) override;
@@ -1520,8 +1523,10 @@ bool MetalRenderer::beginFrame(u32 width, u32 height) {
         layer.drawableSize = CGSizeMake(width, height);
         layer.presentsWithTransaction = window.inLiveResize;
         u64 began = monotonicNowUs();
+        drawableInFlight = __atomic_load_n(&drawablesInFlight, __ATOMIC_ACQUIRE);
         drawable = [layer nextDrawable];
         drawableUs = monotonicNowUs() - began;
+        drawableTaken = CACurrentMediaTime();
         return drawable != nil;
     }
 }
@@ -1586,6 +1591,21 @@ bool MetalRenderer::endFrame(ImDrawData* draw) {
         u64 encoded = monotonicNowUs();
         u64 committed = encoded;
         u64 scheduled = encoded;
+        if (traceFrames) {
+            __atomic_add_fetch(&drawablesInFlight, 1, __ATOMIC_ACQ_REL);
+            u64 number = frames;
+            double taken = drawableTaken;
+            i64 width = (i64)drawable.texture.width;
+            i64 height = (i64)drawable.texture.height;
+            [drawable addPresentedHandler:^(id<MTLDrawable> shown) {
+              u32 left = __atomic_sub_fetch(&drawablesInFlight, 1, __ATOMIC_ACQ_REL);
+              double now = CACurrentMediaTime();
+              StringBuilder line;
+
+              line << StringView(u8"im metal: presented frame=") << (i64)number << StringView(u8" ") << width << StringView(u8"x") << height << StringView(u8" taken_to_screen_us=") << (i64)((shown.presentedTime - taken) * 1e6) << StringView(u8" taken_to_handler_us=") << (i64)((now - taken) * 1e6) << StringView(u8" in_flight=") << (i64)left << StringView(u8"\n");
+              sysE << StringView(line);
+            }];
+        }
         if (layer.presentsWithTransaction) {
             [command commit];
             committed = monotonicNowUs();
@@ -1601,7 +1621,7 @@ bool MetalRenderer::endFrame(ImDrawData* draw) {
         if (traceFrames) {
             StringBuilder line;
 
-            line << StringView(u8"im metal: drawable_us=") << (i64)drawableUs << StringView(u8" encode_us=") << (i64)(encoded - began) << StringView(u8" commit_us=") << (i64)(committed - encoded) << StringView(u8" scheduled_us=") << (i64)(scheduled - committed) << StringView(u8" present_us=") << (i64)(monotonicNowUs() - scheduled) << StringView(u8" transaction=") << (i64)layer.presentsWithTransaction << StringView(u8" ") << (i64)drawable.texture.width << StringView(u8"x") << (i64)drawable.texture.height << StringView(u8"\n");
+            line << StringView(u8"im metal: frame=") << (i64)frames << StringView(u8" in_flight=") << (i64)drawableInFlight << StringView(u8" drawable_us=") << (i64)drawableUs << StringView(u8" encode_us=") << (i64)(encoded - began) << StringView(u8" commit_us=") << (i64)(committed - encoded) << StringView(u8" scheduled_us=") << (i64)(scheduled - committed) << StringView(u8" present_us=") << (i64)(monotonicNowUs() - scheduled) << StringView(u8" transaction=") << (i64)layer.presentsWithTransaction << StringView(u8" ") << (i64)drawable.texture.width << StringView(u8"x") << (i64)drawable.texture.height << StringView(u8"\n");
             sysE << StringView(line);
         }
         last = command;
