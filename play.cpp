@@ -288,6 +288,7 @@ namespace {
         double duration;
         Vector<Made> made;
         u64 madeClock = 0;
+        bool warm[4][3] = {};
         int shownWidth = 0;
         int shownHeight = 0;
         int shownFormat = AV_PIX_FMT_NONE;
@@ -1839,31 +1840,46 @@ RenderShader& Screen::shaderFor(const VideoShader& facts, const ShaderOptions& o
         return *exact->shader;
     }
 
-    if (!exact) {
-        say(StringView(StringBuilder() << StringView(u8"shader miss ") << (i64)options.size[0] << StringView(u8"x") << (i64)options.size[1] << StringView(u8" tiles=") << (i64)options.tiles << StringView(u8" output=") << (i64)options.output << StringView(u8" cached=") << (i64)made.length()));
-        made.pushBack(Made{facts, options, nullptr, nullptr, madeClock});
-        player->shaderInbox->enqueue(new Compile(facts, options));
-    }
-
     ShaderOptions wanted = options;
 
     wanted.generic = true;
 
     if (Made* generic = find(facts, wanted)) {
+        if (!exact) {
+            say(StringView(StringBuilder() << StringView(u8"shader miss ") << (i64)options.size[0] << StringView(u8"x") << (i64)options.size[1] << StringView(u8" tiles=") << (i64)options.tiles << StringView(u8" output=") << (i64)options.output << StringView(u8" cached=") << (i64)made.length()));
+            made.pushBack(Made{facts, options, nullptr, nullptr, madeClock});
+            player->shaderInbox->enqueue(new Compile(facts, options));
+        }
+
         generic->used = madeClock;
 
         return *generic->shader;
     }
 
+    bool ready = warm[(u32)options.output][(u32)options.tiles];
     u64 began = monotonicNowUs();
     ScopedPtr<ObjPool> scratch{ObjPool::fromMemoryRaw()};
-    CompiledShader code = compile(*scratch.ptr, facts, wanted);
+    CompiledShader code = compile(*scratch.ptr, facts, ready ? wanted : options);
     ScopedPtr<ObjPool> owner{ObjPool::fromMemoryRaw()};
-    RenderShader* shader = player->ui->compileKernel(*owner.ptr, code, facts.tile, wanted);
+    RenderShader* shader = player->ui->compileKernel(*owner.ptr, code, facts.tile, ready ? wanted : options);
 
-    made.pushBack(Made{facts, wanted, owner.ptr, shader, madeClock});
+    if (exact && ready) {
+        made.pushBack(Made{facts, wanted, owner.ptr, shader, madeClock});
+    } else if (ready) {
+        made.pushBack(Made{facts, options, nullptr, nullptr, madeClock});
+        made.pushBack(Made{facts, wanted, owner.ptr, shader, madeClock});
+        player->shaderInbox->enqueue(new Compile(facts, options));
+    } else if (exact) {
+        exact->pool = owner.ptr;
+        exact->shader = shader;
+        player->shaderInbox->enqueue(new Compile(facts, wanted));
+    } else {
+        made.pushBack(Made{facts, options, owner.ptr, shader, madeClock});
+        player->shaderInbox->enqueue(new Compile(facts, wanted));
+    }
+
     owner.drop();
-    say(StringView(StringBuilder() << StringView(u8"generic made tiles=") << (i64)wanted.tiles << StringView(u8" output=") << (i64)wanted.output << StringView(u8" us=") << (i64)(monotonicNowUs() - began)));
+    say(StringView(StringBuilder() << (ready ? StringView(u8"generic made ") : StringView(u8"exact made in frame ")) << (i64)options.size[0] << StringView(u8"x") << (i64)options.size[1] << StringView(u8" tiles=") << (i64)options.tiles << StringView(u8" output=") << (i64)options.output << StringView(u8" us=") << (i64)(monotonicNowUs() - began) << StringView(u8" cached=") << (i64)made.length()));
 
     return *shader;
 }
@@ -1882,6 +1898,10 @@ void Screen::adopt(Compiled& compiled) {
         known->shader = compiled.shader;
     } else {
         made.pushBack(Made{compiled.facts, compiled.options, compiled.pool, compiled.shader, madeClock});
+    }
+
+    if (compiled.options.generic) {
+        warm[(u32)compiled.options.output][(u32)compiled.options.tiles] = true;
     }
 
     compiled.pool = nullptr;
