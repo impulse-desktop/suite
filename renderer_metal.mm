@@ -298,6 +298,7 @@ namespace {
         u32 drawableInFlight = 0;
         double drawableTaken = 0;
         u64 buffersUs = 0;
+        i64 lastStatus = -1;
         Tiles tiles;
 
         bool beginFrame(u32 width, u32 height) override;
@@ -1408,18 +1409,33 @@ void MetalRenderer::updateTextures(ImDrawData* draw) {
             MTLTextureDescriptor* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm_sRGB width:(NSUInteger)data->Width height:(NSUInteger)data->Height mipmapped:NO];
             descriptor.storageMode = MTLStorageModeManaged;
             descriptor.usage = MTLTextureUsageShaderRead;
+            u64 creating = monotonicNowUs();
             texture->texture = [device newTextureWithDescriptor:descriptor];
             if (!texture->texture) {
                 fail(StringView(u8"cannot allocate an interface texture"));
             }
             [texture->texture replaceRegion:MTLRegionMake2D(0, 0, (NSUInteger)data->Width, (NSUInteger)data->Height) mipmapLevel:0 withBytes:data->GetPixels() bytesPerRow:(NSUInteger)data->GetPitch()];
+            if (traceFrames) {
+                StringBuilder line;
+
+                line << StringView(u8"im metal: texture create ") << (i64)data->Width << StringView(u8"x") << (i64)data->Height << StringView(u8" us=") << (i64)(monotonicNowUs() - creating) << StringView(u8"\n");
+                sysE << StringView(line);
+            }
             texture->opaque = opaquePixels((const u8*)data->GetPixels(), (size_t)data->GetPitch(), (u32)data->Width, (u32)data->Height);
             data->BackendUserData = texture;
             data->SetTexID((ImTextureID)(uintptr_t)texture);
             data->SetStatus(ImTextureStatus_OK);
         } else if (data->Status == ImTextureStatus_WantUpdates) {
             MetalTexture* texture = (MetalTexture*)data->BackendUserData;
+            u64 waiting = monotonicNowUs();
+            i64 status = texture->lastUse ? (i64)texture->lastUse.status : -1;
             [texture->lastUse waitUntilCompleted];
+            if (traceFrames) {
+                StringBuilder line;
+
+                line << StringView(u8"im metal: texture update ") << (i64)data->Width << StringView(u8"x") << (i64)data->Height << StringView(u8" rects=") << (i64)data->Updates.Size << StringView(u8" last_use_status=") << status << StringView(u8" wait_us=") << (i64)(monotonicNowUs() - waiting) << StringView(u8"\n");
+                sysE << StringView(line);
+            }
             for (const ImTextureRect& rect : data->Updates) {
                 [texture->texture replaceRegion:MTLRegionMake2D(rect.x, rect.y, rect.w, rect.h) mipmapLevel:0 withBytes:data->GetPixelsAt(rect.x, rect.y) bytesPerRow:(NSUInteger)data->GetPitch()];
             }
@@ -1431,7 +1447,15 @@ void MetalRenderer::updateTextures(ImDrawData* draw) {
             data->SetStatus(ImTextureStatus_OK);
         } else if (data->Status == ImTextureStatus_WantDestroy && data->UnusedFrames >= (int)drawables) {
             MetalTexture* texture = (MetalTexture*)data->BackendUserData;
+            u64 waiting = monotonicNowUs();
+            i64 status = texture->lastUse ? (i64)texture->lastUse.status : -1;
             [texture->lastUse waitUntilCompleted];
+            if (traceFrames) {
+                StringBuilder line;
+
+                line << StringView(u8"im metal: texture destroy ") << (i64)data->Width << StringView(u8"x") << (i64)data->Height << StringView(u8" last_use_status=") << status << StringView(u8" wait_us=") << (i64)(monotonicNowUs() - waiting) << StringView(u8"\n");
+                sysE << StringView(line);
+            }
             smallObjects->release(texture);
             data->BackendUserData = nullptr;
             data->SetTexID(ImTextureID_Invalid);
@@ -1527,6 +1551,7 @@ bool MetalRenderer::beginFrame(u32 width, u32 height) {
         layer.presentsWithTransaction = window.inLiveResize;
         u64 began = monotonicNowUs();
         drawableInFlight = __atomic_load_n(&drawablesInFlight, __ATOMIC_ACQUIRE);
+        lastStatus = last ? (i64)last.status : -1;
         drawable = [layer nextDrawable];
         drawableUs = monotonicNowUs() - began;
         drawableTaken = CACurrentMediaTime();
@@ -1590,7 +1615,16 @@ bool MetalRenderer::endFrame(ImDrawData* draw) {
         encode(command, drawable.texture, wide ? ShaderOutput::WideLinear : ShaderOutput::Srgb);
         Channel* done = landed;
         plt::LoopWake* completed = wake;
-        [command addCompletedHandler:^(id<MTLCommandBuffer>) {
+        bool tracing = traceFrames;
+        u64 numbered = frames;
+        u64 encoding = monotonicNowUs();
+        [command addCompletedHandler:^(id<MTLCommandBuffer> finished) {
+          if (tracing) {
+              StringBuilder line;
+
+              line << StringView(u8"im metal: completed frame=") << (i64)numbered << StringView(u8" encode_to_completed_us=") << (i64)(monotonicNowUs() - encoding) << StringView(u8" gpu_us=") << (i64)((finished.GPUEndTime - finished.GPUStartTime) * 1e6) << StringView(u8" status=") << (i64)finished.status << StringView(u8"\n");
+              sysE << StringView(line);
+          }
           done->enqueue(flight);
           completed->signal();
         }];
@@ -1627,7 +1661,7 @@ bool MetalRenderer::endFrame(ImDrawData* draw) {
         if (traceFrames) {
             StringBuilder line;
 
-            line << StringView(u8"im metal: frame=") << (i64)frames << StringView(u8" in_flight=") << (i64)drawableInFlight << StringView(u8" drawable_us=") << (i64)drawableUs << StringView(u8" textures_us=") << (i64)(textured - began) << StringView(u8" command_us=") << (i64)(commanded - textured) << StringView(u8" compose_us=") << (i64)(composed - commanded) << StringView(u8" buffers_us=") << (i64)buffersUs << StringView(u8" encode_us=") << (i64)(encoded - composed) << StringView(u8" commit_us=") << (i64)(committed - encoded) << StringView(u8" scheduled_us=") << (i64)(scheduled - committed) << StringView(u8" present_us=") << (i64)(monotonicNowUs() - scheduled) << StringView(u8" transaction=") << (i64)layer.presentsWithTransaction << StringView(u8" ") << (i64)drawable.texture.width << StringView(u8"x") << (i64)drawable.texture.height << StringView(u8"\n");
+            line << StringView(u8"im metal: frame=") << (i64)frames << StringView(u8" in_flight=") << (i64)drawableInFlight << StringView(u8" last_status=") << lastStatus << StringView(u8" drawable_us=") << (i64)drawableUs << StringView(u8" textures_us=") << (i64)(textured - began) << StringView(u8" command_us=") << (i64)(commanded - textured) << StringView(u8" compose_us=") << (i64)(composed - commanded) << StringView(u8" buffers_us=") << (i64)buffersUs << StringView(u8" encode_us=") << (i64)(encoded - composed) << StringView(u8" commit_us=") << (i64)(committed - encoded) << StringView(u8" scheduled_us=") << (i64)(scheduled - committed) << StringView(u8" present_us=") << (i64)(monotonicNowUs() - scheduled) << StringView(u8" transaction=") << (i64)layer.presentsWithTransaction << StringView(u8" ") << (i64)drawable.texture.width << StringView(u8"x") << (i64)drawable.texture.height << StringView(u8"\n");
             sysE << StringView(line);
         }
         last = command;
