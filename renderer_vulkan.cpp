@@ -2493,9 +2493,6 @@ void Gpu::setupCompose(ObjPool& pool) {
         }
     });
     plain[(u32)ShaderOutput::Srgb] = pipeline(compose_comp_spv, sizeof(compose_comp_spv), ShaderOutput::Srgb, false);
-    generic[(u32)ShaderOutput::Srgb][0] = pipeline(compose_generic_comp_spv, sizeof(compose_generic_comp_spv), ShaderOutput::Srgb, false);
-    generic[(u32)ShaderOutput::Srgb][1] = pipeline(compose_generic_comp_spv, sizeof(compose_generic_comp_spv), ShaderOutput::Srgb, true);
-    genericLayer[(u32)ShaderOutput::Srgb] = pipeline(compose_generic_layer_comp_spv, sizeof(compose_generic_layer_comp_spv), ShaderOutput::Srgb, false);
 }
 
 VkSurfaceKHR Gpu::createSurface(plt::Window& window) {
@@ -2542,9 +2539,6 @@ void Gpu::setupWindow(ObjPool& pool, VkSurfaceKHR surface, int w, int h) {
 
     if (present.hdr) {
         plain[(u32)ShaderOutput::Pq] = pipeline(compose_comp_spv, sizeof(compose_comp_spv), ShaderOutput::Pq, false);
-        generic[(u32)ShaderOutput::Pq][0] = pipeline(compose_generic_comp_spv, sizeof(compose_generic_comp_spv), ShaderOutput::Pq, false);
-        generic[(u32)ShaderOutput::Pq][1] = pipeline(compose_generic_comp_spv, sizeof(compose_generic_comp_spv), ShaderOutput::Pq, true);
-        genericLayer[(u32)ShaderOutput::Pq] = pipeline(compose_generic_layer_comp_spv, sizeof(compose_generic_layer_comp_spv), ShaderOutput::Pq, false);
     }
 
     createSwapchain((u32)w, (u32)h);
