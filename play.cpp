@@ -399,10 +399,6 @@ namespace {
         text << whole / 60 << StringView(u8":") << (whole % 60 < 10 ? StringView(u8"0") : StringView(u8"")) << whole % 60;
     }
 
-    static i64 milliseconds(double seconds) {
-        return (i64)llround(seconds * 1000.);
-    }
-
     static u64 microseconds(double seconds) {
         return seconds > 0. ? (u64)ceil(seconds * 1e6) : 1;
     }
@@ -1527,7 +1523,7 @@ Screen::Screen(Player* player_)
     }
 
     fiber = player->ui->platform()->scheduler()->create(*player->pool, *this, controllerStack);
-    player->ui->trace(StringView(StringBuilder() << StringView(u8"opened duration_ms=") << milliseconds(duration) << StringView(u8" video=") << (i64)hasVideo << StringView(u8" audio=") << (i64)hasAudio));
+    TRACE(player->ui, StringView(StringBuilder() << StringView(u8"opened duration_ms=") << (i64)llround(duration * 1000.) << StringView(u8" video=") << (i64)hasVideo << StringView(u8" audio=") << (i64)hasAudio));
 }
 
 Screen::~Screen() noexcept {
@@ -1684,7 +1680,7 @@ void Screen::finishIfEnded(u64 now) {
     ended = true;
     playing = false;
     setClock(position(now), false, now);
-    player->ui->trace(StringView(StringBuilder() << StringView(u8"ended generation=") << (i64)generation));
+    TRACE(player->ui, StringView(StringBuilder() << StringView(u8"ended generation=") << (i64)generation));
     player->ui->requestFrame();
 }
 
@@ -1705,7 +1701,7 @@ void Screen::show(Frame* frame) {
         makeRender(frame->image);
     }
 
-    player->ui->trace(StringView(StringBuilder() << StringView(u8"show generation=") << (i64)frame->generation << StringView(u8" position_ms=") << milliseconds(frame->pts)));
+    TRACE(player->ui, StringView(StringBuilder() << StringView(u8"show generation=") << (i64)frame->generation << StringView(u8" position_ms=") << (i64)llround(frame->pts * 1000.)));
     player->ui->requestFrame();
 }
 
@@ -1752,7 +1748,7 @@ void Screen::makeRender(VideoImage* image) {
         shownWidth = frame->width;
         shownHeight = frame->height;
         shownFormat = frame->format;
-        player->ui->trace(StringView(StringBuilder() << StringView(u8"video ") << (i64)frame->width << StringView(u8"x") << (i64)frame->height << StringView(u8" ") << StringView(av_get_pix_fmt_name((AVPixelFormat)frame->format))));
+        TRACE(player->ui, StringView(StringBuilder() << StringView(u8"video ") << (i64)frame->width << StringView(u8"x") << (i64)frame->height << StringView(u8" ") << StringView(av_get_pix_fmt_name((AVPixelFormat)frame->format))));
     }
 
     bool hdr = frame->color_trc == AVCOL_TRC_SMPTE2084 || frame->color_trc == AVCOL_TRC_ARIB_STD_B67;
@@ -1823,8 +1819,6 @@ RenderShader& Screen::shaderFor(const VideoShader& facts, const ShaderOptions& o
 }
 
 void Screen::adopt(Compiled& compiled) {
-    static const char* outputs[4] = {"srgb", "pq", "linear", "wide"};
-    static const char* tiles[3] = {"inside", "edge", "mixed"};
     Made* known = find(compiled.facts, compiled.options);
 
     if (known && known->shader) {
@@ -1839,7 +1833,7 @@ void Screen::adopt(Compiled& compiled) {
     }
 
     compiled.pool = nullptr;
-    player->ui->trace(StringView(StringBuilder() << StringView(u8"compiled video shader ") << StringView(compiled.facts.layout->name) << StringView(u8" ") << StringView(compiled.facts.system) << StringView(u8" ") << StringView(compiled.facts.transfer) << StringView(u8" ") << StringView(compiled.facts.conversion) << StringView(u8" ") << StringView(compiled.facts.output) << StringView(u8" ") << (u64)compiled.options.size[0] << StringView(u8"x") << (u64)compiled.options.size[1] << StringView(u8" ") << StringView(outputs[(int)compiled.options.output]) << StringView(u8" ") << StringView(tiles[(int)compiled.options.tiles]) << StringView(u8" compile_us=") << compiled.compileUs << StringView(u8" driver_us=") << compiled.driverUs));
+    TRACE(player->ui, StringView(StringBuilder() << StringView(u8"compiled video shader ") << StringView(compiled.facts.layout->name) << StringView(u8" ") << StringView(compiled.facts.system) << StringView(u8" ") << StringView(compiled.facts.transfer) << StringView(u8" ") << StringView(compiled.facts.conversion) << StringView(u8" ") << StringView(compiled.facts.output) << StringView(u8" ") << (u64)compiled.options.size[0] << StringView(u8"x") << (u64)compiled.options.size[1] << StringView(u8" ") << (i64)compiled.options.output << StringView(u8" ") << (i64)compiled.options.tiles << StringView(u8" compile_us=") << compiled.compileUs << StringView(u8" driver_us=") << compiled.driverUs));
     trim();
     player->ui->requestFrame();
 }
@@ -1973,7 +1967,7 @@ void Screen::seek(double to, bool play) {
     }
 
     waiting.clear();
-    player->ui->trace(StringView(StringBuilder() << StringView(u8"seek generation=") << (i64)generation << StringView(u8" position_ms=") << milliseconds(to)));
+    TRACE(player->ui, StringView(StringBuilder() << StringView(u8"seek generation=") << (i64)generation << StringView(u8" position_ms=") << (i64)llround(to * 1000.)));
     sendControl(player->videoInbox);
     sendControl(player->audioInbox);
     player->ui->requestFrame();
@@ -1999,7 +1993,7 @@ void Screen::toggle() {
         setClock(position(now), false, now);
     }
 
-    player->ui->trace(StringView(StringBuilder() << (playing ? StringView(u8"play generation=") : StringView(u8"pause generation=")) << (i64)generation));
+    TRACE(player->ui, StringView(StringBuilder() << (playing ? StringView(u8"play generation=") : StringView(u8"pause generation=")) << (i64)generation));
     sendControl(player->audioInbox);
     player->ui->requestFrame();
     resume();
@@ -2017,7 +2011,7 @@ void Screen::halt(StringView text) {
     failed = true;
     error = Buffer(text);
     sysE << StringView(u8"im play: ") << text << endL;
-    player->ui->trace(StringView(StringBuilder() << StringView(u8"failed: ") << text));
+    TRACE(player->ui, StringView(StringBuilder() << StringView(u8"failed: ") << text));
     player->videoInbox->enqueue(new Stop());
     player->audioInbox->enqueue(new Stop());
     player->ui->requestFrame();

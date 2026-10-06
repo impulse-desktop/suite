@@ -763,7 +763,7 @@ bool UiImpl::frame(const plt::WindowInfo& info) {
     if (info.width != presentedWidth || info.height != presentedHeight) {
         presentedWidth = info.width;
         presentedHeight = info.height;
-        trace(StringView(StringBuilder() << StringView(u8"presenting ") << (i64)info.width << StringView(u8"x") << (i64)info.height));
+        TRACE(this, StringView(StringBuilder() << StringView(u8"presenting ") << (i64)info.width << StringView(u8"x") << (i64)info.height));
     }
 
     u64 begun = monotonicNowUs();
@@ -836,7 +836,7 @@ int UiImpl::drawFrame() {
 }
 
 void UiImpl::close() {
-    trace(StringView(u8"closed"));
+    TRACE(this, StringView(u8"closed"));
 
     if (gone) {
         return;

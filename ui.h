@@ -72,3 +72,9 @@ struct Ui {
     virtual void trace(stl::StringView what) = 0;
     virtual void timing(stl::StringView line) = 0;
 };
+
+#ifdef IM_FOR_TESTS
+    #define TRACE(ui, what) (ui)->trace(what)
+#else
+    #define TRACE(ui, what) ((void)0)
+#endif

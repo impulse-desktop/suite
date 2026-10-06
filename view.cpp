@@ -622,7 +622,7 @@ void ViewApp::take(Decoded& decoded) {
         } else if (!decoded.error.empty() && entry->thumb != Load::Ready) {
             entry->thumb = Load::Failed;
             entry->error = Buffer(StringView(decoded.error));
-            ui->trace(StringView(StringBuilder() << StringView(u8"no thumbnail ") << name << StringView(u8": ") << StringView(decoded.error)));
+            TRACE(ui, StringView(StringBuilder() << StringView(u8"no thumbnail ") << name << StringView(u8": ") << StringView(decoded.error)));
         }
     }
 
@@ -631,7 +631,7 @@ void ViewApp::take(Decoded& decoded) {
     }
 
     if (decoded.request != showRequest || entries.empty() || StringView(entries[current]->path) != path) {
-        ui->trace(StringView(StringBuilder() << StringView(u8"discarded image ") << name));
+        TRACE(ui, StringView(StringBuilder() << StringView(u8"discarded image ") << name));
         return;
     }
 
@@ -641,9 +641,9 @@ void ViewApp::take(Decoded& decoded) {
     replaceShown(next);
 
     if (!next->error.empty()) {
-        ui->trace(StringView(StringBuilder() << StringView(u8"cannot show ") << name << StringView(u8": ") << StringView(next->error)));
+        TRACE(ui, StringView(StringBuilder() << StringView(u8"cannot show ") << name << StringView(u8": ") << StringView(next->error)));
     } else {
-        ui->trace(StringView(StringBuilder() << StringView(u8"showing ") << name << StringView(u8" ") << (i64)next->width << StringView(u8"x") << (i64)next->height));
+        TRACE(ui, StringView(StringBuilder() << StringView(u8"showing ") << name << StringView(u8" ") << (i64)next->width << StringView(u8"x") << (i64)next->height));
     }
 }
 
@@ -661,7 +661,7 @@ void ViewApp::adopt(Listed& listed) {
 
         text << path << StringView(u8": ") << StringView(listed.error);
         problems = Buffer(StringView(StringBuilder() << StringView(problems) << (problems.empty() ? StringView() : StringView(u8"\n")) << StringView(text)));
-        ui->trace(StringView(text));
+        TRACE(ui, StringView(text));
     }
 
     for (StringView name : listed.names) {
@@ -724,7 +724,7 @@ void ViewApp::adopt(Listed& listed) {
     entries.append(found.begin(), found.end());
     entries.append(kept.begin() + at, kept.end());
     scrollToCurrent = true;
-    ui->trace(StringView(StringBuilder() << StringView(u8"listed ") << (i64)entries.length()));
+    TRACE(ui, StringView(StringBuilder() << StringView(u8"listed ") << (i64)entries.length()));
 
     for (size_t i = 0; i < entries.length(); i++) {
         if (entries[i] == chosen) {
@@ -760,7 +760,7 @@ void ViewApp::submit() {
 
         entry.loading = true;
         showPending = false;
-        ui->trace(StringView(StringBuilder() << StringView(u8"loading image ") << entry.name()));
+        TRACE(ui, StringView(StringBuilder() << StringView(u8"loading image ") << entry.name()));
         dispatch(owner->make<Decoded>(owner, *this, entry, maxSide, thumbs, showRequest));
     }
 
@@ -788,7 +788,7 @@ void ViewApp::submit() {
             ObjPool* owner = ObjPool::fromMemoryRaw();
 
             entry.loading = true;
-            ui->trace(StringView(StringBuilder() << StringView(u8"loading thumbnail ") << entry.name()));
+            TRACE(ui, StringView(StringBuilder() << StringView(u8"loading thumbnail ") << entry.name()));
             dispatch(owner->make<Decoded>(owner, *this, entry, thumbSide, 0, 0));
         }
     }
@@ -808,7 +808,7 @@ void ViewApp::setThumb(Entry& entry, u32 side, Image& image) {
     entry.thumbH = image.height();
     entry.thumbSide = side;
     entry.thumb = Load::Ready;
-    ui->trace(StringView(StringBuilder() << StringView(u8"thumbnail ") << entry.name()));
+    TRACE(ui, StringView(StringBuilder() << StringView(u8"thumbnail ") << entry.name()));
 }
 
 void ViewApp::select(size_t index) {
@@ -816,7 +816,7 @@ void ViewApp::select(size_t index) {
     ++showRequest;
     showPending = true;
     ui->requestFrame();
-    ui->trace(StringView(StringBuilder() << StringView(u8"selected ") << entries[index]->name()));
+    TRACE(ui, StringView(StringBuilder() << StringView(u8"selected ") << entries[index]->name()));
 }
 
 void ViewApp::show(size_t index) {
@@ -856,7 +856,7 @@ void ViewApp::setZoom(float value) {
     zoom = clampf(value, zoomMin, zoomMax);
     fit = false;
     ui->requestFrame();
-    ui->trace(StringView(StringBuilder() << StringView(u8"zoom ") << (i64)(zoom * 100.f + .5f)));
+    TRACE(ui, StringView(StringBuilder() << StringView(u8"zoom ") << (i64)(zoom * 100.f + .5f)));
 }
 
 void ViewApp::fitView() {
@@ -864,7 +864,7 @@ void ViewApp::fitView() {
     fit = true;
     panX = 0.f;
     panY = 0.f;
-    ui->trace(StringView(u8"fit"));
+    TRACE(ui, StringView(u8"fit"));
 }
 
 void ViewApp::keys() {
@@ -907,22 +907,22 @@ void ViewApp::keys() {
     if (ImGui::IsKeyPressed(ImGuiKey_F) || ImGui::IsKeyPressed(ImGuiKey_F11)) {
         fullscreen = !fullscreen;
         ui->requestFullscreen(fullscreen);
-        ui->trace(fullscreen ? StringView(u8"fullscreen on") : StringView(u8"fullscreen off"));
+        TRACE(ui, fullscreen ? StringView(u8"fullscreen on") : StringView(u8"fullscreen off"));
     }
 
     if (ImGui::IsKeyPressed(ImGuiKey_R)) {
         rotation = (rotation + (io.KeyShift ? 3 : 1)) % 4;
-        ui->trace(StringView(StringBuilder() << StringView(u8"rotated ") << (i64)(rotation * 90)));
+        TRACE(ui, StringView(StringBuilder() << StringView(u8"rotated ") << (i64)(rotation * 90)));
     }
 
     if (ImGui::IsKeyPressed(ImGuiKey_Tab)) {
         panel = !panel;
-        ui->trace(panel ? StringView(u8"panel on") : StringView(u8"panel off"));
+        TRACE(ui, panel ? StringView(u8"panel on") : StringView(u8"panel off"));
     }
 
     if (ImGui::IsKeyPressed(ImGuiKey_I)) {
         info = !info;
-        ui->trace(info ? StringView(u8"info on") : StringView(u8"info off"));
+        TRACE(ui, info ? StringView(u8"info on") : StringView(u8"info off"));
     }
 }
 

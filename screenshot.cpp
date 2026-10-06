@@ -893,7 +893,7 @@ int mainScreenshot(ObjPool& pool, int argc, char** argv) {
     options.renderer.shared = img.native;
     Ui& ui = *Ui::create(pool, StringView(u8"screenshot"), options);
     auto body = makeRunable([&] {
-        ui.trace(loaded && img.color.hdr ? StringView(u8"surface HDR10 PQ") : StringView(u8"surface sRGB"));
+        TRACE(&ui, loaded && img.color.hdr ? StringView(u8"surface HDR10 PQ") : StringView(u8"surface sRGB"));
         if (loaded) {
             int w, h;
             initialWindowSize(ui, img, w, h);

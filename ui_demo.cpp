@@ -31,7 +31,7 @@ int mainUiDemo(ObjPool& pool, int, char**) {
             ImGui::End();
 
             if (ok) {
-                ui.trace(StringView(u8"ok"));
+                TRACE(&ui, StringView(u8"ok"));
 
                 return;
             }
