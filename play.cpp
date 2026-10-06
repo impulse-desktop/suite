@@ -2506,7 +2506,7 @@ void Screen::drawPanel() {
 
             label << StringView(u8"##track") << (i64)track.index;
 
-            if (ImGui::Selectable(label.cStr(), track.index == current) && track.index != current) {
+            if (ImGui::Selectable(label.cStr(), track.index == current, 0, ImVec2(ImGui::GetContentRegionAvail().x, 0.f)) && track.index != current) {
                 select(type, track.index);
             }
         }
