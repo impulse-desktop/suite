@@ -195,6 +195,7 @@ namespace {
         AVPacket* packet = nullptr;
         AVFrame* frame = nullptr;
         int index = -1;
+        int cues = -1;
         double start = 0.;
         double duration = 0.;
         bool eof = false;
@@ -881,6 +882,13 @@ Stream::Stream(Player* player, AVMediaType type, void* slots) {
     }
 
     index = found;
+    cues = index;
+
+    int keyed = av_find_best_stream(format, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+
+    if (keyed >= 0 && !(format->streams[keyed]->disposition & AV_DISPOSITION_ATTACHED_PIC)) {
+        cues = keyed;
+    }
 
     for (unsigned i = 0; i < format->nb_streams; i++) {
         if ((int)i != index) {
@@ -932,10 +940,10 @@ Stream::Stream(Player* player, AVMediaType type, void* slots) {
 }
 
 void Stream::seek(double position) {
-    i64 ts = av_rescale_q((i64)((position + start) * AV_TIME_BASE), AVRational{1, AV_TIME_BASE}, format->streams[index]->time_base);
+    i64 ts = av_rescale_q((i64)((position + start) * AV_TIME_BASE), AVRational{1, AV_TIME_BASE}, format->streams[cues]->time_base);
 
-    if (avformat_seek_file(format, index, INT64_MIN, ts, ts, 0) < 0) {
-        av_seek_frame(format, index, ts, AVSEEK_FLAG_BACKWARD);
+    if (avformat_seek_file(format, cues, INT64_MIN, ts, ts, 0) < 0) {
+        av_seek_frame(format, cues, ts, AVSEEK_FLAG_BACKWARD);
     }
 
     avcodec_flush_buffers(codec);
