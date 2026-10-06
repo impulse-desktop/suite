@@ -401,6 +401,13 @@ namespace {
         return (i64)llround(seconds * 1000.);
     }
 
+    static void say(StringView what) {
+        StringBuilder line;
+
+        line << StringView(u8"im play ") << (i64)(monotonicNowUs() / 1000) << StringView(u8" ") << what << StringView(u8"\n");
+        sysE << StringView(line);
+    }
+
     static u64 microseconds(double seconds) {
         return seconds > 0. ? (u64)ceil(seconds * 1e6) : 1;
     }
@@ -847,6 +854,7 @@ void Slots::fill(AVFrame* frame, int width, int height, const int* align) {
 
 Stream::Stream(Player* player, AVMediaType type, void* slots) {
     StringView path(player->path);
+    u64 began = monotonicNowUs();
     int e = avformat_open_input(&format, player->path, nullptr, nullptr);
 
     if (e < 0) {
@@ -919,6 +927,8 @@ Stream::Stream(Player* player, AVMediaType type, void* slots) {
     if (e < 0) {
         failAv(path, e);
     }
+
+    say(StringView(StringBuilder() << StringView(u8"stream ") << StringView(av_get_media_type_string(type)) << StringView(u8" index=") << (i64)index << StringView(u8" start_ms=") << milliseconds(start) << StringView(u8" duration_ms=") << milliseconds(duration) << StringView(u8" open_us=") << (i64)(monotonicNowUs() - began)));
 }
 
 void Stream::seek(double position) {
@@ -1010,6 +1020,7 @@ void Video::run() {
                 apply(*control);
             } else if (Surface* surface = cast<Surface>(message.ptr)) {
                 idle.pushBack(surface->image);
+                say(StringView(StringBuilder() << StringView(u8"video surface back idle=") << (i64)idle.length()));
             }
         }
     } catch (...) {
@@ -1025,12 +1036,16 @@ void Video::apply(const Control& control) {
     generation = control.generation;
     target = control.position;
     next = target;
+    say(StringView(StringBuilder() << StringView(u8"video control gen=") << (i64)generation << StringView(u8" target_ms=") << milliseconds(target) << StringView(u8" idle=") << (i64)idle.length()));
 
     if (stream.index < 0) {
         return;
     }
 
+    u64 began = monotonicNowUs();
+
     stream.seek(target);
+    say(StringView(StringBuilder() << StringView(u8"video seek_us=") << (i64)(monotonicNowUs() - began)));
     av_frame_unref(last);
     decoded = false;
     ended = false;
@@ -1062,6 +1077,7 @@ bool Video::step() {
 
     if (e == AVERROR_EOF) {
         ended = true;
+        say(StringView(StringBuilder() << StringView(u8"video eof gen=") << (i64)generation));
         player->post(new End(generation));
 
         return false;
@@ -1078,6 +1094,7 @@ bool Video::step() {
     next = pts + length;
 
     if (length > 0. ? pts + length <= target : pts < target) {
+        say(StringView(StringBuilder() << StringView(u8"video decoded pts_ms=") << milliseconds(pts) << StringView(u8" length_ms=") << milliseconds(length) << StringView(u8" target_ms=") << milliseconds(target) << StringView(u8" skipped")));
         av_frame_unref(last);
         av_frame_move_ref(last, frame);
         lastPts = pts;
@@ -1085,6 +1102,7 @@ bool Video::step() {
         return true;
     }
 
+    say(StringView(StringBuilder() << StringView(u8"video decoded pts_ms=") << milliseconds(pts) << StringView(u8" length_ms=") << milliseconds(length) << StringView(u8" target_ms=") << milliseconds(target) << StringView(u8" kept")));
     av_frame_unref(last);
     decoded = true;
     deliver();
@@ -1094,6 +1112,8 @@ bool Video::step() {
 
 bool Video::deliver() {
     if (idle.empty()) {
+        say(StringView(StringBuilder() << StringView(u8"video waits for a surface pts_ms=") << milliseconds(pts)));
+
         return false;
     }
 
@@ -1110,6 +1130,7 @@ bool Video::deliver() {
     }
 
     player->post(new Frame(image, generation, pts, aspect));
+    say(StringView(StringBuilder() << StringView(u8"video delivered gen=") << (i64)generation << StringView(u8" pts_ms=") << milliseconds(pts) << StringView(u8" idle=") << (i64)idle.length()));
     decoded = false;
 
     return true;
@@ -1255,6 +1276,8 @@ void Audio::run() {
 }
 
 void Audio::apply(const Control& control) {
+    say(StringView(StringBuilder() << StringView(u8"audio control gen=") << (i64)control.generation << StringView(u8" target_ms=") << milliseconds(control.position) << StringView(u8" playing=") << (i64)control.playing << StringView(u8" state=") << (i64)state() << StringView(u8" ring=") << (i64)ringLength << StringView(u8" idle=") << (i64)idle.length()));
+
     if (control.generation != generation) {
         generation = control.generation;
         target = control.position;
@@ -1269,7 +1292,11 @@ void Audio::apply(const Control& control) {
 
         ringHead = 0;
         ringLength = 0;
+
+        u64 began = monotonicNowUs();
+
         stream.seek(target);
+        say(StringView(StringBuilder() << StringView(u8"audio seek_us=") << (i64)(monotonicNowUs() - began)));
         swr_free(&resampler);
         pcm.reset();
         pcmStart = target;
@@ -1295,6 +1322,10 @@ void Audio::service() {
 
     alGetSourcei(source, AL_BUFFERS_PROCESSED, &processed);
     checkAl();
+
+    if (processed > 0) {
+        say(StringView(StringBuilder() << StringView(u8"audio processed=") << (i64)processed << StringView(u8" ring=") << (i64)ringLength));
+    }
 
     for (; processed > 0 && ringLength > 0; processed--) {
         ALuint buffer;
@@ -1323,6 +1354,8 @@ bool Audio::step() {
 
     if (have >= bufferSamples() || (drained && have > 0)) {
         if (idle.empty()) {
+            say(StringView(StringBuilder() << StringView(u8"audio waits for a buffer have=") << (i64)have << StringView(u8" ring=") << (i64)ringLength));
+
             return false;
         }
 
@@ -1344,11 +1377,14 @@ bool Audio::step() {
     }
 
     if (e == AVERROR_EOF) {
+        say(StringView(StringBuilder() << StringView(u8"audio eof have=") << (i64)have));
         drained = true;
         start();
 
         return true;
     }
+
+    say(StringView(StringBuilder() << StringView(u8"audio decoded have=") << (i64)have << StringView(u8" need=") << (i64)bufferSamples() << StringView(u8" skipping=") << (i64)skipping));
 
     if (e < 0) {
         failAv(StringView(u8"audio decoding"), e);
@@ -1441,6 +1477,7 @@ void Audio::enqueue() {
 
     ring[(ringHead + ringLength) % audioBuffers] = taken;
     ringLength++;
+    say(StringView(StringBuilder() << StringView(u8"audio queued samples=") << (i64)taken << StringView(u8" ring=") << (i64)ringLength << StringView(u8" idle=") << (i64)idle.length() << StringView(u8" queued_start_ms=") << milliseconds(queuedStart) << StringView(u8" pcm_start_ms=") << milliseconds(pcmStart)));
     drop(taken);
     start();
 }
@@ -1457,10 +1494,15 @@ void Audio::start() {
     }
 
     if (now == AL_PAUSED || idle.empty() || drained) {
+        say(StringView(StringBuilder() << StringView(u8"audio play state=") << (i64)now << StringView(u8" ring=") << (i64)ringLength << StringView(u8" idle=") << (i64)idle.length() << StringView(u8" drained=") << (i64)drained));
         alSourcePlay(source);
         checkAl();
         report();
+
+        return;
     }
+
+    say(StringView(StringBuilder() << StringView(u8"audio play deferred state=") << (i64)now << StringView(u8" ring=") << (i64)ringLength << StringView(u8" idle=") << (i64)idle.length()));
 }
 
 void Audio::finish() {
@@ -1481,6 +1523,7 @@ void Audio::report() {
 
     bool running = now == AL_PLAYING;
 
+    say(StringView(StringBuilder() << StringView(u8"audio report gen=") << (i64)generation << StringView(u8" position_ms=") << milliseconds(queuedStart + offsets[0] - (running ? offsets[1] : 0.)) << StringView(u8" queued_start_ms=") << milliseconds(queuedStart) << StringView(u8" offset_ms=") << milliseconds(offsets[0]) << StringView(u8" latency_ms=") << milliseconds(offsets[1]) << StringView(u8" running=") << (i64)running << StringView(u8" ended=") << (i64)ended << StringView(u8" ring=") << (i64)ringLength));
     player->post(new Clock(generation, queuedStart + offsets[0] - (running ? offsets[1] : 0.), monotonicNowUs(), running, ended));
 }
 
@@ -1513,6 +1556,7 @@ Screen::Screen(Player* player_)
 
     fiber = player->ui->platform()->scheduler()->create(*player->pool, *this, controllerStack);
     player->ui->trace(StringView(StringBuilder() << StringView(u8"opened duration_ms=") << milliseconds(duration) << StringView(u8" video=") << (i64)hasVideo << StringView(u8" audio=") << (i64)hasAudio));
+    say(StringView(StringBuilder() << StringView(u8"opened duration_ms=") << milliseconds(duration) << StringView(u8" video=") << (i64)hasVideo << StringView(u8" audio=") << (i64)hasAudio));
 }
 
 Screen::~Screen() noexcept {
@@ -1578,6 +1622,8 @@ void Screen::drain() {
         }
 
         if (Frame* frame = cast<Frame>(message.ptr)) {
+            say(StringView(StringBuilder() << StringView(u8"screen frame gen=") << (i64)frame->generation << StringView(u8" pts_ms=") << milliseconds(frame->pts) << StringView(u8" waiting=") << (i64)waiting.length() << (frame->generation == generation ? StringView(u8"") : StringView(u8" stale"))));
+
             if (frame->generation == generation) {
                 waiting.pushBack(frame);
                 message.drop();
@@ -1587,8 +1633,10 @@ void Screen::drain() {
         } else if (Surface* surface = cast<Surface>(message.ptr)) {
             release(surface->image);
         } else if (Clock* clock = cast<Clock>(message.ptr)) {
+            say(StringView(StringBuilder() << StringView(u8"screen clock gen=") << (i64)clock->generation << StringView(u8" position_ms=") << milliseconds(clock->position) << StringView(u8" age_ms=") << (i64)((monotonicNowUs() - clock->at) / 1000) << StringView(u8" running=") << (i64)clock->running << StringView(u8" ended=") << (i64)clock->ended << (clock->generation == generation ? StringView(u8"") : StringView(u8" stale"))));
             applyClock(*clock);
         } else if (End* end = cast<End>(message.ptr)) {
+            say(StringView(StringBuilder() << StringView(u8"screen end gen=") << (i64)end->generation));
             videoEnded = videoEnded || end->generation == generation;
         } else if (Failure* failure = cast<Failure>(message.ptr)) {
             halt(StringView(failure->text));
@@ -1610,6 +1658,7 @@ u64 Screen::present() {
     }
 
     if (playing && !ended && !clockRunning && !audioMaster() && shown && shown->generation == generation) {
+        say(StringView(StringBuilder() << StringView(u8"screen clock from frame pts_ms=") << milliseconds(shown->pts)));
         setClock(clockBase > shown->pts ? clockBase : shown->pts, true, now);
     }
 
@@ -1691,6 +1740,7 @@ void Screen::show(Frame* frame) {
     }
 
     player->ui->trace(StringView(StringBuilder() << StringView(u8"show generation=") << (i64)frame->generation << StringView(u8" position_ms=") << milliseconds(frame->pts)));
+    say(StringView(StringBuilder() << StringView(u8"screen show gen=") << (i64)frame->generation << StringView(u8" pts_ms=") << milliseconds(frame->pts) << StringView(u8" clock_ms=") << milliseconds(position(monotonicNowUs())) << StringView(u8" running=") << (i64)clockRunning << StringView(u8" waiting=") << (i64)waiting.length()));
     player->ui->requestFrame();
 }
 
@@ -1782,6 +1832,7 @@ RenderShader& Screen::shaderFor(const VideoShader& facts, const ShaderOptions& o
     }
 
     if (!exact) {
+        say(StringView(StringBuilder() << StringView(u8"shader miss ") << (i64)options.size[0] << StringView(u8"x") << (i64)options.size[1] << StringView(u8" tiles=") << (i64)options.tiles << StringView(u8" output=") << (i64)options.output << StringView(u8" cached=") << (i64)made.length()));
         made.pushBack(Made{facts, options, nullptr, nullptr, madeClock});
         player->shaderInbox->enqueue(new Compile(facts, options));
     }
@@ -1796,6 +1847,7 @@ RenderShader& Screen::shaderFor(const VideoShader& facts, const ShaderOptions& o
         return *generic->shader;
     }
 
+    u64 began = monotonicNowUs();
     ScopedPtr<ObjPool> scratch{ObjPool::fromMemoryRaw()};
     CompiledShader code = compile(*scratch.ptr, facts, wanted);
     ScopedPtr<ObjPool> owner{ObjPool::fromMemoryRaw()};
@@ -1803,6 +1855,7 @@ RenderShader& Screen::shaderFor(const VideoShader& facts, const ShaderOptions& o
 
     made.pushBack(Made{facts, wanted, owner.ptr, shader, madeClock});
     owner.drop();
+    say(StringView(StringBuilder() << StringView(u8"generic made tiles=") << (i64)wanted.tiles << StringView(u8" output=") << (i64)wanted.output << StringView(u8" us=") << (i64)(monotonicNowUs() - began)));
 
     return *shader;
 }
@@ -1824,6 +1877,7 @@ void Screen::adopt(Compiled& compiled) {
     }
 
     compiled.pool = nullptr;
+    say(StringView(StringBuilder() << StringView(u8"shader ready ") << (i64)compiled.options.size[0] << StringView(u8"x") << (i64)compiled.options.size[1] << StringView(u8" tiles=") << (i64)compiled.options.tiles << StringView(u8" output=") << (i64)compiled.options.output << StringView(u8" compile_us=") << (i64)compiled.compileUs << StringView(u8" driver_us=") << (i64)compiled.driverUs << StringView(u8" cached=") << (i64)made.length()));
     player->ui->trace(StringView(StringBuilder() << StringView(u8"compiled video shader ") << StringView(compiled.facts.layout->name) << StringView(u8" ") << StringView(compiled.facts.system) << StringView(u8" ") << StringView(compiled.facts.transfer) << StringView(u8" ") << StringView(compiled.facts.conversion) << StringView(u8" ") << StringView(compiled.facts.output) << StringView(u8" ") << (u64)compiled.options.size[0] << StringView(u8"x") << (u64)compiled.options.size[1] << StringView(u8" ") << StringView(outputs[(int)compiled.options.output]) << StringView(u8" ") << StringView(tiles[(int)compiled.options.tiles]) << StringView(u8" compile_us=") << compiled.compileUs << StringView(u8" driver_us=") << compiled.driverUs));
     trim();
     player->ui->requestFrame();
@@ -1959,6 +2013,7 @@ void Screen::seek(double to, bool play) {
 
     waiting.clear();
     player->ui->trace(StringView(StringBuilder() << StringView(u8"seek generation=") << (i64)generation << StringView(u8" position_ms=") << milliseconds(to)));
+    say(StringView(StringBuilder() << StringView(u8"screen seek gen=") << (i64)generation << StringView(u8" to_ms=") << milliseconds(to) << StringView(u8" play=") << (i64)play));
     sendControl(player->videoInbox);
     sendControl(player->audioInbox);
     player->ui->requestFrame();
@@ -1985,12 +2040,14 @@ void Screen::toggle() {
     }
 
     player->ui->trace(StringView(StringBuilder() << (playing ? StringView(u8"play generation=") : StringView(u8"pause generation=")) << (i64)generation));
+    say(StringView(StringBuilder() << StringView(u8"screen toggle playing=") << (i64)playing << StringView(u8" gen=") << (i64)generation << StringView(u8" clock_ms=") << milliseconds(position(now))));
     sendControl(player->audioInbox);
     player->ui->requestFrame();
     resume();
 }
 
 void Screen::sendControl(Channel* to) {
+    say(StringView(StringBuilder() << StringView(u8"screen control gen=") << (i64)generation << StringView(u8" target_ms=") << milliseconds(target) << StringView(u8" playing=") << (i64)playing << (to == player->videoInbox ? StringView(u8" to video") : StringView(u8" to audio"))));
     to->enqueue(new Control(generation, target, playing));
 }
 
@@ -2058,6 +2115,7 @@ void Screen::draw() {
     float bar = ImGui::GetFrameHeight() + 2.f * pad;
     double at = position(monotonicNowUs());
 
+    say(StringView(StringBuilder() << StringView(u8"screen draw at_ms=") << milliseconds(at) << StringView(u8" shown_pts_ms=") << (shown ? milliseconds(shown->pts) : (i64)-1) << StringView(u8" running=") << (i64)clockRunning << StringView(u8" waiting=") << (i64)waiting.length()));
     ImGui::SetNextWindowPos(vp->Pos);
     ImGui::SetNextWindowSize(vp->Size);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
