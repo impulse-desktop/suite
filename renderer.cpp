@@ -1963,6 +1963,16 @@ namespace {
         VkDeviceSize size = 0;
     };
 
+    // A producer's memory as the GPU reads it: the producer's own pages
+    // imported as device memory when the driver takes them, otherwise a
+    // mapped buffer the image copies the source into before each frame.
+    struct HostBuffer: Buffer {
+        const void* source = nullptr;
+        size_t bytes = 0;
+        bool imported = false;
+        bool coherent = true;
+    };
+
     struct Texture: ComposeTexture {
         VkImage image = VK_NULL_HANDLE;
         VkDeviceMemory memory = VK_NULL_HANDLE;
@@ -2077,11 +2087,18 @@ namespace {
         void setupCompose(stl::ObjPool& pool);
 
         u32 findMemoryType(u32 typeBits, VkMemoryPropertyFlags props);
+        void settle(u64 serial);
+        template <typename F>
+        void oneShot(F&& record);
         void createTexture(u32 w, u32 h, Texture& tex, VkFormat format, VkImageUsageFlags usage = 0);
         void writeTexture(Texture& tex, const u8* pixels, size_t pitch, u32 x, u32 y, u32 w, u32 h, bool fresh);
+        void readTexture(VkImage image, VkImageLayout held, int x, int y, u32 w, u32 h, PixelLayout layout, ImagePixels& out);
         void destroyTexture(Texture& tex);
         void reserve(Buffer& buffer, VkDeviceSize size);
         void releaseBuffer(Buffer& buffer);
+        bool importHost(HostBuffer& host, size_t size, VkBufferUsageFlags usage);
+        void allocateHost(HostBuffer& host, const void* source, size_t size, size_t bytes, VkBufferUsageFlags usage);
+        void flushHost(HostBuffer& host);
         VkPipeline pipeline(const u32* code, size_t bytes, ShaderOutput output, bool edge);
         void bindCompose(VkDescriptorSet set, Buffer (&buffers)[composeBuffers], VkImageView target, bool content);
         void dispatch(VkCommandBuffer command, VkDescriptorSet set, u32 width, u32 height, ShaderOutput output);
@@ -2372,35 +2389,53 @@ namespace {
         ~VulkanShader() noexcept;
     };
 
-    struct VulkanImage final: RenderImage {
+    // What every drawn image tells the frame: its size, whether it asks for
+    // the wide mode, whom to tell when the frame that drew it lands, and the
+    // commands it records into the frame before the compositor runs.
+    struct VulkanImage: RenderImage {
         Gpu* gpu = nullptr;
-        Texture texture;
         u32 width = 0;
         u32 height = 0;
-        PixelLayout layout = PixelLayout::Rgba8;
         bool hdr = false;
-
-        const void* source = nullptr;
-        size_t stride = 0;
-        size_t bytes = 0;
-        VkBufferUsageFlags usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-        ShaderFactory* factory = nullptr;
-        VkBuffer buffer = VK_NULL_HANDLE;
-        VkDeviceMemory bufferMemory = VK_NULL_HANDLE;
-        void* map = nullptr;
-        bool hostImported = false;
-        bool coherent = true;
-        bool dirty = false;
-        bool initialized = true;
-        u64 lastUse = 0;
         Runable* retired = nullptr;
+        u64 lastUse = 0;
 
         ~VulkanImage() noexcept;
         void prepare() override;
-        void allocateBuffer(size_t size);
-        bool importHost(size_t size);
-        void record(VkCommandBuffer command);
-        void readShaded(int x0, int y0, int x1, int y1, ImagePixels& out);
+        virtual void record(VkCommandBuffer command);
+    };
+
+    // A texture filled once: uploaded pixels or an imported screenshot.
+    struct TextureImage: VulkanImage {
+        Texture texture;
+        PixelLayout layout = PixelLayout::Rgba8;
+
+        ~TextureImage() noexcept;
+        void draw(ImDrawList& list, ImVec2 lo, ImVec2 hi) override;
+        void read(int x0, int y0, int x1, int y1, ImagePixels& out) override;
+    };
+
+    // A texture refilled from the producer's buffer before each frame.
+    struct BoundImage final: TextureImage {
+        HostBuffer host;
+        size_t stride = 0;
+        bool initialized = false;
+        bool dirty = false;
+
+        ~BoundImage() noexcept;
+        void prepare() override;
+        void record(VkCommandBuffer command) override;
+    };
+
+    // The producer's words, drawn as a layer by the kernel its factory makes.
+    struct ShadedImage final: VulkanImage {
+        HostBuffer host;
+        ShaderFactory* factory = nullptr;
+        bool dirty = false;
+
+        ~ShadedImage() noexcept;
+        void prepare() override;
+        void record(VkCommandBuffer command) override;
         void draw(ImDrawList& list, ImVec2 lo, ImVec2 hi) override;
         void read(int x0, int y0, int x1, int y1, ImagePixels& out) override;
     };
@@ -3216,10 +3251,10 @@ void Gpu::dispatch(VkCommandBuffer command, VkDescriptorSet set, u32 width, u32 
         }
 
         const Placement& placed = t.layers[(p - 1) / 3];
-        VulkanImage* image = static_cast<VulkanImage*>(placed.image);
+        ShadedImage* image = static_cast<ShadedImage*>(placed.image);
         ShaderOptions options{ShaderTarget::Spirv, output, (ShaderTiles)((p - 1) % 3), {(u32)(placed.box[2] - placed.box[0]), (u32)(placed.box[3] - placed.box[1])}};
         VulkanShader& shader = static_cast<VulkanShader&>(image->factory->shader(options));
-        VkDescriptorBufferInfo bound[2] = {{image->buffer, 0, VK_WHOLE_SIZE}, {shader.constants.buffer, 0, VK_WHOLE_SIZE}};
+        VkDescriptorBufferInfo bound[2] = {{image->host.buffer, 0, VK_WHOLE_SIZE}, {shader.constants.buffer, 0, VK_WHOLE_SIZE}};
         VkWriteDescriptorSet writes[2];
         u32 written = 0;
 
@@ -3779,17 +3814,58 @@ void Gpu::createTexture(u32 w, u32 h, Texture& tex, VkFormat format, VkImageUsag
     vkc(vkCreateImageView(device, &vci, alloc, &tex.view));
 }
 
+void Gpu::settle(u64 serial) {
+    if (serial > completed) {
+        vkDeviceWaitIdle(device);
+        completed = submitted;
+    }
+}
+
+// Records one command buffer, submits it and waits for the queue to finish
+// it: the path of uploads, imports and readbacks, which are not frames.
+template <typename F>
+void Gpu::oneShot(F&& record) {
+    VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+    VkCommandPool commands = VK_NULL_HANDLE;
+
+    pci.queueFamilyIndex = queueFamily;
+    pci.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    vkc(vkCreateCommandPool(device, &pci, alloc, &commands));
+    STD_DEFER {
+        vkQueueWaitIdle(queue);
+        vkDestroyCommandPool(device, commands, alloc);
+    };
+
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    VkCommandBufferAllocateInfo cai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+
+    cai.commandPool = commands;
+    cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cai.commandBufferCount = 1;
+    vkc(vkAllocateCommandBuffers(device, &cai, &cmd));
+
+    VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+
+    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkc(vkBeginCommandBuffer(cmd, &begin));
+    record(cmd);
+    vkc(vkEndCommandBuffer(cmd));
+
+    VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+
+    submit.commandBufferCount = 1;
+    submit.pCommandBuffers = &cmd;
+    vkc(vkQueueSubmit(queue, 1, &submit, VK_NULL_HANDLE));
+    vkc(vkQueueWaitIdle(queue));
+}
+
 void Gpu::writeTexture(Texture& tex, const u8* pixels, size_t pitch, u32 x, u32 y, u32 w, u32 h, bool fresh) {
     Buffer staging;
-    VkCommandPool commands = VK_NULL_HANDLE;
-    ScopedGuard done = [&] {
-        if (commands) {
-            vkQueueWaitIdle(queue);
-            vkDestroyCommandPool(device, commands, alloc);
-        }
 
+    STD_DEFER {
         releaseBuffer(staging);
     };
+
     VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
 
     bci.size = (VkDeviceSize)w * h * 4;
@@ -3812,57 +3888,91 @@ void Gpu::writeTexture(Texture& tex, const u8* pixels, size_t pitch, u32 x, u32 
         memcpy((u8*)staging.map + (size_t)row * w * 4, pixels + (size_t)(y + row) * pitch + (size_t)x * 4, (size_t)w * 4);
     }
 
-    VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+    oneShot([&](VkCommandBuffer cmd) {
+        VkImageMemoryBarrier bar{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
 
-    pci.queueFamilyIndex = queueFamily;
-    pci.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
-    vkc(vkCreateCommandPool(device, &pci, alloc, &commands));
+        bar.oldLayout = fresh ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        bar.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bar.image = tex.image;
+        bar.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        bar.srcAccessMask = fresh ? 0 : VK_ACCESS_SHADER_READ_BIT;
+        bar.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd, fresh ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &bar);
 
-    VkCommandBuffer cmd;
-    VkCommandBufferAllocateInfo cbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+        VkBufferImageCopy copy{};
 
-    cbi.commandPool = commands;
-    cbi.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    cbi.commandBufferCount = 1;
-    vkc(vkAllocateCommandBuffers(device, &cbi, &cmd));
+        copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        copy.imageOffset = {(i32)x, (i32)y, 0};
+        copy.imageExtent = {w, h, 1};
+        vkCmdCopyBufferToImage(cmd, staging.buffer, tex.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
 
-    VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        bar.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        bar.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        bar.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        bar.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &bar);
+    });
+}
 
-    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkc(vkBeginCommandBuffer(cmd, &begin));
+// Copies a rectangle of a texture out through a host buffer and unpacks it
+// into pixels, leaving the texture in the layout it held.
+void Gpu::readTexture(VkImage image, VkImageLayout held, int x, int y, u32 w, u32 h, PixelLayout layout, ImagePixels& out) {
+    size_t pixel = layout == PixelLayout::Rgba16f ? 8 : 4;
+    VkDeviceSize bytes = (VkDeviceSize)w * h * pixel;
+    Buffer readback;
 
-    VkImageMemoryBarrier bar{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    STD_DEFER {
+        releaseBuffer(readback);
+    };
 
-    bar.oldLayout = fresh ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    bar.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    bar.image = tex.image;
-    bar.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    bar.srcAccessMask = fresh ? 0 : VK_ACCESS_SHADER_READ_BIT;
-    bar.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    vkCmdPipelineBarrier(cmd, fresh ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &bar);
+    VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
 
-    VkBufferImageCopy copy{};
+    bci.size = bytes;
+    bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    vkc(vkCreateBuffer(device, &bci, alloc, &readback.buffer));
 
-    copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    copy.imageOffset = {(i32)x, (i32)y, 0};
-    copy.imageExtent = {w, h, 1};
-    vkCmdCopyBufferToImage(cmd, staging.buffer, tex.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+    VkMemoryRequirements req;
 
-    bar.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    bar.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    bar.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    bar.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &bar);
-    vkc(vkEndCommandBuffer(cmd));
+    vkGetBufferMemoryRequirements(device, readback.buffer, &req);
 
-    VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
 
-    submit.commandBufferCount = 1;
-    submit.pCommandBuffers = &cmd;
-    vkc(vkQueueSubmit(queue, 1, &submit, VK_NULL_HANDLE));
-    vkc(vkQueueWaitIdle(queue));
+    mai.allocationSize = req.size;
+    mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    vkc(vkAllocateMemory(device, &mai, alloc, &readback.memory));
+    vkc(vkBindBufferMemory(device, readback.buffer, readback.memory, 0));
+
+    oneShot([&](VkCommandBuffer cmd) {
+        VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+
+        barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        barrier.oldLayout = held;
+        barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.image = image;
+        barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+        VkBufferImageCopy copy = {};
+
+        copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        copy.imageOffset = {x, y, 0};
+        copy.imageExtent = {w, h, 1};
+        vkCmdCopyImageToBuffer(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback.buffer, 1, &copy);
+
+        barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        barrier.newLayout = held;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+    });
+
+    vkc(vkMapMemory(device, readback.memory, 0, bytes, 0, &readback.map));
+    unpackPixels(readback.map, w, h, (size_t)w * pixel, layout, out);
 }
 
 void Gpu::destroyTexture(Texture& tex) {
@@ -3920,11 +4030,7 @@ void Gpu::updateTextures(ImDrawData* draw) {
         } else if (data->Status == ImTextureStatus_WantDestroy && data->UnusedFrames >= (int)present.frames.length()) {
             Texture* texture = (Texture*)data->BackendUserData;
 
-            if (texture->lastUse > completed) {
-                vkDeviceWaitIdle(device);
-                completed = submitted;
-            }
-
+            settle(texture->lastUse);
             destroyTexture(*texture);
             smallObjects->release(texture);
             data->BackendUserData = nullptr;
@@ -4007,34 +4113,34 @@ void Gpu::recordImages(VkCommandBuffer command) {
     }
 }
 
-bool VulkanImage::importHost(size_t size) {
-    if (!gpu->hostAlignment || (uintptr_t)source % gpu->hostAlignment || size % gpu->hostAlignment) {
+bool Gpu::importHost(HostBuffer& host, size_t size, VkBufferUsageFlags usage) {
+    if (!hostAlignment || (uintptr_t)host.source % hostAlignment || size % hostAlignment) {
         return false;
     }
-    VkMemoryHostPointerPropertiesEXT host{VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT};
-    if (gpu->hostProperties(gpu->device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, source, &host) != VK_SUCCESS) {
+    VkMemoryHostPointerPropertiesEXT pointer{VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT};
+    if (hostProperties(device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, host.source, &pointer) != VK_SUCCESS) {
         return false;
     }
     VkExternalMemoryBufferCreateInfo external{VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO};
     external.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
     VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     info.pNext = &external;
-    info.size = bytes;
+    info.size = host.bytes;
     info.usage = usage;
-    if (vkCreateBuffer(gpu->device, &info, gpu->alloc, &buffer) != VK_SUCCESS) {
+    if (vkCreateBuffer(device, &info, alloc, &host.buffer) != VK_SUCCESS) {
         return false;
     }
     VkMemoryRequirements requirements;
-    vkGetBufferMemoryRequirements(gpu->device, buffer, &requirements);
-    size_t allocation = (requirements.size + gpu->hostAlignment - 1) / gpu->hostAlignment * gpu->hostAlignment;
+    vkGetBufferMemoryRequirements(device, host.buffer, &requirements);
+    size_t allocation = (requirements.size + hostAlignment - 1) / hostAlignment * hostAlignment;
     if (allocation > size) {
         return false;
     }
     VkPhysicalDeviceMemoryProperties properties;
-    vkGetPhysicalDeviceMemoryProperties(gpu->phys, &properties);
+    vkGetPhysicalDeviceMemoryProperties(phys, &properties);
     u32 type = UINT32_MAX;
     for (u32 i = 0; i < properties.memoryTypeCount; i++) {
-        if ((requirements.memoryTypeBits & host.memoryTypeBits & (1u << i)) && (properties.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)) {
+        if ((requirements.memoryTypeBits & pointer.memoryTypeBits & (1u << i)) && (properties.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)) {
             type = i;
             break;
         }
@@ -4044,79 +4150,75 @@ bool VulkanImage::importHost(size_t size) {
     }
     VkImportMemoryHostPointerInfoEXT import{VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT};
     import.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
-    import.pHostPointer = const_cast<void*>(source);
+    import.pHostPointer = const_cast<void*>(host.source);
     VkMemoryAllocateInfo memory{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
     memory.pNext = &import;
     memory.allocationSize = allocation;
     memory.memoryTypeIndex = type;
-    if (vkAllocateMemory(gpu->device, &memory, gpu->alloc, &bufferMemory) != VK_SUCCESS) {
+    if (vkAllocateMemory(device, &memory, alloc, &host.memory) != VK_SUCCESS) {
         return false;
     }
-    if (vkBindBufferMemory(gpu->device, buffer, bufferMemory, 0) != VK_SUCCESS) {
+    if (vkBindBufferMemory(device, host.buffer, host.memory, 0) != VK_SUCCESS) {
         return false;
     }
-    coherent = (properties.memoryTypes[type].propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0;
-    if (!coherent && vkMapMemory(gpu->device, bufferMemory, 0, VK_WHOLE_SIZE, 0, &map) != VK_SUCCESS) {
+    host.coherent = (properties.memoryTypes[type].propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0;
+    if (!host.coherent && vkMapMemory(device, host.memory, 0, VK_WHOLE_SIZE, 0, &host.map) != VK_SUCCESS) {
         return false;
     }
     return true;
 }
 
-void VulkanImage::allocateBuffer(size_t size) {
-    if (importHost(size)) {
-        hostImported = true;
+void Gpu::allocateHost(HostBuffer& host, const void* source, size_t size, size_t bytes, VkBufferUsageFlags usage) {
+    host.source = source;
+    host.bytes = bytes;
+    if (importHost(host, size, usage)) {
+        host.imported = true;
         return;
     }
-    if (map) {
-        vkUnmapMemory(gpu->device, bufferMemory);
-        map = nullptr;
-    }
-    if (buffer) {
-        vkDestroyBuffer(gpu->device, buffer, gpu->alloc);
-        buffer = VK_NULL_HANDLE;
-    }
-    if (bufferMemory) {
-        vkFreeMemory(gpu->device, bufferMemory, gpu->alloc);
-        bufferMemory = VK_NULL_HANDLE;
-    }
-    coherent = true;
+    releaseBuffer(host);
+    host.coherent = true;
     VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     info.size = bytes;
     info.usage = usage;
-    gpu->vkc(vkCreateBuffer(gpu->device, &info, gpu->alloc, &buffer));
+    vkc(vkCreateBuffer(device, &info, alloc, &host.buffer));
     VkMemoryRequirements requirements;
-    vkGetBufferMemoryRequirements(gpu->device, buffer, &requirements);
+    vkGetBufferMemoryRequirements(device, host.buffer, &requirements);
     VkMemoryAllocateInfo memory{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
     memory.allocationSize = requirements.size;
-    memory.memoryTypeIndex = gpu->findMemoryType(requirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    gpu->vkc(vkAllocateMemory(gpu->device, &memory, gpu->alloc, &bufferMemory));
-    gpu->vkc(vkBindBufferMemory(gpu->device, buffer, bufferMemory, 0));
-    gpu->vkc(vkMapMemory(gpu->device, bufferMemory, 0, VK_WHOLE_SIZE, 0, &map));
+    memory.memoryTypeIndex = findMemoryType(requirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    vkc(vkAllocateMemory(device, &memory, alloc, &host.memory));
+    vkc(vkBindBufferMemory(device, host.buffer, host.memory, 0));
+    vkc(vkMapMemory(device, host.memory, 0, VK_WHOLE_SIZE, 0, &host.map));
+}
+
+void Gpu::flushHost(HostBuffer& host) {
+    if (host.coherent) {
+        return;
+    }
+    VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
+    range.memory = host.memory;
+    range.size = VK_WHOLE_SIZE;
+    vkc(vkFlushMappedMemoryRanges(device, 1, &range));
 }
 
 void VulkanImage::prepare() {
-    if (source) {
-        if (!hostImported) {
-            memcpy(map, source, bytes);
-        }
-        dirty = true;
-    }
 }
 
-void VulkanImage::record(VkCommandBuffer command) {
+void VulkanImage::record(VkCommandBuffer) {
+}
+
+void BoundImage::prepare() {
+    if (!host.imported) {
+        memcpy(host.map, host.source, host.bytes);
+    }
+    dirty = true;
+}
+
+void BoundImage::record(VkCommandBuffer command) {
     if (!dirty) {
         return;
     }
-    if (!coherent) {
-        VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
-        range.memory = bufferMemory;
-        range.size = VK_WHOLE_SIZE;
-        gpu->vkc(vkFlushMappedMemoryRanges(gpu->device, 1, &range));
-    }
-    if (factory) {
-        dirty = false;
-        return;
-    }
+    gpu->flushHost(host);
     VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
     barrier.oldLayout = initialized ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED;
     barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
@@ -4131,7 +4233,7 @@ void VulkanImage::record(VkCommandBuffer command) {
     copy.bufferRowLength = (u32)(stride / 4);
     copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     copy.imageExtent = {width, height, 1};
-    vkCmdCopyBufferToImage(command, buffer, texture.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+    vkCmdCopyBufferToImage(command, host.buffer, texture.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
     barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -4139,6 +4241,20 @@ void VulkanImage::record(VkCommandBuffer command) {
     vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
     initialized = true;
     dirty = false;
+}
+
+void ShadedImage::prepare() {
+    if (!host.imported) {
+        memcpy(host.map, host.source, host.bytes);
+    }
+    dirty = true;
+}
+
+void ShadedImage::record(VkCommandBuffer) {
+    if (dirty) {
+        gpu->flushHost(host);
+        dirty = false;
+    }
 }
 
 namespace {
@@ -4207,17 +4323,14 @@ RenderImage* VulkanRenderer::bind(ObjPool& pool, u32 width, u32 height, const vo
     if (!data || stride < (size_t)width * 4 || stride % 4 || stride / 4 > UINT32_MAX || stride > size / height) {
         fail(StringView(u8"invalid bound image buffer"));
     }
-    VulkanImage* image = pool.make<VulkanImage>();
+    BoundImage* image = pool.make<BoundImage>();
     image->gpu = gpu;
     image->width = width;
     image->height = height;
-    image->source = data;
     image->stride = stride;
-    image->bytes = stride * height;
     image->retired = &retired;
-    image->initialized = false;
     gpu->createTexture(width, height, image->texture, VK_FORMAT_R8G8B8A8_SRGB);
-    image->allocateBuffer(size);
+    gpu->allocateHost(image->host, data, size, stride * height, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
     return image;
 }
 
@@ -4271,18 +4384,14 @@ RenderImage* VulkanRenderer::shade(ObjPool& pool, ShaderFactory& factory, u32 wi
     if (!data || !size || size % 4) {
         fail(StringView(u8"invalid shaded image source"));
     }
-    VulkanImage* image = pool.make<VulkanImage>();
+    ShadedImage* image = pool.make<ShadedImage>();
     image->gpu = gpu;
     image->width = width;
     image->height = height;
     image->hdr = hdr;
-    image->layout = PixelLayout::Rgba16f;
-    image->source = data;
-    image->bytes = size;
-    image->usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
     image->factory = &factory;
     image->retired = &retired;
-    image->allocateBuffer(size);
+    gpu->allocateHost(image->host, data, size, size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     return image;
 }
 
@@ -4290,156 +4399,79 @@ VulkanImage::~VulkanImage() noexcept {
     for (const VulkanImage* image : gpu->drawn) {
         STD_INSIST(image != this);
     }
-    if (lastUse > gpu->completed || texture.lastUse > gpu->completed) {
-        vkDeviceWaitIdle(gpu->device);
-        gpu->completed = gpu->submitted;
-    }
-    if (map) {
-        vkUnmapMemory(gpu->device, bufferMemory);
-    }
-    if (buffer) {
-        vkDestroyBuffer(gpu->device, buffer, gpu->alloc);
-    }
-    if (bufferMemory) {
-        vkFreeMemory(gpu->device, bufferMemory, gpu->alloc);
-    }
+}
+
+TextureImage::~TextureImage() noexcept {
+    gpu->settle(texture.lastUse);
     gpu->destroyTexture(texture);
 }
 
+BoundImage::~BoundImage() noexcept {
+    gpu->settle(lastUse);
+    gpu->releaseBuffer(host);
+}
+
+ShadedImage::~ShadedImage() noexcept {
+    gpu->settle(lastUse);
+    gpu->releaseBuffer(host);
+}
+
 VulkanShader::~VulkanShader() noexcept {
-    if (lastUse > gpu->completed) {
-        vkDeviceWaitIdle(gpu->device);
-        gpu->completed = gpu->submitted;
-    }
+    gpu->settle(lastUse);
     if (pipeline && !shared) {
         vkDestroyPipeline(gpu->device, pipeline, gpu->alloc);
     }
     gpu->releaseBuffer(constants);
 }
 
-void VulkanImage::draw(ImDrawList& list, ImVec2 lo, ImVec2 hi) {
+void TextureImage::draw(ImDrawList& list, ImVec2 lo, ImVec2 hi) {
     gpu->drawn.pushBack(this);
-    if (factory) {
-        LayerDraw layer{this, {lo.x, lo.y}, {hi.x, hi.y}};
-        list.AddCallback(drawLayer, &layer, sizeof(layer));
-        return;
-    }
     list.AddImage(ImTextureRef((ImTextureID)(uintptr_t)&texture), lo, hi);
 }
 
-void VulkanImage::readShaded(int x0, int y0, int x1, int y1, ImagePixels& out) {
-    u32 w = (u32)(x1 - x0);
-    u32 h = (u32)(y1 - y0);
-    VkDevice device = gpu->device;
+void TextureImage::read(int x0, int y0, int x1, int y1, ImagePixels& out) {
+    checkImageRegion(width, height, x0, y0, x1, y1);
+    gpu->readTexture(texture.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, x0, y0, (u32)(x1 - x0), (u32)(y1 - y0), layout, out);
+}
+
+void ShadedImage::draw(ImDrawList& list, ImVec2 lo, ImVec2 hi) {
+    gpu->drawn.pushBack(this);
+    LayerDraw layer{this, {lo.x, lo.y}, {hi.x, hi.y}};
+    list.AddCallback(drawLayer, &layer, sizeof(layer));
+}
+
+// Draws the image into the region of a wide target and copies the region out.
+void ShadedImage::read(int x0, int y0, int x1, int y1, ImagePixels& out) {
+    ImGuiPlatformIO& pio = ImGui::GetPlatformIO();
+    u32 limit = (u32)(pio.Renderer_TextureMaxWidth < pio.Renderer_TextureMaxHeight ? pio.Renderer_TextureMaxWidth : pio.Renderer_TextureMaxHeight);
+    checkImageRegion(limit, limit, x0, y0, x1, y1);
     const float clear[4] = {0.f, 0.f, 0.f, 0.f};
     Vector<Layer> whole;
-
-    if (!coherent) {
-        VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
-        range.memory = bufferMemory;
-        range.size = VK_WHOLE_SIZE;
-        gpu->vkc(vkFlushMappedMemoryRanges(device, 1, &range));
-    }
-
     Texture target;
 
+    gpu->flushHost(host);
     gpu->createTexture((u32)x1, (u32)y1, target, VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_STORAGE_BIT);
     STD_DEFER {
         gpu->destroyTexture(target);
     };
-
     whole.pushBack(Layer{this, {(float)x0, (float)y0}, {(float)x1, (float)y1}});
     gpu->tiles.compose(nullptr, whole, (u32)x1, (u32)y1, hdr, ++gpu->frames, clear);
     gpu->stamp(gpu->submitted);
     gpu->bindCompose(gpu->readSet, gpu->readBuffers, target.view, true);
+    gpu->oneShot([&](VkCommandBuffer cmd) {
+        VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
 
-    VkDeviceSize bytes = (VkDeviceSize)w * h * 8;
-    Buffer readback;
-
-    STD_DEFER {
-        gpu->releaseBuffer(readback);
-    };
-
-    VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-
-    bci.size = bytes;
-    bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-    gpu->vkc(vkCreateBuffer(device, &bci, gpu->alloc, &readback.buffer));
-
-    VkMemoryRequirements req;
-
-    vkGetBufferMemoryRequirements(device, readback.buffer, &req);
-
-    VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-
-    mai.allocationSize = req.size;
-    mai.memoryTypeIndex = gpu->findMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    gpu->vkc(vkAllocateMemory(device, &mai, gpu->alloc, &readback.memory));
-    gpu->vkc(vkBindBufferMemory(device, readback.buffer, readback.memory, 0));
-
-    VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
-    VkCommandPool pool = VK_NULL_HANDLE;
-
-    pci.queueFamilyIndex = gpu->queueFamily;
-    pci.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
-    gpu->vkc(vkCreateCommandPool(device, &pci, gpu->alloc, &pool));
-    STD_DEFER {
-        vkQueueWaitIdle(gpu->queue);
-        vkDestroyCommandPool(device, pool, gpu->alloc);
-    };
-
-    VkCommandBuffer cmd = VK_NULL_HANDLE;
-    VkCommandBufferAllocateInfo cai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-
-    cai.commandPool = pool;
-    cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    cai.commandBufferCount = 1;
-    gpu->vkc(vkAllocateCommandBuffers(device, &cai, &cmd));
-
-    VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-
-    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    gpu->vkc(vkBeginCommandBuffer(cmd, &begin));
-
-    VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-
-    barrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.image = target.image;
-    barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
-    gpu->dispatch(cmd, gpu->readSet, (u32)x1, (u32)y1, hdr ? ShaderOutput::WideLinear : ShaderOutput::Linear);
-    barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    barrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
-    barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
-
-    VkBufferImageCopy copy = {};
-
-    copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    copy.imageOffset = {x0, y0, 0};
-    copy.imageExtent = {w, h, 1};
-    vkCmdCopyImageToBuffer(cmd, target.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback.buffer, 1, &copy);
-    gpu->vkc(vkEndCommandBuffer(cmd));
-
-    VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-
-    submit.commandBufferCount = 1;
-    submit.pCommandBuffers = &cmd;
-    gpu->vkc(vkQueueSubmit(gpu->queue, 1, &submit, VK_NULL_HANDLE));
-    gpu->vkc(vkQueueWaitIdle(gpu->queue));
-
-    void* map = nullptr;
-
-    gpu->vkc(vkMapMemory(device, readback.memory, 0, bytes, 0, &map));
-    STD_DEFER {
-        vkUnmapMemory(device, readback.memory);
-    };
-    unpackPixels(map, w, h, (size_t)w * 8, PixelLayout::Rgba16f, out);
+        barrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.image = target.image;
+        barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+        gpu->dispatch(cmd, gpu->readSet, (u32)x1, (u32)y1, hdr ? ShaderOutput::WideLinear : ShaderOutput::Linear);
+    });
+    gpu->readTexture(target.image, VK_IMAGE_LAYOUT_GENERAL, x0, y0, (u32)(x1 - x0), (u32)(y1 - y0), PixelLayout::Rgba16f, out);
 }
 
 RenderImage* VulkanRenderer::upload(ObjPool& pool, u32 width, u32 height, const void* rgba, bool hdr) {
@@ -4447,7 +4479,7 @@ RenderImage* VulkanRenderer::upload(ObjPool& pool, u32 width, u32 height, const 
     if (!rgba) {
         fail(StringView(u8"invalid renderer image source"));
     }
-    VulkanImage* image = pool.make<VulkanImage>();
+    TextureImage* image = pool.make<TextureImage>();
     image->gpu = gpu;
     image->width = width;
     image->height = height;
@@ -4658,7 +4690,7 @@ RenderImage* VulkanRenderer::import(ObjPool& pool, SharedImage& source, bool hdr
         fail(StringView(u8"vulkan cannot import the shared screenshot's format"));
     }
 
-    VulkanImage* image = pool.make<VulkanImage>();
+    TextureImage* image = pool.make<TextureImage>();
     image->gpu = gpu;
     image->width = img.width;
     image->height = img.height;
@@ -4748,50 +4780,19 @@ RenderImage* VulkanRenderer::import(ObjPool& pool, SharedImage& source, bool hdr
     gpu->vkc(allocated);
     gpu->vkc(vkBindImageMemory(gpu->device, tex.image, tex.memory, 0));
 
-    VkCommandPool commands = VK_NULL_HANDLE;
-    VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+    gpu->oneShot([&](VkCommandBuffer cmd) {
+        VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
 
-    pci.queueFamilyIndex = gpu->queueFamily;
-    pci.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
-    ScopedGuard commandsDone = [&] mutable -> void {
-        if (commands) {
-            vkQueueWaitIdle(gpu->queue);
-            vkDestroyCommandPool(gpu->device, commands, gpu->alloc);
-        }
-    };
-    gpu->vkc(vkCreateCommandPool(gpu->device, &pci, gpu->alloc, &commands));
-    VkCommandBuffer cmd = VK_NULL_HANDLE;
-    VkCommandBufferAllocateInfo cai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-
-    cai.commandPool = commands;
-    cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    cai.commandBufferCount = 1;
-    gpu->vkc(vkAllocateCommandBuffers(gpu->device, &cai, &cmd));
-
-    VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-
-    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    gpu->vkc(vkBeginCommandBuffer(cmd, &begin));
-
-    VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-
-    barrier.srcAccessMask = 0;
-    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    barrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
-    barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL;
-    barrier.dstQueueFamilyIndex = gpu->queueFamily;
-    barrier.image = tex.image;
-    barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
-    gpu->vkc(vkEndCommandBuffer(cmd));
-
-    VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-
-    submit.commandBufferCount = 1;
-    submit.pCommandBuffers = &cmd;
-    gpu->vkc(vkQueueSubmit(gpu->queue, 1, &submit, VK_NULL_HANDLE));
-    gpu->vkc(vkQueueWaitIdle(gpu->queue));
+        barrier.srcAccessMask = 0;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        barrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+        barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL;
+        barrier.dstQueueFamilyIndex = gpu->queueFamily;
+        barrier.image = tex.image;
+        barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+    });
 
     VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
 
@@ -4802,118 +4803,6 @@ RenderImage* VulkanRenderer::import(ObjPool& pool, SharedImage& source, bool hdr
     gpu->vkc(vkCreateImageView(gpu->device, &vci, gpu->alloc, &tex.view));
     tex.flags = hdr ? DecodePq | SourceWide : DecodeSrgb;
     return image;
-}
-
-void VulkanImage::read(int x0, int y0, int x1, int y1, ImagePixels& out) {
-    if (factory) {
-        ImGuiPlatformIO& pio = ImGui::GetPlatformIO();
-        u32 limit = (u32)(pio.Renderer_TextureMaxWidth < pio.Renderer_TextureMaxHeight ? pio.Renderer_TextureMaxWidth : pio.Renderer_TextureMaxHeight);
-        checkImageRegion(limit, limit, x0, y0, x1, y1);
-        readShaded(x0, y0, x1, y1, out);
-        return;
-    }
-    checkImageRegion(width, height, x0, y0, x1, y1);
-    const Texture& tex = texture;
-    out.width = (u32)(x1 - x0);
-    out.height = (u32)(y1 - y0);
-
-    size_t pixel = layout == PixelLayout::Rgba16f ? 8 : 4;
-    VkDeviceSize bytes = (VkDeviceSize)out.width * out.height * pixel;
-    VkBuffer buffer = VK_NULL_HANDLE;
-    VkDeviceMemory memory = VK_NULL_HANDLE;
-    ScopedGuard readback = [&] mutable -> void {
-        if (buffer) {
-            vkDestroyBuffer(gpu->device, buffer, gpu->alloc);
-        }
-        if (memory) {
-            vkFreeMemory(gpu->device, memory, gpu->alloc);
-        }
-    };
-    VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-
-    bci.size = bytes;
-    bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-    gpu->vkc(vkCreateBuffer(gpu->device, &bci, gpu->alloc, &buffer));
-
-    VkMemoryRequirements req = {};
-
-    vkGetBufferMemoryRequirements(gpu->device, buffer, &req);
-
-    VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-
-    mai.allocationSize = req.size;
-    mai.memoryTypeIndex = gpu->findMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    gpu->vkc(vkAllocateMemory(gpu->device, &mai, gpu->alloc, &memory));
-    gpu->vkc(vkBindBufferMemory(gpu->device, buffer, memory, 0));
-
-    VkCommandPool pool = VK_NULL_HANDLE;
-    ScopedGuard commandsDone = [&] mutable -> void {
-        if (pool) {
-            vkQueueWaitIdle(gpu->queue);
-            vkDestroyCommandPool(gpu->device, pool, gpu->alloc);
-        }
-    };
-    VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
-
-    pci.queueFamilyIndex = gpu->queueFamily;
-    pci.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
-    gpu->vkc(vkCreateCommandPool(gpu->device, &pci, gpu->alloc, &pool));
-
-    VkCommandBuffer cmd = VK_NULL_HANDLE;
-    VkCommandBufferAllocateInfo cai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-
-    cai.commandPool = pool;
-    cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    cai.commandBufferCount = 1;
-    gpu->vkc(vkAllocateCommandBuffers(gpu->device, &cai, &cmd));
-
-    VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-
-    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    gpu->vkc(vkBeginCommandBuffer(cmd, &begin));
-
-    VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-
-    barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    barrier.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.image = tex.image;
-    barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
-
-    VkBufferImageCopy copy = {};
-
-    copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    copy.imageOffset = {x0, y0, 0};
-    copy.imageExtent = {out.width, out.height, 1};
-    vkCmdCopyImageToBuffer(cmd, tex.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buffer, 1, &copy);
-
-    barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
-    gpu->vkc(vkEndCommandBuffer(cmd));
-
-    VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-
-    submit.commandBufferCount = 1;
-    submit.pCommandBuffers = &cmd;
-    gpu->vkc(vkQueueSubmit(gpu->queue, 1, &submit, VK_NULL_HANDLE));
-    gpu->vkc(vkQueueWaitIdle(gpu->queue));
-
-    void* map = nullptr;
-
-    ScopedGuard mapped = [&] mutable -> void {
-        if (map) {
-            vkUnmapMemory(gpu->device, memory);
-        }
-    };
-    gpu->vkc(vkMapMemory(gpu->device, memory, 0, bytes, 0, &map));
-    unpackPixels(map, out.width, out.height, (size_t)out.width * pixel, layout, out);
 }
 
 #endif
