@@ -12,7 +12,7 @@
 #include <string.h>
 
 #if defined(__APPLE__)
-void checkMetalShared(stl::ObjPool& pool, Ui& ui, bool hdr);
+    #include "renderer_metal.h"
 #endif
 
 using namespace stl;

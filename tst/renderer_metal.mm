@@ -1,3 +1,5 @@
+#include "renderer_metal.h"
+
 #include "ui.h"
 #include "error.h"
 #include "renderer.h"
