@@ -98,7 +98,6 @@ layout(std430, set = 1, binding = 0) readonly buffer Words {
 #define BITS_FLOAT(b) uintBitsToFloat(b)
 #define STORE(pixel, value) imageStore(target, pixel, value)
 #define FACTS_DECL layout(std430, set = 1, binding = 1) readonly buffer Constants { Facts facts; };
-
 #include "video_generic.glsl"
 #endif
 

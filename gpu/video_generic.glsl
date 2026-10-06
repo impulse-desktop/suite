@@ -1,6 +1,3 @@
-#define GENERIC_TAPS 64
-#define GENERIC_PI 3.14159265358979
-
 struct Facts {
     uint model;
     uint count;
@@ -34,6 +31,56 @@ struct Facts {
 
 FACTS_DECL
 
+struct GenericLayout {
+    uint model;
+    uint count;
+    uint flags;
+    int plane[4];
+    int step[4];
+    int offset[4];
+    int shift[4];
+    int depth[4];
+    int first[4];
+    int luma[5];
+    uint planeOffset[4];
+    uint rowBase[4];
+    uint rowStep[4];
+    int size[4];
+    float chroma[4];
+    float sites[2];
+};
+
+GenericLayout genericLayoutOf(int unused ARGS_DECL) {
+    GenericLayout l;
+
+    l.model = facts.model;
+    l.count = facts.count;
+    l.flags = facts.flags;
+
+    for (int c = 0; c < 4; c++) {
+        l.plane[c] = facts.components[c * 5];
+        l.step[c] = facts.components[c * 5 + 1];
+        l.offset[c] = facts.components[c * 5 + 2];
+        l.shift[c] = facts.components[c * 5 + 3];
+        l.depth[c] = facts.components[c * 5 + 4];
+        l.first[c] = (facts.flags & 1u) != 0u && l.shift[c] + l.depth[c] <= 8 ? l.offset[c] + 1 : l.offset[c];
+        l.planeOffset[c] = facts.planeOffset[c];
+        l.rowBase[c] = facts.planeOffset[clamp(l.plane[c], 0, 3)];
+        l.rowStep[c] = facts.lineSize[clamp(l.plane[c], 0, 3)];
+        l.size[c] = int(facts.size[c]);
+        l.chroma[c] = facts.chroma[c];
+    }
+
+    for (int k = 0; k < 5; k++) {
+        l.luma[k] = facts.luma[k];
+    }
+
+    l.sites[0] = facts.sites[0];
+    l.sites[1] = facts.sites[1];
+
+    return l;
+}
+
 uint genericSwap16(uint v) {
     return ((v & 0xffu) << 8u) | ((v >> 8u) & 0xffu);
 }
@@ -42,200 +89,106 @@ uint genericSwap32(uint v) {
     return ((v & 0xffu) << 24u) | ((v & 0xff00u) << 8u) | ((v >> 8u) & 0xff00u) | (v >> 24u);
 }
 
-int genericComponent(int c, int k ARGS_DECL) {
-    return facts.components[c * 5 + k];
-}
-
-int genericStart(int c ARGS_DECL) {
-    int offset = genericComponent(c, 2 ARGS);
-    int shift = genericComponent(c, 3 ARGS);
-    int depth = genericComponent(c, 4 ARGS);
-
-    return (facts.flags & 1u) != 0u && shift + depth <= 8 ? offset + 1 : offset;
-}
-
-float genericValue(int c, uint window ARGS_DECL) {
-    int shift = genericComponent(c, 3 ARGS);
-    int depth = genericComponent(c, 4 ARGS);
+float genericValue(GenericLayout l, int c, uint window) {
+    int shift = l.shift[c];
+    int depth = l.depth[c];
     uint mask = depth < 32 ? (1u << uint(depth)) - 1u : 0xffffffffu;
-    bool be = (facts.flags & 1u) != 0u;
-    uint bits;
+    bool be = (l.flags & 1u) != 0u;
+    bool floating = (l.flags & 4u) != 0u;
+    bool packed = (l.flags & 8u) != 0u;
+    uint swapped32 = genericSwap32(window);
+    uint swapped16 = genericSwap16(window);
+    uint bits = packed && depth == 10 ? (swapped32 >> uint(l.offset[c])) & mask : packed ? window : be && shift + depth > 16 ? (swapped32 >> uint(shift)) & mask : be && shift + depth > 8 ? (swapped16 >> uint(shift)) & mask : (window >> uint(shift)) & mask;
+    float real = depth == 16 ? HALF(be ? swapped16 : window) : BITS_FLOAT(be ? swapped32 : window);
 
-    if ((facts.flags & 4u) != 0u) {
-        return depth == 16 ? HALF(be ? genericSwap16(window) : window) : BITS_FLOAT(be ? genericSwap32(window) : window);
-    }
-
-    if ((facts.flags & 8u) != 0u && depth == 10) {
-        bits = (genericSwap32(window) >> uint(genericComponent(c, 2 ARGS))) & mask;
-    } else if ((facts.flags & 8u) != 0u) {
-        bits = window;
-    } else if (be && shift + depth > 16) {
-        bits = (genericSwap32(window) >> uint(shift)) & mask;
-    } else if (be && shift + depth > 8) {
-        bits = (genericSwap16(window) >> uint(shift)) & mask;
-    } else {
-        bits = (window >> uint(shift)) & mask;
-    }
-
-    return float(bits);
+    return floating ? real : float(bits);
 }
 
-uint genericWindow(int c, uint row, uint column ARGS_DECL) {
-    int step = genericComponent(c, 1 ARGS);
-    int depth = genericComponent(c, 4 ARGS);
-    int first = genericStart(c ARGS);
-    bool packed = (facts.flags & 8u) != 0u;
+uint genericWindow(GenericLayout l, int c, uint row, uint column ARGS_DECL) {
+    int step = max(l.step[c], 1);
+    int depth = l.depth[c];
+    int first = l.first[c];
+    bool packed = (l.flags & 8u) != 0u;
+    bool packed10 = packed && depth == 10;
+    bool lumaPath = c == 0 && l.luma[0] != 0;
+    bool narrow = step == 1 || step == 2;
+    bool aligned = step % 4 == 0;
+    bool spread = !packed && !lumaPath && !narrow && !aligned;
+    uint bit = column * uint(step) + uint(l.offset[c]);
+    uint packedByte = bit >> 3u;
+    uint packedPlace = ((packedByte & 3u) << 3u) + uint(8 - depth) - (bit & 7u);
+    uint lane = column & 3u;
+    uint within = lane == 0u ? uint(l.luma[1]) : lane == 1u ? uint(l.luma[2]) : lane == 2u ? uint(l.luma[3]) : uint(l.luma[4]);
+    uint lumaByte = (column >> 2u) * uint(l.luma[0]) + within;
+    uint narrowPlace = (column & uint(4 / step - 1)) * uint(8 * step);
+    uint spreadByte = column * uint(step);
+    uint spreadPlace = (spreadByte & 3u) << 3u;
+    uint index = packed10 ? column : packed ? (packedByte >> 2u) : lumaPath ? (lumaByte >> 2u) : narrow ? (column >> (step == 1 ? 2u : 1u)) : aligned ? column * uint(step / 4) + uint(first / 4) : (spreadByte >> 2u);
+    uint low = words[row + index];
+    uint high = words[row + index + (spread ? 1u : 0u)];
+    uint carried = spreadPlace == 0u ? 0u : high << (32u - spreadPlace);
+    uint spreadValue = first >= 4 ? (high >> spreadPlace) >> uint(8 * (first - 4)) : ((low >> spreadPlace) | carried) >> uint(8 * first);
 
-    if (packed && depth == 10) {
-        return words[row + column];
-    }
-
-    if (packed) {
-        uint bit = column * uint(step) + uint(genericComponent(c, 2 ARGS));
-        uint byte = bit >> 3u;
-        uint place = ((byte & 3u) << 3u) + uint(8 - depth) - (bit & 7u);
-
-        return (words[row + (byte >> 2u)] >> place) & ((1u << uint(depth)) - 1u);
-    }
-
-    if (c == 0 && facts.luma[0] != 0) {
-        uint lane = column & 3u;
-        uint within = uint(facts.luma[1 + int(lane)]);
-        uint byte = (column >> 2u) * uint(facts.luma[0]) + within;
-
-        return words[row + (byte >> 2u)] >> ((byte & 3u) << 3u);
-    }
-
-    if (step == 1 || step == 2) {
-        uint index = column >> (step == 1 ? 2u : 1u);
-        uint place = (column & uint(4 / step - 1)) * uint(8 * step);
-
-        return (words[row + index] >> place) >> uint(8 * first);
-    }
-
-    if (step % 4 == 0) {
-        return words[row + column * uint(step / 4) + uint(first / 4)] >> uint(8 * (first % 4));
-    }
-
-    uint byte = column * uint(step);
-    uint place = (byte & 3u) << 3u;
-    uint index = row + (byte >> 2u);
-    uint next = words[index + 1u];
-
-    if (first >= 4) {
-        return (next >> place) >> uint(8 * (first - 4));
-    }
-
-    uint high = place == 0u ? 0u : next << (32u - place);
-    uint low = (words[index] >> place) | high;
-
-    return low >> uint(8 * first);
+    return packed10 ? low : packed ? (low >> packedPlace) & ((1u << uint(depth)) - 1u) : lumaPath ? low >> ((lumaByte & 3u) << 3u) : narrow ? (low >> narrowPlace) >> uint(8 * first) : aligned ? low >> uint(8 * (first % 4)) : spreadValue;
 }
 
-uint genericRow(int plane, uint line ARGS_DECL) {
-    return (facts.planeOffset[plane] + line * facts.lineSize[plane]) >> 2u;
+uint genericRow(GenericLayout l, int c, uint line) {
+    return (l.rowBase[c] + line * l.rowStep[c]) >> 2u;
 }
 
-float genericSample(int c, uint column, uint line ARGS_DECL) {
-    return genericValue(c, genericWindow(c, genericRow(genericComponent(c, 0 ARGS), line ARGS), column ARGS) ARGS);
+float genericSample(GenericLayout l, int c, uint column, uint line ARGS_DECL) {
+    return genericValue(l, c, genericWindow(l, c, genericRow(l, c, line), column ARGS));
 }
 
-float genericGrid(int c, vec2 at ARGS_DECL) {
+float genericBilinear(GenericLayout l, int c, vec2 at, ivec2 extent ARGS_DECL) {
     vec2 base = floor(at);
     vec2 f = at - base;
     ivec2 whole = ivec2(base);
-    ivec2 extent = ivec2(int(facts.size[2]), int(facts.size[3]));
-    uvec2 a = uvec2(max(whole, ivec2(0)));
-    uvec2 b = uvec2(min(whole + 1, extent - 1));
-    float left = mix(genericSample(c, a.x, a.y ARGS), genericSample(c, a.x, b.y ARGS), f.y);
-    float right = mix(genericSample(c, b.x, a.y ARGS), genericSample(c, b.x, b.y ARGS), f.y);
+    uvec2 a = uvec2(clamp(whole, ivec2(0), extent - 1));
+    uvec2 b = uvec2(clamp(whole + 1, ivec2(0), extent - 1));
+    float left = mix(genericSample(l, c, a.x, a.y ARGS), genericSample(l, c, a.x, b.y ARGS), f.y);
+    float right = mix(genericSample(l, c, b.x, a.y ARGS), genericSample(l, c, b.x, b.y ARGS), f.y);
 
     return mix(left, right, f.x);
 }
 
-float genericLanczos(float x) {
-    float px = GENERIC_PI * x;
-
-    return abs(px) < 1e-6 ? 1.0 : 3.0 * sin(px) * sin(px / 3.0) / (px * px);
-}
-
-float genericChroma(int c, vec2 at ARGS_DECL) {
-    vec2 base = floor(at);
-    vec2 f = at - base;
-    int bx = int(base.x);
-    int by = int(base.y);
-    int lastX = int(facts.size[2]) - 1;
-    int lastY = int(facts.size[3]) - 1;
-    float sum = 0.0;
-    float totalX = 0.0;
-    float totalY = 0.0;
-    float wx[6];
-    float wy[6];
-
-    for (int k = 0; k < 6; k++) {
-        wx[k] = genericLanczos(float(k - 2) - f.x);
-        wy[k] = genericLanczos(float(k - 2) - f.y);
-        totalX += wx[k];
-        totalY += wy[k];
-    }
-
-    for (int j = 0; j < 6; j++) {
-        uint line = uint(clamp(by - 2 + j, 0, lastY));
-
-        for (int k = 0; k < 6; k++) {
-            uint column = uint(clamp(bx - 2 + k, 0, lastX));
-
-            sum += wx[k] * wy[j] * genericSample(c, column, line ARGS);
-        }
-    }
-
-    return sum / (totalX * totalY);
-}
-
-float genericNearChroma(int c, vec2 at ARGS_DECL) {
-    int x = clamp(int(floor(at.x + 0.5)), 0, int(facts.size[2]) - 1);
-    int y = clamp(int(floor(at.y + 0.5)), 0, int(facts.size[3]) - 1);
-
-    return genericSample(c, uint(x), uint(y) ARGS);
-}
-
-vec4 genericPalette(uint column, uint line ARGS_DECL) {
-    uint row = genericRow(0, line ARGS);
+vec4 genericPalette(GenericLayout l, uint column, uint line ARGS_DECL) {
+    uint row = genericRow(l, 0, line);
     uint index = (words[row + (column >> 2u)] >> ((column & 3u) << 3u)) & 0xffu;
-    uint entry = words[(facts.planeOffset[1] >> 2u) + index];
+    uint entry = words[(l.planeOffset[1] >> 2u) + index];
 
     return vec4(float((entry >> 16u) & 0xffu), float((entry >> 8u) & 0xffu), float(entry & 0xffu), float((entry >> 24u) & 0xffu)) / 255.0;
 }
 
-float genericMosaic(int x, int y ARGS_DECL) {
-    int step = genericComponent(0, 1 ARGS);
-    int lastX = int(facts.size[0]) - 1;
-    int lastY = int(facts.size[1]) - 1;
+float genericMosaic(GenericLayout l, int x, int y ARGS_DECL) {
+    int step = l.step[0];
+    int lastX = l.size[0] - 1;
+    int lastY = l.size[1] - 1;
     uint inside = uint(lastX - abs(lastX - abs(x)));
     uint line = uint(lastY - abs(lastY - abs(y)));
-    uint row = genericRow(0, line ARGS);
+    uint row = genericRow(l, 0, line);
     uint texel = words[row + (inside >> (step == 1 ? 2u : 1u))] >> ((inside & (step == 1 ? 3u : 1u)) * uint(8 * step));
-    uint bits = step == 1 ? (texel & 0xffu) : ((facts.flags & 1u) != 0u ? genericSwap16(texel) : (texel & 0xffffu));
+    uint bits = step == 1 ? (texel & 0xffu) : ((l.flags & 1u) != 0u ? genericSwap16(texel) : (texel & 0xffffu));
 
     return float(bits);
 }
 
-vec4 genericBayer(ivec2 at ARGS_DECL) {
-    float a0 = genericMosaic(at.x - 1, at.y - 1 ARGS);
-    float a1 = genericMosaic(at.x, at.y - 1 ARGS);
-    float a2 = genericMosaic(at.x + 1, at.y - 1 ARGS);
-    float m0 = genericMosaic(at.x - 1, at.y ARGS);
-    float m1 = genericMosaic(at.x, at.y ARGS);
-    float m2 = genericMosaic(at.x + 1, at.y ARGS);
-    float d0 = genericMosaic(at.x - 1, at.y + 1 ARGS);
-    float d1 = genericMosaic(at.x, at.y + 1 ARGS);
-    float d2 = genericMosaic(at.x + 1, at.y + 1 ARGS);
+vec4 genericBayer(GenericLayout l, ivec2 at ARGS_DECL) {
+    float a0 = genericMosaic(l, at.x - 1, at.y - 1 ARGS);
+    float a1 = genericMosaic(l, at.x, at.y - 1 ARGS);
+    float a2 = genericMosaic(l, at.x + 1, at.y - 1 ARGS);
+    float m0 = genericMosaic(l, at.x - 1, at.y ARGS);
+    float m1 = genericMosaic(l, at.x, at.y ARGS);
+    float m2 = genericMosaic(l, at.x + 1, at.y ARGS);
+    float d0 = genericMosaic(l, at.x - 1, at.y + 1 ARGS);
+    float d1 = genericMosaic(l, at.x, at.y + 1 ARGS);
+    float d2 = genericMosaic(l, at.x + 1, at.y + 1 ARGS);
     float horizontal = (m0 + m2) * 0.5;
     float vertical = (a1 + d1) * 0.5;
     float cross = (horizontal + vertical) * 0.5;
     float diagonal = (a0 + a2 + d0 + d2) * 0.25;
-    float sameX = (uint(at.x) & 1u) == uint(facts.sites[0]) ? 1.0 : 0.0;
-    float sameY = (uint(at.y) & 1u) == uint(facts.sites[1]) ? 1.0 : 0.0;
+    float sameX = (uint(at.x) & 1u) == uint(l.sites[0]) ? 1.0 : 0.0;
+    float sameY = (uint(at.y) & 1u) == uint(l.sites[1]) ? 1.0 : 0.0;
     float onRed = sameX * sameY;
     float onBlue = (1.0 - sameX) * (1.0 - sameY);
     float onGreen = 1.0 - onRed - onBlue;
@@ -246,45 +199,43 @@ vec4 genericBayer(ivec2 at ARGS_DECL) {
     return vec4(onRed * redSite + onBlue * blueSite + onGreen * green, 0.0);
 }
 
-vec4 genericDecode(ivec2 at, bool near ARGS_DECL) {
-    uint column = uint(at.x);
-    uint line = uint(at.y);
+vec4 genericCodes(GenericLayout l, vec2 at ARGS_DECL) {
+    ivec2 full = ivec2(l.size[0], l.size[1]);
+    ivec2 nearest = clamp(ivec2(floor(at + 0.5)), ivec2(0), full - 1);
 
-    if (facts.model == 5u) {
-        return genericPalette(column, line ARGS);
+    if (l.model == 5u) {
+        return genericPalette(l, uint(nearest.x), uint(nearest.y) ARGS);
     }
 
-    if (facts.model == 4u) {
-        return genericBayer(at ARGS);
+    if (l.model == 4u) {
+        return genericBayer(l, nearest ARGS);
     }
 
     vec4 codes = vec4(0.0);
-    bool yuv = facts.model == 0u;
-    bool alpha = (facts.flags & 2u) != 0u;
+    bool yuv = l.model == 0u;
+    bool alpha = (l.flags & 2u) != 0u;
+    int count = int(l.count);
 
-    for (int c = 0; c < int(facts.count); c++) {
-        if (yuv && (c == 1 || c == 2)) {
-            continue;
-        }
+    codes.x = genericBilinear(l, 0, at, full ARGS);
 
-        int slot = alpha && c == int(facts.count) - 1 ? 3 : c;
+    if (!yuv && count > 1 && !(alpha && count == 2)) {
+        codes.y = genericBilinear(l, 1, at, full ARGS);
+    }
 
-        codes[slot] = genericSample(c, column, line ARGS);
+    if (!yuv && count > 2) {
+        codes.z = genericBilinear(l, 2, at, full ARGS);
+    }
+
+    if (alpha) {
+        codes.w = count == 2 ? genericBilinear(l, 1, at, full ARGS) : genericBilinear(l, 3, at, full ARGS);
     }
 
     if (yuv) {
-        vec2 chromaAt = vec2(float(at.x) * facts.chroma[0] - facts.chroma[2], float(at.y) * facts.chroma[1] - facts.chroma[3]);
+        vec2 chromaAt = vec2(at.x * l.chroma[0] - l.chroma[2], at.y * l.chroma[1] - l.chroma[3]);
+        ivec2 extent = ivec2(l.size[2], l.size[3]);
 
-        if (facts.chroma[0] == 1.0 && facts.chroma[1] == 1.0) {
-            codes.y = genericGrid(1, chromaAt ARGS);
-            codes.z = genericGrid(2, chromaAt ARGS);
-        } else if (near) {
-            codes.y = genericNearChroma(1, chromaAt ARGS);
-            codes.z = genericNearChroma(2, chromaAt ARGS);
-        } else {
-            codes.y = genericChroma(1, chromaAt ARGS);
-            codes.z = genericChroma(2, chromaAt ARGS);
-        }
+        codes.y = genericBilinear(l, 1, chromaAt, extent ARGS);
+        codes.z = genericBilinear(l, 2, chromaAt, extent ARGS);
     }
 
     return codes;
@@ -472,117 +423,13 @@ vec3 genericLight(vec3 signal ARGS_DECL) {
     return genericHlgDisplay(light ARGS);
 }
 
-vec4 genericLit(ivec2 at, bool near ARGS_DECL) {
-    vec4 signal = genericSignal(genericDecode(at, near ARGS) ARGS);
-
-    return vec4(genericLight(signal.xyz ARGS), signal.w);
-}
-
-vec4 genericLayer(uvec2 local, ivec2 origin ARGS_DECL) {
+vec4 genericLayer(GenericLayout l, uvec2 local, ivec2 origin ARGS_DECL) {
     ivec2 box = ivec2(max(frame.box.x, 1), max(frame.box.y, 1));
-    ivec2 pixel = clamp(min(origin, box - 1) + ivec2(local), ivec2(0), box - 1);
-    bool alpha = (facts.flags & 2u) != 0u;
-    float full[2];
-    int cells[2];
-    float ratio[2];
-    int last[2];
-    int first[2];
-    int taps[2];
-    float wx[GENERIC_TAPS];
-    float wy[GENERIC_TAPS];
-
-    for (int i = 0; i < 2; i++) {
-        full[i] = float(facts.size[i]) / float(box[i]);
-        cells[i] = full[i] > 32.0 ? int(ceil(full[i] / 32.0 - 1e-9)) : 1;
-        ratio[i] = full[i] / float(cells[i]);
-        last[i] = int(ceil(float(facts.size[i]) / float(cells[i]) - 1e-9)) - 1;
-    }
-
-    for (int i = 0; i < 2; i++) {
-        float at = (float(pixel[i]) + 0.5) * ratio[i] - 0.5;
-        float base = floor(at);
-        float total = 0.0;
-
-        if (ratio[i] > 1.0) {
-            int side = int(ceil(ratio[i] - 1e-9));
-
-            taps[i] = 2 * side;
-            first[i] = int(base) + 1 - side;
-
-            for (int k = 0; k < taps[i]; k++) {
-                float x = min(abs(at - float(first[i] + k)) / ratio[i], 1.0);
-                float w = (2.0 * x - 3.0) * x * x + 1.0;
-
-                if (i == 0) {
-                    wx[k] = w;
-                } else {
-                    wy[k] = w;
-                }
-
-                total += w;
-            }
-        } else if (ratio[i] == 1.0) {
-            taps[i] = 1;
-            first[i] = int(floor(at + 0.5));
-            total = 1.0;
-
-            if (i == 0) {
-                wx[0] = 1.0;
-            } else {
-                wy[0] = 1.0;
-            }
-        } else {
-            taps[i] = 6;
-            first[i] = int(base) - 2;
-
-            for (int k = 0; k < 6; k++) {
-                float w = genericLanczos(float(k - 2) - (at - base));
-
-                if (i == 0) {
-                    wx[k] = w;
-                } else {
-                    wy[k] = w;
-                }
-
-                total += w;
-            }
-        }
-
-        for (int k = 0; k < taps[i]; k++) {
-            if (i == 0) {
-                wx[k] /= total;
-            } else {
-                wy[k] /= total;
-            }
-        }
-    }
-
-    bool near = cells[0] > 1 || cells[1] > 1;
-    float share = 1.0 / float(cells[0] * cells[1]);
-    vec4 acc = vec4(0.0);
-
-    for (int ty = 0; ty < taps[1]; ty++) {
-        int cy = clamp(first[1] + ty, 0, last[1]);
-
-        for (int tx = 0; tx < taps[0]; tx++) {
-            int cx = clamp(first[0] + tx, 0, last[0]);
-            float w = wx[tx] * wy[ty] * share;
-
-            for (int j = 0; j < cells[1]; j++) {
-                int sy = min(cy * cells[1] + j, int(facts.size[1]) - 1);
-
-                for (int i = 0; i < cells[0]; i++) {
-                    int sx = min(cx * cells[0] + i, int(facts.size[0]) - 1);
-                    vec4 lit = genericLit(ivec2(sx, sy), near ARGS);
-                    float cover = alpha ? lit.w : 1.0;
-
-                    acc += vec4(lit.xyz * cover, cover) * w;
-                }
-            }
-        }
-    }
-
-    vec3 straight = acc.w > 0.0 ? acc.xyz / acc.w : vec3(0.0);
+    ivec2 start = min(origin, box - 1);
+    ivec2 pixel = clamp(start + ivec2(local), ivec2(0), box - 1);
+    vec2 at = (vec2(pixel) + 0.5) * vec2(float(l.size[0]), float(l.size[1])) / vec2(box) - 0.5;
+    vec4 signal = genericSignal(genericCodes(l, at ARGS) ARGS);
+    vec3 straight = genericLight(signal.xyz ARGS);
 
     if (facts.conversion == 1u) {
         straight = genericRows(2, straight ARGS);
@@ -592,7 +439,7 @@ vec4 genericLayer(uvec2 local, ivec2 origin ARGS_DECL) {
         straight = clamp(straight, 0.0, 1.0);
     }
 
-    return vec4(straight, alpha ? clamp(acc.w, 0.0, 1.0) : 1.0);
+    return vec4(straight, (l.flags & 2u) != 0u ? clamp(signal.w, 0.0, 1.0) : 1.0);
 }
 
 vec3 genericWiden(vec3 c) {
@@ -604,7 +451,8 @@ vec3 genericNarrow(vec3 c) {
 }
 
 vec4 genericShown(uvec2 local, ivec2 origin ARGS_DECL) {
-    vec4 layer = genericLayer(local, origin ARGS);
+    GenericLayout l = genericLayoutOf(0 ARGS);
+    vec4 layer = genericLayer(l, local, origin ARGS);
     bool layerWide = facts.target != 0u;
 
     if (layerWide) {

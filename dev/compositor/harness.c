@@ -343,10 +343,14 @@ static void setup(void) {
     qi.queueFamilyIndex = family;
     qi.queueCount = 1;
     qi.pQueuePriorities = &prio;
+    VkPhysicalDeviceShaderClockFeaturesKHR clock = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_CLOCK_FEATURES_KHR};
+    clock.shaderSubgroupClock = VK_TRUE;
     VkPhysicalDeviceVulkan12Features twelve = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+    twelve.pNext = &clock;
     twelve.descriptorBindingPartiallyBound = VK_TRUE;
     VkPhysicalDeviceFeatures2 features = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
     features.pNext = &twelve;
+    const char* extensions[1] = {"VK_KHR_shader_clock"};
     features.features.shaderInt64 = VK_TRUE;
     features.features.shaderSampledImageArrayDynamicIndexing = VK_TRUE;
     features.features.shaderStorageImageWriteWithoutFormat = VK_TRUE;
@@ -354,6 +358,8 @@ static void setup(void) {
     di.pNext = &features;
     di.queueCreateInfoCount = 1;
     di.pQueueCreateInfos = &qi;
+    di.enabledExtensionCount = 1;
+    di.ppEnabledExtensionNames = extensions;
     CHECK(vkCreateDevice(gpu, &di, NULL, &device));
     vkGetDeviceQueue(device, family, 0, &queue);
     VkCommandPoolCreateInfo pi = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
@@ -742,12 +748,14 @@ typedef struct {
     uint32_t tilesX;
     uint32_t first;
     float white;
+    uint32_t pad;
+    int32_t box[2];
 } Push;
 
-static VkPipeline composePipeline(VkPipelineLayout layout, const char* path) {
-    VkSpecializationMapEntry entries[2] = {{0, 0, 4}, {1, 4, 4}};
-    uint32_t data[2] = {0, VK_FALSE};
-    VkSpecializationInfo spec = {2, entries, sizeof(data), data};
+static VkPipeline composePipeline(VkPipelineLayout layout, const char* path, uint32_t edge) {
+    VkSpecializationMapEntry entries[3] = {{0, 0, 4}, {1, 4, 4}, {2, 8, 4}};
+    uint32_t data[3] = {0, VK_FALSE, edge};
+    VkSpecializationInfo spec = {3, entries, sizeof(data), data};
     VkComputePipelineCreateInfo cp = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
     cp.stage = (VkPipelineShaderStageCreateInfo){VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_COMPUTE_BIT, module(path), "main", &spec};
     cp.layout = layout;
@@ -813,12 +821,25 @@ int main(int argc, char** argv) {
     CHECK(vkCreateDescriptorPool(device, &dp, NULL, &pool));
 
     Buffer video = {0};
+    Buffer facts = {0};
+    int generic = 0;
     if (f.hasVideo) {
         size_t size;
         void* words = readFile(frameWords, &size);
         video = makeBuffer(size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
         memcpy(video.map, words, size);
         free(words);
+        char path[1024];
+        snprintf(path, sizeof(path), "%s/facts.bin", layers);
+        FILE* probe = fopen(path, "rb");
+        if (probe) {
+            fclose(probe);
+            void* bytes = readFile(path, &size);
+            facts = makeBuffer(size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+            memcpy(facts.map, bytes, size);
+            free(bytes);
+            generic = 1;
+        }
     }
 
     Program program;
@@ -842,6 +863,8 @@ int main(int argc, char** argv) {
     memcpy(triBuffer.map, program.triangles, (size_t)program.triangleCount * sizeof(Triangle));
     Buffer tileBuffer = makeBuffer((VkDeviceSize)program.tileCount * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     memcpy(tileBuffer.map, program.tiles, (size_t)program.tileCount * 4);
+    Buffer profile = makeBuffer(64 * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    memset(profile.map, 0, 64 * 4);
 
     Image composed = makeImage(f.width, f.height, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
     VkDescriptorSetLayout setLayouts[2];
@@ -867,10 +890,14 @@ int main(int argc, char** argv) {
         cl.bindingCount = 7;
         cl.pBindings = bindings;
         CHECK(vkCreateDescriptorSetLayout(device, &cl, NULL, &setLayouts[0]));
-        VkDescriptorSetLayoutBinding word = {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL};
+        VkDescriptorSetLayoutBinding videoBindings[3] = {
+            {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},
+            {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},
+            {2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},
+        };
         VkDescriptorSetLayoutCreateInfo wl = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-        wl.bindingCount = 1;
-        wl.pBindings = &word;
+        wl.bindingCount = 3;
+        wl.pBindings = videoBindings;
         CHECK(vkCreateDescriptorSetLayout(device, &wl, NULL, &setLayouts[1]));
         VkPushConstantRange range = {VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(Push)};
         VkPipelineLayoutCreateInfo cpl = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
@@ -879,12 +906,20 @@ int main(int argc, char** argv) {
         cpl.pushConstantRangeCount = 1;
         cpl.pPushConstantRanges = &range;
         CHECK(vkCreatePipelineLayout(device, &cpl, NULL, &composeLayout));
-        pipelines[0] = composePipeline(composeLayout, plain);
+        pipelines[0] = composePipeline(composeLayout, plain, 0);
+        if (f.hasVideo && generic) {
+            char kernel[1024], layer[1024];
+            snprintf(kernel, sizeof(kernel), "%s/generic.spv", layers);
+            snprintf(layer, sizeof(layer), "%s/generic_layer.spv", layers);
+            pipelines[1] = composePipeline(composeLayout, kernel, 0);
+            pipelines[2] = composePipeline(composeLayout, kernel, 1);
+            pipelines[3] = composePipeline(composeLayout, layer, 0);
+        }
         const char* kinds[4] = {"", "inside", "edge", "mixed"};
-        for (int k = 1; f.hasVideo && k < 4; k++) {
+        for (int k = 1; f.hasVideo && !generic && k < 4; k++) {
             char path[1024];
             snprintf(path, sizeof(path), "%s/%s.spv", layers, kinds[k]);
-            pipelines[k] = composePipeline(composeLayout, path);
+            pipelines[k] = composePipeline(composeLayout, path, 0);
         }
         for (int s = 0; s < 2; s++) {
             VkDescriptorSetAllocateInfo ca = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
@@ -897,7 +932,7 @@ int main(int argc, char** argv) {
         VkDescriptorImageInfo storage = {VK_NULL_HANDLE, composed.view, VK_IMAGE_LAYOUT_GENERAL};
         VkDescriptorImageInfo sampled[MAX_TEXTURES];
         for (uint32_t i = 0; i < f.textureCount; i++) sampled[i] = (VkDescriptorImageInfo){sampler, textures[i].srgb, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-        VkWriteDescriptorSet writes[8];
+        VkWriteDescriptorSet writes[10];
         for (int i = 0; i < 7; i++) {
             writes[i] = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
             writes[i].dstSet = sets[0];
@@ -916,7 +951,21 @@ int main(int argc, char** argv) {
         writes[7].descriptorCount = 1;
         writes[7].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         writes[7].pBufferInfo = &words;
-        vkUpdateDescriptorSets(device, 8, writes, 0, NULL);
+        VkDescriptorBufferInfo constants = {generic ? facts.buffer : headerBuffer.buffer, 0, VK_WHOLE_SIZE};
+        writes[8] = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        writes[8].dstSet = sets[1];
+        writes[8].dstBinding = 1;
+        writes[8].descriptorCount = 1;
+        writes[8].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        writes[8].pBufferInfo = &constants;
+        VkDescriptorBufferInfo profileInfo = {profile.buffer, 0, VK_WHOLE_SIZE};
+        writes[9] = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        writes[9].dstSet = sets[1];
+        writes[9].dstBinding = 2;
+        writes[9].descriptorCount = 1;
+        writes[9].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        writes[9].pBufferInfo = &profileInfo;
+        vkUpdateDescriptorSets(device, 10, writes, 0, NULL);
     }
 
     uint8_t* composedPixels = malloc((size_t)f.width * f.height * 4);
@@ -927,7 +976,7 @@ int main(int argc, char** argv) {
         barrier(cmd, composed.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 0, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
         vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, queries, 0);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, composeLayout, 0, 2, sets, 0, NULL);
-        Push push = {{(int32_t)f.width, (int32_t)f.height}, {(int32_t)f.video[0], (int32_t)f.video[1]}, program.tilesX, 0, 203.0f};
+        Push push = {{(int32_t)f.width, (int32_t)f.height}, {(int32_t)f.video[0], (int32_t)f.video[1]}, program.tilesX, 0, 203.0f, 0, {(int32_t)(f.video[2] - f.video[0]), (int32_t)(f.video[3] - f.video[1])}};
         for (int k = 0; k < 4; k++) {
             if (!program.programs[k][1]) continue;
             push.first = program.programs[k][0];
@@ -942,6 +991,17 @@ int main(int argc, char** argv) {
     }
     readback(&composed, f.width, f.height, VK_IMAGE_LAYOUT_GENERAL, composedPixels);
     printf("compose gpu %.1f us, cpu %.1f us, sum %.1f us\n", gpuBest, building, gpuBest + building);
+    {
+        const uint32_t* counts = profile.map;
+        int any = 0;
+        for (int i = 0; i < 64; i++) any = any || counts[i];
+        if (any) {
+            printf("profile cycles per round:");
+            for (int i = 0; i < 64; i++)
+                if (counts[i]) printf(" [%d]=%.0f", i, (double)counts[i] / rounds);
+            printf("\n");
+        }
+    }
     if (f.hasVideo) {
         double layerBest = 1e30;
         for (int r = 0; r < rounds; r++) {
@@ -949,7 +1009,7 @@ int main(int argc, char** argv) {
             vkCmdResetQueryPool(cmd, queries, 0, 2);
             vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, queries, 0);
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, composeLayout, 0, 2, sets, 0, NULL);
-            Push push = {{(int32_t)f.width, (int32_t)f.height}, {(int32_t)f.video[0], (int32_t)f.video[1]}, program.tilesX, 0, 203.0f};
+            Push push = {{(int32_t)f.width, (int32_t)f.height}, {(int32_t)f.video[0], (int32_t)f.video[1]}, program.tilesX, 0, 203.0f, 0, {(int32_t)(f.video[2] - f.video[0]), (int32_t)(f.video[3] - f.video[1])}};
             for (int k = 1; k < 4; k++) {
                 if (!program.programs[k][1]) continue;
                 push.first = program.programs[k][0];

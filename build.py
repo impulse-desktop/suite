@@ -492,11 +492,13 @@ if not darwin:
     )
     compositor_hosts = command(
         name="compositor_hosts",
-        inputs=["$(S)/gpu/compose.comp"],
-        outputs=[f"{bench_dir}/compose_plain.spv", f"{bench_dir}/compose_layer.spv"],
+        inputs=["$(S)/gpu/compose.comp", "$(S)/gpu/video_generic.glsl"],
+        outputs=[f"{bench_dir}/compose_plain.spv", f"{bench_dir}/compose_layer.spv", f"{bench_dir}/compose_generic.spv", f"{bench_dir}/compose_generic_layer.spv"],
         cmd=[
             ["glslangValidator", "--quiet", "--target-env", "vulkan1.1", "-V", "$(S)/gpu/compose.comp", "-o", f"{bench_dir}/compose_plain.spv"],
             ["glslangValidator", "--quiet", "--target-env", "vulkan1.1", "-V", "-DGROUP=24", "-DLAYER", "$(S)/gpu/compose.comp", "-o", f"{bench_dir}/compose_layer.spv"],
+            ["glslangValidator", "--quiet", "--target-env", "vulkan1.1", "-V", "-DGROUP=24", "-DGENERIC", "-DGENERIC_KERNEL", "-I$(S)/gpu", "$(S)/gpu/compose.comp", "-o", f"{bench_dir}/compose_generic.spv"],
+            ["glslangValidator", "--quiet", "--target-env", "vulkan1.1", "-V", "-DGROUP=24", "-DGENERIC", "-DLAYER", "-I$(S)/gpu", "$(S)/gpu/compose.comp", "-o", f"{bench_dir}/compose_generic_layer.spv"],
         ],
         descr="SH",
     )
@@ -510,6 +512,8 @@ if not darwin:
     presets = ["fast", "default", "high_quality"] if libplacebo else []
     ours_tools = ["--compositor", f"{bench_dir}/compositor", "--plain", f"{bench_dir}/compose_plain.spv"]
     shader_tools = [f"{bench_dir}/corpus", "$(B)/dev/video_shader", f"{bench_dir}/compose_layer.spv"]
+    generic_tools = [f"{bench_dir}/compose_generic.spv", f"{bench_dir}/compose_generic_layer.spv"]
+    generic_files = ["generic/facts.bin", "generic/generic.spv", "generic/generic_layer.spv"]
     video_formats = ["yuv420p", "nv12", "yuv420p10le", "p010le", "yuv444p", "bgra"]
 
     # a factor above 1 draws the crop shrunk by it back to the crop's size,
@@ -558,14 +562,15 @@ if not darwin:
             shader_node = command(
                 name=f"video_shader_{tag}",
                 inputs=bench_shader_inputs,
-                outputs=[f"{shaders}/{tiles}.spv" for tiles in ("inside", "edge", "mixed")],
+                outputs=[*(f"{shaders}/{tiles}.spv" for tiles in ("inside", "edge", "mixed")), *(f"{shaders}/{file}" for file in generic_files)],
                 deps=[corpus_tool, video_shader, compositor_hosts],
-                cmd=["python3", bench_script, "shader", *shader_tools, fmt, *sizes, shaders],
+                cmd=["python3", bench_script, "shader", *shader_tools, *generic_tools, fmt, *sizes, shaders],
                 descr="SH",
             )
             triples = [word for name in pictures for word in (name, truth_of[name][0], truth_of[name][1].get(factor, truth_of[name][0]))]
             for variant, deps, tools in [
                 ("ours", [compositor_tool, compositor_hosts, shader_node], ["--layers", shaders, *ours_tools]),
+                ("generic", [compositor_tool, compositor_hosts, shader_node], ["--layers", f"{shaders}/generic", *ours_tools]),
                 *((f"placebo_{preset}", [placebo_tool], ["--placebo", f"{bench_dir}/placebo"]) for preset in presets),
             ]:
                 out = f"{quality_dir}/scores/{tag}_{variant}.json"
@@ -597,11 +602,11 @@ if not darwin:
             name=f"video_speed_cases_{fmt}",
             inputs=bench_shader_inputs,
             outputs=[
-                *(f"{directory}/cases/{pair.replace(':', '_')}/{file}" for pair in pairs for file in ("size", "placebo.txt", "frame.bin", "inside.spv", "edge.spv", "mixed.spv")),
+                *(f"{directory}/cases/{pair.replace(':', '_')}/{file}" for pair in pairs for file in ("size", "placebo.txt", "frame.bin", "inside.spv", "edge.spv", "mixed.spv", *generic_files)),
                 *(f"{directory}/frames/{video[0]}x{video[1]}.bin" for video in videos),
             ],
             deps=[corpus_tool, video_shader, compositor_hosts],
-            cmd=["python3", bench_script, "cases", *shader_tools, fmt, directory, *pairs],
+            cmd=["python3", bench_script, "cases", *shader_tools, *generic_tools, fmt, directory, *pairs],
             descr="SC",
         ))
     group("video_speed", command(

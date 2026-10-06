@@ -93,8 +93,11 @@ namespace {
 }
 
 int main(int argc, char** argv) {
-    if (argc < 14) {
-        sysE << StringView(u8"usage: video_shader --target spirv|air --output srgb|pq|linear|wide --tiles inside|edge|mixed --size WxH FORMAT SYSTEM TRANSFER CONVERSION OUTPUT HEX...") << endL;
+    bool generic = argc > 9 && !strcmp(argv[9], "--generic");
+    int names = generic ? 10 : 9;
+
+    if (argc < names + 5) {
+        sysE << StringView(u8"usage: video_shader --target spirv|air --output srgb|pq|linear|wide --tiles inside|edge|mixed --size WxH [--generic] FORMAT SYSTEM TRANSFER CONVERSION OUTPUT HEX...") << endL;
 
         return 2;
     }
@@ -104,8 +107,8 @@ int main(int argc, char** argv) {
     static const char* const tiles[3] = {"inside", "edge", "mixed"};
     ObjPool::Ref owner = ObjPool::fromMemory();
     VideoShader shader;
-    ShaderOptions options{(ShaderTarget)pick("--target", argv[1], argv[2], targets, 2), (ShaderOutput)pick("--output", argv[3], argv[4], outputs, 4), (ShaderTiles)pick("--tiles", argv[5], argv[6], tiles, 3), {0, 0}};
-    Arguments numbers{argv + 14, argv + argc};
+    ShaderOptions options{(ShaderTarget)pick("--target", argv[1], argv[2], targets, 2), (ShaderOutput)pick("--output", argv[3], argv[4], outputs, 4), (ShaderTiles)pick("--tiles", argv[5], argv[6], tiles, 3), {0, 0}, generic};
+    Arguments numbers{argv + names + 5, argv + argc};
 
     if (strcmp(argv[7], "--size")) {
         raiseError(StringView(u8"video_shader: --size comes fourth"));
@@ -114,11 +117,11 @@ int main(int argc, char** argv) {
     sizeOf(argv[8], options.size);
 
     memset(&shader, 0, sizeof(shader));
-    shader.layout = layoutOf(argv[9]);
-    shader.system = argv[10];
-    shader.transfer = argv[11];
-    shader.conversion = argv[12];
-    shader.output = argv[13];
+    shader.layout = layoutOf(argv[names]);
+    shader.system = argv[names + 1];
+    shader.transfer = argv[names + 2];
+    shader.conversion = argv[names + 3];
+    shader.output = argv[names + 4];
     numbers.words(shader.planeOffset, 4);
     numbers.words(shader.lineSize, 4);
     numbers.words(shader.size, 4);
@@ -148,7 +151,10 @@ int main(int argc, char** argv) {
     }
 
     sysE << StringView(u8"compile ") << (monotonicNowUs() - start) * 10 << StringView(u8" ns") << endL;
-    sysO << compile(*owner, shader, options).code;
+
+    CompiledShader compiled = compile(*owner, shader, options);
+
+    sysO << (generic ? compiled.constants : compiled.code);
 
     return 0;
 }
