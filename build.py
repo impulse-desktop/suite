@@ -173,29 +173,14 @@ if wasm_rt_header is None or not os.path.exists(os.path.join(wasm_rt, "wasm-rt-i
     raise RuntimeError(f"the wasm2c runtime (wasm-rt.h, wasm-rt-impl.c) is missing under {wabt_prefix}")
 wabt_version = subprocess.check_output([wasm2c, "--version"], text=True).strip()
 
-decode_dir = "$(B)/decode"
-decode_shards = 16
-# the runtime's sources and headers come along into the generated tree: one
-# include directory, and the shards see the runtime of the wasm2c that made them
+# The runtime's sources and headers come along into the generated tree: one
+# include directory, and the shards see the runtime of the wasm2c that made
+# them. The runtime is compiled once, into the decoder's library; the other
+# modules' libraries carry only their own C and link against it.
 decode_runtime = sorted({
     *glob.glob(os.path.join(wasm_rt, "wasm-rt*")),
     *glob.glob(os.path.join(wasm_rt_header, "wasm-rt*.h")),
 })
-decode_runtime_files = [f"{decode_dir}/{os.path.basename(path)}" for path in decode_runtime]
-decode_headers = [f"{decode_dir}/decode.h", f"{decode_dir}/decode-impl.h"]
-decode_sources = [f"{decode_dir}/decode_{i}.c" for i in range(decode_shards)]
-decode_c = command(
-    name="decode_c",
-    inputs=["$(S)/ext/decode/decode.wasm"],
-    outputs=[*decode_sources, *decode_headers, *decode_runtime_files],
-    cmd=[
-        ["wasm2c", "$(S)/ext/decode/decode.wasm", "--module-name", "decode", "--num-outputs", str(decode_shards), "-o", f"{decode_dir}/decode.c"],
-        ["cp", *decode_runtime, f"{decode_dir}/"],
-    ],
-    # another wabt generates other C and ships another runtime
-    env={"WABT_VERSION": wabt_version},
-    descr="WC",
-)
 
 # The runtime's shape, the same for the generated C, the runtime and the
 # decoder that calls them: every load and store checked against the memory's
@@ -217,22 +202,48 @@ decode_defines = [
     "-DWASM_RT_TRAP_HANDLER=decodeTrapHandler",
 ]
 
-# 170 MB of generated C: its warnings are the generator's, and debug info
-# for it would outweigh the binary; the exception a trap becomes unwinds
-# through its frames. Every source and header here is an output of the one
-# node above, so a source names no inputs: naming the headers too repeats
-# the producer among a shard's dependencies, and the runner then keeps a
-# second copy of every shard for the scenarios, whose dependency on
-# im_test lists it once
-decode = library(
-    name="decode",
-    srcs=[*decode_sources, *[path for path in decode_runtime_files if path.endswith(".c")]],
-    cflags=["-g0", "-w", "-fexceptions"],
-    cppflags=decode_defines,
-    includes=[decode_dir],
-    public_cppflags=[f"-I{decode_dir}", *decode_defines],
-    deps=[decode_c],
-)
+
+# A pure wasm module as a library of the binary: wasm2c turns it into C in
+# the given number of shards, under the module's name. Many MB of generated
+# C: its warnings are the generator's, and debug info for it would outweigh
+# the binary; the exception a trap becomes unwinds through its frames.
+# Every source and header here is an output of the one node, so a source
+# names no inputs: naming the headers too repeats the producer among a
+# shard's dependencies, and the runner then keeps a second copy of every
+# shard for the scenarios, whose dependency on im_test lists it once
+def wasm_library(name, module, shards, runtime):
+    out_dir = f"$(B)/{name}"
+    sources = [f"{out_dir}/{name}_{i}.c" for i in range(shards)]
+    headers = [f"{out_dir}/{name}.h", f"{out_dir}/{name}-impl.h"]
+    runtime_files = [f"{out_dir}/{os.path.basename(path)}" for path in decode_runtime]
+    generated = command(
+        name=f"{name}_c",
+        inputs=[module],
+        outputs=[*sources, *headers, *runtime_files],
+        cmd=[
+            ["wasm2c", module, "--module-name", name, "--num-outputs", str(shards), "-o", f"{out_dir}/{name}.c"],
+            ["cp", *decode_runtime, f"{out_dir}/"],
+        ],
+        # another wabt generates other C and ships another runtime
+        env={"WABT_VERSION": wabt_version},
+        descr="WC",
+    )
+    return library(
+        name=name,
+        srcs=[*sources, *[path for path in runtime_files if runtime and path.endswith(".c")]],
+        cflags=["-g0", "-w", "-fexceptions"],
+        cppflags=decode_defines,
+        includes=[out_dir],
+        public_cppflags=[f"-I{out_dir}", *decode_defines],
+        deps=[generated],
+    )
+
+# the image decoder with the runtime, then the page engines: PDFium
+# (ext/pdf) and DjVuLibre (ext/djvu), the reader's, with the same
+# exports under their own prefix (see their READMEs)
+decode = wasm_library("decode", "$(S)/ext/decode/decode.wasm", 16, True)
+pdf = wasm_library("pdf", "$(S)/ext/pdf/pdf.wasm", 8, False)
+djvu = wasm_library("djvu", "$(S)/ext/djvu/djvu.wasm", 4, False)
 
 
 # Linux builds every tool over Vulkan; macOS the runtime's tools over Metal.
@@ -258,7 +269,7 @@ if darwin:
 # the vendored libraries' own dependencies come along by name: an imported
 # graph hands over its archive, not what the archive wants linked
 im_deps = [
-    *shader_rules, codes, imgui, decode, plt, libstd,
+    *shader_rules, codes, imgui, pdf, djvu, decode, plt, libstd,
     *platform_deps, *encoders, *media, system,
 ]
 
@@ -328,7 +339,7 @@ imgui_frames_test = program(
 )
 
 
-tools = ["view", "play", "ui"] if darwin else ["screenshot", "view", "play", "ui"]
+tools = ["view", "play", "read", "ui"] if darwin else ["screenshot", "view", "play", "read", "ui"]
 
 links = command(
     name="links",

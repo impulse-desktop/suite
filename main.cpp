@@ -1,4 +1,5 @@
 #include "play.h"
+#include "read.h"
 #include "view.h"
 #include "ui_demo.h"
 
@@ -32,6 +33,7 @@ namespace {
 #endif
         {"view", mainView},
         {"play", mainPlay},
+        {"read", mainRead},
         {"ui", mainUiDemo},
     };
 

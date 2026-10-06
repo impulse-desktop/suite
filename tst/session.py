@@ -27,7 +27,7 @@ SKIPPED = 77
 SCREENSHOT = "imscreenshot"
 VIEW = "imview"
 UI = "imui"
-TOOLS = {"screenshot": SCREENSHOT, "view": VIEW, "play": "implay", "ui": UI}
+TOOLS = {"screenshot": SCREENSHOT, "view": VIEW, "play": "implay", "read": "imread", "ui": UI}
 
 # the evdev codes the scenarios press
 KEY_ESC = 1
@@ -40,6 +40,7 @@ KEY_TAB = 15
 KEY_Q = 16
 KEY_W = 17
 KEY_R = 19
+KEY_I = 23
 KEY_ENTER = 28
 KEY_LEFTCTRL = 29
 KEY_A = 30
