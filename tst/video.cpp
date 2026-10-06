@@ -919,9 +919,28 @@ void FormatCheck::write(AVFrame* frame, const Case& kase) {
 
         return rgba[c];
     };
+    // chroma at a luma pixel, from the chroma grid around it: the exact
+    // kernel's lanczos3 over six by six sites, the generic kernel's bilinear
+    // blend of the four nearest
+    auto tap = [&](int c, double x, double y) {
+        double at = fmin(fmax(x, 0.), chromaWidth - 1.) * stepX + siteX;
+        double row = fmin(fmax(y, 0.), chromaHeight - 1.) * stepY + siteY;
+
+        return source(c, at, row);
+    };
     auto filtered = [&](int c, double cx, double cy) {
         double bx = floor(cx);
         double by = floor(cy);
+
+        if (generic) {
+            double fx = cx - bx;
+            double fy = cy - by;
+            double left = (1. - fy) * tap(c, bx, by) + fy * tap(c, bx, by + 1.);
+            double right = (1. - fy) * tap(c, bx + 1., by) + fy * tap(c, bx + 1., by + 1.);
+
+            return (1. - fx) * left + fx * right;
+        }
+
         double wx[6];
         double wy[6];
         double sx = 0.;
@@ -937,10 +956,7 @@ void FormatCheck::write(AVFrame* frame, const Case& kase) {
 
         for (int j = 0; j < 6; j++) {
             for (int k = 0; k < 6; k++) {
-                double at = fmin(fmax(bx - 2 + k, 0.), chromaWidth - 1.) * stepX + siteX;
-                double row = fmin(fmax(by - 2 + j, 0.), chromaHeight - 1.) * stepY + siteY;
-
-                total += wx[k] * wy[j] * source(c, at, row);
+                total += wx[k] * wy[j] * tap(c, bx - 2 + k, by - 2 + j);
             }
         }
 
