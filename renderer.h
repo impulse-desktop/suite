@@ -54,6 +54,9 @@ enum class ShaderInput : u8 {
     White,
     Constant,
     Words,
+    Headers,
+    List,
+    Ops,
     Tiles,
     Target
 };
@@ -94,6 +97,7 @@ struct ShaderOptions {
     ShaderOutput output;
     ShaderTiles tiles;
     u32 size[2];
+    bool generic = false;
 };
 
 struct ShaderFactory {

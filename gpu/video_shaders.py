@@ -6,6 +6,7 @@ H.273 in tables.py, as the data codes.cpp includes for the declarations
 of codes.h.
 
   video_shaders.py codes codes.inc
+  video_shaders.py msl video_generic.glsl video_generic.inc
 """
 
 import sys
@@ -160,10 +161,26 @@ def codes(path):
     Path(path).write_text("\n".join(lines), encoding="utf-8")
 
 
+MSL_TYPES = {"vec2": "float2", "vec3": "float3", "vec4": "float4", "ivec2": "int2", "ivec4": "int4", "uvec2": "uint2", "mat3": "float3x3"}
+
+
+def msl(source, path):
+    """The generic video kernel of gpu/video_generic.glsl as Metal source: the
+    same body with Metal's type names, for renderer_metal.mm to compile at
+    run time behind its own compositor."""
+    import re
+
+    text = Path(source).read_text(encoding="utf-8")
+    text = re.sub(r"\b(" + "|".join(MSL_TYPES) + r")\b", lambda m: MSL_TYPES[m.group(1)], text)
+    Path(path).write_text('static constexpr const char* genericSource = R"metal(\n' + text + ')metal";\n', encoding="utf-8")
+
+
 def main():
     args = sys.argv[1:]
     if len(args) == 2 and args[0] == "codes":
         codes(args[1])
+    elif len(args) == 3 and args[0] == "msl":
+        msl(args[1], args[2])
     else:
         raise SystemExit(__doc__)
 

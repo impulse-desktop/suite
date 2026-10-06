@@ -1,5 +1,6 @@
 #version 450
 #extension GL_ARB_gpu_shader_int64 : require
+#extension GL_GOOGLE_include_directive : enable
 
 #ifndef GROUP
 #define GROUP 8
@@ -9,6 +10,7 @@ layout(local_size_x = GROUP, local_size_y = GROUP) in;
 
 layout(constant_id = 0) const int OUTPUT = 0;
 layout(constant_id = 1) const bool WIDE = false;
+layout(constant_id = 2) const bool EDGE = false;
 
 const int TILE = 24;
 const uint NONE = 0xffffffffu;
@@ -82,7 +84,23 @@ layout(push_constant) uniform Frame {
     uint tilesX;
     uint first;
     float white;
+    ivec2 box;
 } frame;
+
+#ifdef GENERIC
+layout(std430, set = 1, binding = 0) readonly buffer Words {
+    uint words[];
+};
+
+#define ARGS_DECL
+#define ARGS
+#define HALF(h) unpackHalf2x16((h) & 0xffffu).x
+#define BITS_FLOAT(b) uintBitsToFloat(b)
+#define STORE(pixel, value) imageStore(target, pixel, value)
+#define FACTS_DECL layout(std430, set = 1, binding = 1) readonly buffer Constants { Facts facts; };
+
+#include "video_generic.glsl"
+#endif
 
 vec3 widen(vec3 c) {
     return mat3(0.627404, 0.069097, 0.016391, 0.329283, 0.919540, 0.088013, 0.043313, 0.011362, 0.895595) * c;
@@ -160,10 +178,19 @@ vec4 over(vec4 src, vec4 acc) {
 
 #ifdef LAYER
 vec4 layer(uvec2 local, ivec2 origin) {
+#ifdef GENERIC
+    return genericShown(local, origin);
+#else
     return vec4(0.0);
+#endif
 }
 #endif
 
+#ifdef GENERIC_KERNEL
+void main() {
+    genericKernel(gl_LocalInvocationID.xy, gl_WorkGroupID.x);
+}
+#else
 void main() {
     const uint across = uint(TILE / GROUP);
     uint tile = tiles[frame.first + gl_WorkGroupID.x];
@@ -257,3 +284,4 @@ void main() {
         imageStore(target, pixel, vec4(encode(acc.rgb, pixel), 1.0));
     }
 }
+#endif

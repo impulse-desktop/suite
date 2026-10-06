@@ -26,6 +26,8 @@
 #include <compose_comp.spv.h>
 #include <vulkan/vulkan_wayland.h>
 #include <compose_layer_comp.spv.h>
+#include <compose_generic_comp.spv.h>
+#include <compose_generic_layer_comp.spv.h>
 
 using namespace stl;
 
@@ -102,7 +104,7 @@ namespace {
     static_assert(sizeof(Op) == 80);
     static_assert(sizeof(Triangle) == 176);
 
-    constexpr size_t callBytes = 32;
+    constexpr size_t callBytes = 40;
     constexpr ShaderParameter hostParameters[] = {{ShaderInput::TargetSize, 0, 8}, {ShaderInput::VideoOrigin, 8, 8}, {ShaderInput::TilesAcross, 16, 4}, {ShaderInput::FirstTile, 20, 4}, {ShaderInput::White, 24, 4}};
     constexpr u32 hostParameterCount = (u32)(sizeof(hostParameters) / sizeof(hostParameters[0]));
 
@@ -317,6 +319,8 @@ namespace {
         VkDescriptorSetLayout wordsSetLayout = VK_NULL_HANDLE;
         VkPipelineLayout composeLayout = VK_NULL_HANDLE;
         VkPipeline plain[outputs] = {};
+        VkPipeline generic[outputs][2] = {};
+        VkPipeline genericLayer[outputs] = {};
         VkDescriptorSet readSet = VK_NULL_HANDLE;
         Buffer readBuffers[composeBuffers];
         Tiles tiles;
@@ -336,7 +340,7 @@ namespace {
         void destroyTexture(Texture& tex);
         void reserve(Buffer& buffer, VkDeviceSize size);
         void releaseBuffer(Buffer& buffer);
-        VkPipeline pipeline(const u32* code, size_t bytes, ShaderOutput output);
+        VkPipeline pipeline(const u32* code, size_t bytes, ShaderOutput output, bool edge);
         void bindCompose(VkDescriptorSet set, Buffer (&buffers)[composeBuffers], VkImageView target, bool content);
         void dispatch(VkCommandBuffer command, VkDescriptorSet set, u32 width, u32 height, ShaderOutput output);
 
@@ -622,6 +626,8 @@ namespace {
     struct VulkanShader final: RenderShader {
         Gpu* gpu = nullptr;
         VkPipeline pipeline = VK_NULL_HANDLE;
+        bool shared = false;
+        Buffer constants;
         const ShaderParameter* parameters = nullptr;
         u32 parameterCount = 0;
         u64 lastUse = 0;
@@ -1856,11 +1862,11 @@ VkShaderModule Gpu::shaderModule(const u32* code, size_t bytes) {
     return module;
 }
 
-VkPipeline Gpu::pipeline(const u32* code, size_t bytes, ShaderOutput output) {
+VkPipeline Gpu::pipeline(const u32* code, size_t bytes, ShaderOutput output, bool edge) {
     VkShaderModule module = shaderModule(code, bytes);
-    u32 constants[2] = {output == ShaderOutput::Srgb ? 0u : output == ShaderOutput::Pq ? 1u : 2u, output == ShaderOutput::Pq || output == ShaderOutput::WideLinear ? 1u : 0u};
-    VkSpecializationMapEntry entries[2] = {{0, 0, 4}, {1, 4, 4}};
-    VkSpecializationInfo spec{2, entries, sizeof(constants), constants};
+    u32 constants[3] = {output == ShaderOutput::Srgb ? 0u : output == ShaderOutput::Pq ? 1u : 2u, output == ShaderOutput::Pq || output == ShaderOutput::WideLinear ? 1u : 0u, edge ? 1u : 0u};
+    VkSpecializationMapEntry entries[3] = {{0, 0, 4}, {1, 4, 4}, {2, 8, 4}};
+    VkSpecializationInfo spec{3, entries, sizeof(constants), constants};
     VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
 
     ci.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, module, "main", &spec};
@@ -2011,7 +2017,7 @@ void Gpu::dispatch(VkCommandBuffer command, VkDescriptorSet set, u32 width, u32 
 
         if (p == 0) {
             if (!plain[(u32)output]) {
-                plain[(u32)output] = pipeline(compose_comp_spv, sizeof(compose_comp_spv), output);
+                plain[(u32)output] = pipeline(compose_comp_spv, sizeof(compose_comp_spv), output, false);
             }
 
             fillCall(hostParameters, hostParameterCount, call, block);
@@ -2025,13 +2031,10 @@ void Gpu::dispatch(VkCommandBuffer command, VkDescriptorSet set, u32 width, u32 
         VulkanImage* image = placed.image;
         ShaderOptions options{ShaderTarget::Spirv, output, (ShaderTiles)((p - 1) % 3), {(u32)(placed.box[2] - placed.box[0]), (u32)(placed.box[3] - placed.box[1])}};
         VulkanShader& shader = static_cast<VulkanShader&>(image->factory->shader(options));
-        VkDescriptorBufferInfo words{image->buffer, 0, VK_WHOLE_SIZE};
-        VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        VkDescriptorBufferInfo bound[2] = {{image->buffer, 0, VK_WHOLE_SIZE}, {shader.constants.buffer, 0, VK_WHOLE_SIZE}};
+        VkWriteDescriptorSet writes[2];
+        u32 written = 0;
 
-        write.dstBinding = 0;
-        write.descriptorCount = 1;
-        write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        write.pBufferInfo = &words;
         shader.lastUse = submitted + 1;
         call.video[0] = placed.box[0];
         call.video[1] = placed.box[1];
@@ -2041,9 +2044,22 @@ void Gpu::dispatch(VkCommandBuffer command, VkDescriptorSet set, u32 width, u32 
         vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, shader.pipeline);
 
         for (u32 i = 0; i < shader.parameterCount; i++) {
-            if (shader.parameters[i].input == ShaderInput::Words) {
-                pushDescriptorSet(command, VK_PIPELINE_BIND_POINT_COMPUTE, composeLayout, 1, 1, &write);
+            ShaderInput input = shader.parameters[i].input;
+
+            if (input != ShaderInput::Words && input != ShaderInput::Constant) {
+                continue;
             }
+
+            writes[written] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+            writes[written].dstBinding = input == ShaderInput::Words ? 0 : 1;
+            writes[written].descriptorCount = 1;
+            writes[written].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            writes[written].pBufferInfo = &bound[input == ShaderInput::Words ? 0 : 1];
+            written++;
+        }
+
+        if (written) {
+            pushDescriptorSet(command, VK_PIPELINE_BIND_POINT_COMPUTE, composeLayout, 1, written, writes);
         }
 
         vkCmdPushConstants(command, composeLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, callBytes, block);
@@ -2421,12 +2437,12 @@ void Gpu::setupCompose(ObjPool& pool) {
         vkDestroyDescriptorSetLayout(device, composeSetLayout, alloc);
     });
 
-    VkDescriptorSetLayoutBinding words{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+    VkDescriptorSetLayoutBinding words[2] = {{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr}, {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr}};
     VkDescriptorSetLayoutCreateInfo pushed{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
 
     pushed.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
-    pushed.bindingCount = 1;
-    pushed.pBindings = &words;
+    pushed.bindingCount = 2;
+    pushed.pBindings = words;
     vkc(vkCreateDescriptorSetLayout(device, &pushed, alloc, &wordsSetLayout));
     pooledGuard(pool, [this] {
         vkDestroyDescriptorSetLayout(device, wordsSetLayout, alloc);
@@ -2448,6 +2464,20 @@ void Gpu::setupCompose(ObjPool& pool) {
             }
         }
 
+        for (VkPipeline made : genericLayer) {
+            if (made) {
+                vkDestroyPipeline(device, made, alloc);
+            }
+        }
+
+        for (u32 i = 0; i < outputs; i++) {
+            for (VkPipeline made : generic[i]) {
+                if (made) {
+                    vkDestroyPipeline(device, made, alloc);
+                }
+            }
+        }
+
         vkDestroyPipelineLayout(device, composeLayout, alloc);
     });
 
@@ -2462,7 +2492,7 @@ void Gpu::setupCompose(ObjPool& pool) {
             releaseBuffer(buffer);
         }
     });
-    plain[(u32)ShaderOutput::Srgb] = pipeline(compose_comp_spv, sizeof(compose_comp_spv), ShaderOutput::Srgb);
+    plain[(u32)ShaderOutput::Srgb] = pipeline(compose_comp_spv, sizeof(compose_comp_spv), ShaderOutput::Srgb, false);
 }
 
 VkSurfaceKHR Gpu::createSurface(plt::Window& window) {
@@ -2508,7 +2538,7 @@ void Gpu::setupWindow(ObjPool& pool, VkSurfaceKHR surface, int w, int h) {
     present.hdr = colorSpaces && selectSurfaceFormat(surface, pqFormats, 2, VK_COLOR_SPACE_HDR10_ST2084_EXT, present.pq);
 
     if (present.hdr) {
-        plain[(u32)ShaderOutput::Pq] = pipeline(compose_comp_spv, sizeof(compose_comp_spv), ShaderOutput::Pq);
+        plain[(u32)ShaderOutput::Pq] = pipeline(compose_comp_spv, sizeof(compose_comp_spv), ShaderOutput::Pq, false);
     }
 
     createSwapchain((u32)w, (u32)h);
@@ -3022,10 +3052,13 @@ RenderShader* VulkanRenderer::compileKernel(ObjPool& pool, const CompiledShader&
     if (tile != composeTile) {
         fail(StringView(u8"a kernel is not made for the compositor's tile"));
     }
-    const void* code = compiled.code.data();
+    const void* code = compiled.code.length() ? compiled.code.data() : nullptr;
     size_t size = compiled.code.length();
-    if (!code || !size || size % 4) {
+    if (code && size % 4) {
         fail(StringView(u8"invalid shader code"));
+    }
+    if (!code && !compiled.constants.length()) {
+        fail(StringView(u8"a shader without code or constants"));
     }
     VulkanShader* shader = pool.make<VulkanShader>();
     shader->gpu = gpu;
@@ -3035,12 +3068,27 @@ RenderShader* VulkanRenderer::compileKernel(ObjPool& pool, const CompiledShader&
         shader->parameters = parameters;
         shader->parameterCount = compiled.parameterCount;
     }
+    if (compiled.constants.length()) {
+        gpu->reserve(shader->constants, compiled.constants.length());
+        memcpy(shader->constants.map, compiled.constants.data(), compiled.constants.length());
+    }
+    if (!code) {
+        bool mixed = options.tiles == ShaderTiles::Mixed;
+        bool edge = options.tiles == ShaderTiles::Edge;
+        VkPipeline& made = mixed ? gpu->genericLayer[(u32)options.output] : gpu->generic[(u32)options.output][edge ? 1 : 0];
+        if (!made) {
+            made = mixed ? gpu->pipeline(compose_generic_layer_comp_spv, sizeof(compose_generic_layer_comp_spv), options.output, false) : gpu->pipeline(compose_generic_comp_spv, sizeof(compose_generic_comp_spv), options.output, edge);
+        }
+        shader->pipeline = made;
+        shader->shared = true;
+        return shader;
+    }
     if (options.tiles == ShaderTiles::Mixed) {
         Vector<u32> merged;
         mergeLayer(compose_layer_comp_spv, sizeof(compose_layer_comp_spv) / 4, (const u32*)code, size / 4, merged);
-        shader->pipeline = gpu->pipeline(merged.data(), merged.length() * 4, options.output);
+        shader->pipeline = gpu->pipeline(merged.data(), merged.length() * 4, options.output, false);
     } else {
-        shader->pipeline = gpu->pipeline((const u32*)code, size, options.output);
+        shader->pipeline = gpu->pipeline((const u32*)code, size, options.output, false);
     }
     return shader;
 }
@@ -3090,9 +3138,10 @@ VulkanShader::~VulkanShader() noexcept {
         vkDeviceWaitIdle(gpu->device);
         gpu->completed = gpu->submitted;
     }
-    if (pipeline) {
+    if (pipeline && !shared) {
         vkDestroyPipeline(gpu->device, pipeline, gpu->alloc);
     }
+    gpu->releaseBuffer(constants);
 }
 
 void VulkanImage::draw(ImDrawList& list, ImVec2 lo, ImVec2 hi) {

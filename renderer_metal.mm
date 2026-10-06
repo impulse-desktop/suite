@@ -20,6 +20,7 @@
 #include <plt/window.h>
 #include <plt/platform.h>
 #include <plt/loop_wake.h>
+#include <video_generic.inc>
 
 #import <Metal/Metal.h>
 #import <AppKit/AppKit.h>
@@ -88,7 +89,7 @@ namespace {
     static_assert(sizeof(Op) == 80);
     static_assert(sizeof(Triangle) == 176);
 
-    constexpr size_t callBytes = 32;
+    constexpr size_t callBytes = 40;
     constexpr ShaderParameter hostParameters[] = {{ShaderInput::TargetSize, 0, 8}, {ShaderInput::VideoOrigin, 8, 8}, {ShaderInput::TilesAcross, 16, 4}, {ShaderInput::FirstTile, 20, 4}, {ShaderInput::White, 24, 4}};
     constexpr u32 hostParameterCount = (u32)(sizeof(hostParameters) / sizeof(hostParameters[0]));
 
@@ -162,6 +163,7 @@ namespace {
 
     struct MetalShader final: RenderShader {
         id<MTLComputePipelineState> pipeline = nil;
+        id<MTLBuffer> constants = nil;
         const ShaderParameter* parameters = nullptr;
         u32 parameterCount = 0;
     };
@@ -278,7 +280,11 @@ namespace {
         id<MTLCommandBuffer> last = nil;
         id<MTLLibrary> plainLibrary = nil;
         id<MTLLibrary> layeredLibrary = nil;
+        id<MTLLibrary> genericLibrary = nil;
+        id<MTLLibrary> genericLayeredLibrary = nil;
         id<MTLComputePipelineState> plain[outputs] = {};
+        id<MTLComputePipelineState> generic[outputs][2] = {};
+        id<MTLComputePipelineState> genericLayer[outputs] = {};
         bool edr = false;
         bool wide = false;
         float sdrWhiteNits = 203.f;
@@ -297,7 +303,8 @@ namespace {
         RenderShader* compileKernel(ObjPool& pool, const CompiledShader& compiled, u32 tile, const ShaderOptions& options) override;
         RenderImage* shade(ObjPool& pool, ShaderFactory& factory, u32 width, u32 height, const void* data, size_t size, bool hdr, Runable& retired) override;
         id<MTLLibrary> library(NSString* source);
-        id<MTLComputePipelineState> pipeline(id<MTLLibrary> library, ShaderOutput output, u32 side, id<MTLFunction> linked);
+        id<MTLLibrary> composeLibrary(const char* defines, bool generic);
+        id<MTLComputePipelineState> pipeline(id<MTLLibrary> library, ShaderOutput output, u32 side, id<MTLFunction> linked, bool edge);
         void updateTextures(ImDrawData* draw);
         void encode(id<MTLCommandBuffer> command, id<MTLTexture> target, ShaderOutput output);
         void setMode(bool wide);
@@ -316,6 +323,7 @@ namespace {
 
 constant int OUTPUT [[function_constant(0)]];
 constant bool WIDE [[function_constant(1)]];
+constant bool EDGE [[function_constant(2)]];
 
 constant int TILE = 24;
 constant uint NONE = 0xffffffffu;
@@ -366,6 +374,7 @@ struct Frame {
     uint tilesX;
     uint first;
     float white;
+    int2 box;
 };
 
 struct Textures {
@@ -436,14 +445,35 @@ static float4 sampled(constant Textures& textures, uint index, uint flags, float
 static float4 over(float4 src, float4 acc) {
     return float4(src.rgb * src.a, src.a) + acc * (1.0 - src.a);
 }
+)metal";
 
+    static constexpr const char* genericPrelude = R"metal(
+#define ARGS_DECL , const device uint* words, constant Facts& facts, constant Frame& frame, device const Header* headers, device const uint* list, device const Op* ops, device const uint* tiles, texture2d<float, access::write> target
+#define ARGS , words, facts, frame, headers, list, ops, tiles, target
+#define HALF(h) float(as_type<half>(ushort((h) & 0xffffu)))
+#define BITS_FLOAT(b) as_type<float>(b)
+#define STORE(pixel, value) target.write(value, uint2(pixel))
+#define FACTS_DECL
+)metal";
+
+    static constexpr const char* composeKernel = R"metal(
+#ifdef GENERIC_KERNEL
+kernel void compose(device const Header* headers [[buffer(0)]], device const uint* list [[buffer(1)]], device const Op* ops [[buffer(2)]], device const uint* tiles [[buffer(4)]], constant Frame& frame [[buffer(5)]], const device uint* words [[buffer(7)]], constant Facts& facts [[buffer(8)]], texture2d<float, access::write> target [[texture(0)]], uint3 group [[threadgroup_position_in_grid]], uint3 inside [[thread_position_in_threadgroup]]) {
+    genericKernel(inside.xy, group.x ARGS);
+}
+#else
 #ifdef LAYER
+#ifndef GENERIC
 [[visible]] float4 layer(uint2 local, int2 origin, const device uint* words);
+#endif
 #endif
 
 kernel void compose(device const Header* headers [[buffer(0)]], device const uint* list [[buffer(1)]], device const Op* ops [[buffer(2)]], device const Triangle* triangles [[buffer(3)]], device const uint* tiles [[buffer(4)]], constant Frame& frame [[buffer(5)]], constant Textures& textures [[buffer(6)]],
 #ifdef LAYER
     const device uint* words [[buffer(7)]],
+#endif
+#ifdef GENERIC
+    constant Facts& facts [[buffer(8)]],
 #endif
     texture2d<float, access::write> target [[texture(0)]], uint3 group [[threadgroup_position_in_grid]], uint3 inside [[thread_position_in_threadgroup]]) {
     const uint across = uint(TILE / GROUP);
@@ -457,7 +487,11 @@ kernel void compose(device const Header* headers [[buffer(0)]], device const uin
     float4 shown = float4(0.0);
 
 #ifdef LAYER
+#ifdef GENERIC
+    shown = genericShown(inside.xy, origin - frame.video ARGS);
+#else
     shown = layer(inside.xy, origin - frame.video, words);
+#endif
 #endif
 
     if (pixel.x >= frame.size.x || pixel.y >= frame.size.y) {
@@ -539,6 +573,7 @@ kernel void compose(device const Header* headers [[buffer(0)]], device const uin
         target.write(float4(encode(acc.rgb, pixel, frame), 1.0), uint2(pixel));
     }
 }
+#endif
 )metal";
 
     static i64 nearest(float x) {
@@ -1248,13 +1283,18 @@ id<MTLLibrary> MetalRenderer::library(NSString* source) {
     return made;
 }
 
-id<MTLComputePipelineState> MetalRenderer::pipeline(id<MTLLibrary> from, ShaderOutput output, u32 side, id<MTLFunction> linked) {
+id<MTLLibrary> MetalRenderer::composeLibrary(const char* defines, bool generic) {
+    return library([NSString stringWithFormat:@"%s%s%s%s%s", defines, composeSource, generic ? genericPrelude : "", generic ? genericSource : "", composeKernel]);
+}
+
+id<MTLComputePipelineState> MetalRenderer::pipeline(id<MTLLibrary> from, ShaderOutput output, u32 side, id<MTLFunction> linked, bool edge) {
     MTLFunctionConstantValues* constants = [[MTLFunctionConstantValues alloc] init];
     int encoding = output == ShaderOutput::Srgb ? 0 : 2;
     bool wideOutput = output == ShaderOutput::WideLinear;
     NSError* error = nil;
     [constants setConstantValue:&encoding type:MTLDataTypeInt atIndex:0];
     [constants setConstantValue:&wideOutput type:MTLDataTypeBool atIndex:1];
+    [constants setConstantValue:&edge type:MTLDataTypeBool atIndex:2];
     id<MTLFunction> function = [from newFunctionWithName:@"compose" constantValues:constants error:&error];
     if (!function) {
         fail(StringView(StringBuilder() << StringView(u8"Metal compositor function: ") << StringView(error ? error.localizedDescription.UTF8String : "missing")));
@@ -1313,7 +1353,7 @@ void MetalRenderer::encode(id<MTLCommandBuffer> command, id<MTLTexture> target, 
         call.first = t.programs[p * 2];
         if (p == 0) {
             if (!plain[(u32)output]) {
-                plain[(u32)output] = pipeline(plainLibrary, output, composeGroup, nil);
+                plain[(u32)output] = pipeline(plainLibrary, output, composeGroup, nil, false);
             }
             fillCall(hostParameters, hostParameterCount, call, block);
             [compute setComputePipelineState:plain[(u32)output]];
@@ -1334,6 +1374,8 @@ void MetalRenderer::encode(id<MTLCommandBuffer> command, id<MTLTexture> target, 
         for (u32 i = 0; i < shader.parameterCount; i++) {
             if (shader.parameters[i].input == ShaderInput::Words) {
                 [compute setBuffer:image->buffer offset:0 atIndex:7];
+            } else if (shader.parameters[i].input == ShaderInput::Constant) {
+                [compute setBuffer:shader.constants offset:0 atIndex:8];
             }
         }
         [compute setBytes:block length:callBytes atIndex:5];
@@ -1584,25 +1626,49 @@ RenderShader* MetalRenderer::compileKernel(ObjPool& pool, const CompiledShader& 
     if (tile != composeTile) {
         fail(StringView(u8"a kernel is not made for the compositor's tile"));
     }
-    if (compiled.code.empty()) {
-        fail(StringView(u8"invalid shader code"));
+    if (compiled.code.empty() && !compiled.constants.length()) {
+        fail(StringView(u8"a shader without code or constants"));
     }
     @autoreleasepool {
-        NSError* error = nil;
-        dispatch_data_t bytes = dispatch_data_create(compiled.code.data(), compiled.code.length(), nil, DISPATCH_DATA_DESTRUCTOR_DEFAULT);
-        id<MTLLibrary> made = [device newLibraryWithData:bytes error:&error];
-        if (!made) {
-            fail(StringView(StringBuilder() << StringView(u8"Metal shader: ") << StringView(error ? error.localizedDescription.UTF8String : "no library")));
-        }
         MetalShader* shader = pool.make<MetalShader>();
+        bool mixed = options.tiles == ShaderTiles::Mixed;
         if (compiled.parameterCount) {
             ShaderParameter* parameters = (ShaderParameter*)pool.allocate(compiled.parameterCount * sizeof(ShaderParameter));
             memcpy(parameters, compiled.parameters, compiled.parameterCount * sizeof(ShaderParameter));
             shader->parameters = parameters;
             shader->parameterCount = compiled.parameterCount;
         }
-        if (options.tiles != ShaderTiles::Mixed) {
-            shader->pipeline = pipeline(made, options.output, composeTile, nil);
+        if (compiled.constants.length()) {
+            shader->constants = [device newBufferWithBytes:compiled.constants.data() length:compiled.constants.length() options:MTLResourceStorageModeShared];
+            if (!shader->constants) {
+                fail(StringView(u8"cannot allocate a shader's constants"));
+            }
+        }
+        if (compiled.code.empty()) {
+            bool edge = options.tiles == ShaderTiles::Edge;
+            __strong id<MTLComputePipelineState>* made = mixed ? &genericLayer[(u32)options.output] : &generic[(u32)options.output][edge ? 1 : 0];
+            if (!*made && mixed) {
+                if (!genericLayeredLibrary) {
+                    genericLayeredLibrary = composeLibrary("#define GROUP 24\n#define GENERIC 1\n#define LAYER 1\n", true);
+                }
+                *made = pipeline(genericLayeredLibrary, options.output, composeTile, nil, false);
+            } else if (!*made) {
+                if (!genericLibrary) {
+                    genericLibrary = composeLibrary("#define GROUP 24\n#define GENERIC 1\n#define GENERIC_KERNEL 1\n", true);
+                }
+                *made = pipeline(genericLibrary, options.output, composeTile, nil, edge);
+            }
+            shader->pipeline = *made;
+            return shader;
+        }
+        NSError* error = nil;
+        dispatch_data_t bytes = dispatch_data_create(compiled.code.data(), compiled.code.length(), nil, DISPATCH_DATA_DESTRUCTOR_DEFAULT);
+        id<MTLLibrary> made = [device newLibraryWithData:bytes error:&error];
+        if (!made) {
+            fail(StringView(StringBuilder() << StringView(u8"Metal shader: ") << StringView(error ? error.localizedDescription.UTF8String : "no library")));
+        }
+        if (!mixed) {
+            shader->pipeline = pipeline(made, options.output, composeTile, nil, false);
             return shader;
         }
         id<MTLFunction> layer = [made newFunctionWithName:@"layer"];
@@ -1610,9 +1676,9 @@ RenderShader* MetalRenderer::compileKernel(ObjPool& pool, const CompiledShader& 
             fail(StringView(u8"Metal shader: no layer function"));
         }
         if (!layeredLibrary) {
-            layeredLibrary = library([NSString stringWithFormat:@"#define GROUP %u\n#define LAYER 1\n%s", composeTile, composeSource]);
+            layeredLibrary = composeLibrary("#define GROUP 24\n#define LAYER 1\n", false);
         }
-        shader->pipeline = pipeline(layeredLibrary, options.output, composeTile, layer);
+        shader->pipeline = pipeline(layeredLibrary, options.output, composeTile, layer, false);
         return shader;
     }
 }
@@ -1687,8 +1753,8 @@ Renderer* createMetalRenderer(ObjPool& pool, plt::Platform& platform, plt::Windo
     layer.allowsNextDrawableTimeout = NO;
     layer.presentsWithTransaction = NO;
     renderer->setMode(false);
-    renderer->plainLibrary = renderer->library([NSString stringWithFormat:@"#define GROUP %u\n%s", composeGroup, composeSource]);
-    renderer->plain[(u32)ShaderOutput::Srgb] = renderer->pipeline(renderer->plainLibrary, ShaderOutput::Srgb, composeGroup, nil);
+    renderer->plainLibrary = renderer->composeLibrary("#define GROUP 8\n", false);
+    renderer->plain[(u32)ShaderOutput::Srgb] = renderer->pipeline(renderer->plainLibrary, ShaderOutput::Srgb, composeGroup, nil, false);
     renderer->wake = platform.createLoopWake(pool, *pool.make<PollMetal>(renderer));
     renderer->smallObjects = SmallObjAllocator::create(&pool);
     renderer->landed = Channel::create(&pool, 64);

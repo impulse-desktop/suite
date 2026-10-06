@@ -101,17 +101,29 @@ shader_rules = []
 for shader, defines in [] if darwin else [
     ("compose", []),
     ("compose_layer", ["-DGROUP=24", "-DLAYER"]),
+    ("compose_generic", ["-DGROUP=24", "-DGENERIC", "-DGENERIC_KERNEL"]),
+    ("compose_generic_layer", ["-DGROUP=24", "-DGENERIC", "-DLAYER"]),
 ]:
     shader_rules.append(command(
         name=f"shader_{shader}",
-        inputs=["$(S)/gpu/compose.comp"],
+        inputs=["$(S)/gpu/compose.comp", "$(S)/gpu/video_generic.glsl"],
         outputs=[f"$(B)/shaders/{shader}_comp.spv.h"],
         descr='SH',
         cmd=[
-            "glslangValidator", "--target-env", "vulkan1.1", "-V", *defines, "$(S)/gpu/compose.comp",
+            "glslangValidator", "--target-env", "vulkan1.1", "-V", *defines, "-I$(S)/gpu", "$(S)/gpu/compose.comp",
             "--variable-name", f"{shader}_comp_spv", "-o", f"$(B)/shaders/{shader}_comp.spv.h",
         ],
     ))
+
+# the generic video kernel for Metal, the same gpu/video_generic.glsl in
+# Metal's spelling, which renderer_metal.mm compiles behind its compositor
+shader_rules.append(command(
+    name="shader_generic_msl",
+    inputs=["$(S)/gpu/video_shaders.py", "$(S)/gpu/video_generic.glsl"],
+    outputs=["$(B)/shaders/video_generic.inc"],
+    descr="SH",
+    cmd=["python3", "$(S)/gpu/video_shaders.py", "msl", "$(S)/gpu/video_generic.glsl", "$(B)/shaders/video_generic.inc"],
+))
 
 
 # the player's color conversion is compiled at run time (shader.cpp) from

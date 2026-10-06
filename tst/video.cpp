@@ -98,9 +98,10 @@ namespace {
         ObjPool* pool;
         Ui* ui;
         VideoShader facts;
+        bool generic;
         Vector<Made> made;
 
-        VideoFactory(ObjPool* pool, Ui* ui, const VideoShader& facts);
+        VideoFactory(ObjPool* pool, Ui* ui, const VideoShader& facts, bool generic);
         RenderShader& shader(const ShaderOptions& options) override;
     };
 
@@ -114,6 +115,7 @@ namespace {
         int failed = 0;
         u32 bucket = 0;
         u32 buckets = 1;
+        bool generic = false;
 
         FormatCheck(ObjPool* pool, Ui* ui);
         VideoShader describe(const AVFrame* frame, const char* output);
@@ -814,37 +816,42 @@ VideoShader FormatCheck::describe(const AVFrame* frame, const char* output) {
     return out;
 }
 
-VideoFactory::VideoFactory(ObjPool* pool_, Ui* ui_, const VideoShader& facts_)
+VideoFactory::VideoFactory(ObjPool* pool_, Ui* ui_, const VideoShader& facts_, bool generic_)
     : pool(pool_)
     , ui(ui_)
     , facts(facts_)
+    , generic(generic_)
 {
 }
 
 RenderShader& VideoFactory::shader(const ShaderOptions& options) {
+    ShaderOptions wanted = options;
+
+    wanted.generic = generic;
+
     for (const Made& known : made) {
-        if (known.options.target == options.target && known.options.output == options.output && known.options.tiles == options.tiles && known.options.size[0] == options.size[0] && known.options.size[1] == options.size[1]) {
+        if (known.options.target == wanted.target && known.options.output == wanted.output && known.options.tiles == wanted.tiles && known.options.size[0] == wanted.size[0] && known.options.size[1] == wanted.size[1]) {
             return *known.shader;
         }
     }
 
     ScopedPtr<ObjPool> scratch{ObjPool::fromMemoryRaw()};
-    CompiledShader code = compile(*scratch.ptr, facts, options);
-    RenderShader* compiled = ui->compileKernel(*pool, code, facts.tile, options);
+    CompiledShader code = compile(*scratch.ptr, facts, wanted);
+    RenderShader* compiled = ui->compileKernel(*pool, code, facts.tile, wanted);
 
-    made.pushBack(Made{options, compiled});
+    made.pushBack(Made{wanted, compiled});
 
     return *compiled;
 }
 
 VideoFactory& FormatCheck::factoryFor(const VideoShader& facts) {
     for (VideoFactory* known : factories) {
-        if (!memcmp(&known->facts, &facts, sizeof(facts))) {
+        if (known->generic == generic && !memcmp(&known->facts, &facts, sizeof(facts))) {
             return *known;
         }
     }
 
-    VideoFactory* made = pool->make<VideoFactory>(pool, ui, facts);
+    VideoFactory* made = pool->make<VideoFactory>(pool, ui, facts, generic);
 
     factories.pushBack(made);
 
@@ -1170,7 +1177,7 @@ void FormatCheck::compare(StringView what, StringView output, const Vector<doubl
 
     if (!(worst <= tolerance)) {
         failed++;
-        sysE << StringView(u8"video formats: ") << what << StringView(u8" ") << output << StringView(u8" is off by ") << worst << StringView(u8" at ") << (u64)(at / 4 % sampleWidth) << StringView(u8",") << (u64)(at / 4 / sampleWidth) << StringView(u8" channel ") << (u64)(at % 4) << StringView(u8", got ") << got[at] << StringView(u8" for ") << expected[at] << StringView(u8", allowed ") << tolerance << endL;
+        sysE << StringView(u8"video formats: ") << what << (generic ? StringView(u8" generic") : StringView(u8"")) << StringView(u8" ") << output << StringView(u8" is off by ") << worst << StringView(u8" at ") << (u64)(at / 4 % sampleWidth) << StringView(u8",") << (u64)(at / 4 / sampleWidth) << StringView(u8" channel ") << (u64)(at % 4) << StringView(u8", got ") << got[at] << StringView(u8" for ") << expected[at] << StringView(u8", allowed ") << tolerance << endL;
     }
 }
 
@@ -1235,7 +1242,7 @@ void FormatCheck::check(const Case& kase, StringView what) {
     } catch (...) {
         checked++;
         failed++;
-        sysE << StringView(u8"video formats: ") << what << StringView(u8": ") << Exception::current() << endL;
+        sysE << StringView(u8"video formats: ") << what << (generic ? StringView(u8" generic") : StringView(u8"")) << StringView(u8": ") << Exception::current() << endL;
     }
 }
 
@@ -1245,7 +1252,7 @@ void FormatCheck::examine(const Case& kase, StringView what) {
     if (!layout) {
         checked++;
         failed++;
-        sysE << StringView(u8"video formats: ") << what << StringView(u8" has no layout") << endL;
+        sysE << StringView(u8"video formats: ") << what << (generic ? StringView(u8" generic") : StringView(u8"")) << StringView(u8" has no layout") << endL;
 
         return;
     }
@@ -1691,27 +1698,30 @@ int main(int argc, char** argv) {
 
     auto body = makeRunable([&] {
         try {
-            check.formats();
-            check.underlay();
-            check.scaled(StringView(u8"layer scaled"), AV_PIX_FMT_YUV420P, scaledWidth, scaledHeight);
-            check.scaled(StringView(u8"layer shrunk"), AV_PIX_FMT_YUV420P, shrunkWidth, shrunkHeight);
-            check.scaled(StringView(u8"layer shrunk far"), AV_PIX_FMT_YUV420P, farWidth, farHeight);
-            check.scaled(StringView(u8"layer scaled yuva420p"), AV_PIX_FMT_YUVA420P, scaledWidth, scaledHeight);
-            check.scaled(StringView(u8"layer shrunk yuva420p"), AV_PIX_FMT_YUVA420P, shrunkWidth, shrunkHeight);
-            check.scaled(StringView(u8"layer scaled bgra"), AV_PIX_FMT_BGRA, scaledWidth, scaledHeight);
-            check.scaled(StringView(u8"layer shrunk bgra"), AV_PIX_FMT_BGRA, shrunkWidth, shrunkHeight);
-            check.scaled(StringView(u8"layer shrunk far bgra"), AV_PIX_FMT_BGRA, farWidth, farHeight);
-            check.scaled(StringView(u8"layer shrunk to a pixel"), AV_PIX_FMT_BGRA, 1, 1);
-            check.scaled(StringView(u8"layer shrunk to a pixel yuv444p"), AV_PIX_FMT_YUV444P, 1, 1);
-            check.scaled(StringView(u8"layer scaled pal8"), AV_PIX_FMT_PAL8, scaledWidth, scaledHeight);
-            check.scaled(StringView(u8"layer shrunk pal8"), AV_PIX_FMT_PAL8, shrunkWidth, shrunkHeight);
-            check.scaled(StringView(u8"layer scaled bayer"), AV_PIX_FMT_BAYER_RGGB8, scaledWidth, scaledHeight);
-            check.scaled(StringView(u8"layer shrunk bayer"), AV_PIX_FMT_BAYER_RGGB8, shrunkWidth, shrunkHeight);
-            check.matrices();
-            check.locations();
-            check.systems();
-            check.transfers();
-            check.primaries();
+            for (int pass = 0; pass < 2; pass++) {
+                check.generic = pass == 1;
+                check.formats();
+                check.underlay();
+                check.scaled(StringView(u8"layer scaled"), AV_PIX_FMT_YUV420P, scaledWidth, scaledHeight);
+                check.scaled(StringView(u8"layer shrunk"), AV_PIX_FMT_YUV420P, shrunkWidth, shrunkHeight);
+                check.scaled(StringView(u8"layer shrunk far"), AV_PIX_FMT_YUV420P, farWidth, farHeight);
+                check.scaled(StringView(u8"layer scaled yuva420p"), AV_PIX_FMT_YUVA420P, scaledWidth, scaledHeight);
+                check.scaled(StringView(u8"layer shrunk yuva420p"), AV_PIX_FMT_YUVA420P, shrunkWidth, shrunkHeight);
+                check.scaled(StringView(u8"layer scaled bgra"), AV_PIX_FMT_BGRA, scaledWidth, scaledHeight);
+                check.scaled(StringView(u8"layer shrunk bgra"), AV_PIX_FMT_BGRA, shrunkWidth, shrunkHeight);
+                check.scaled(StringView(u8"layer shrunk far bgra"), AV_PIX_FMT_BGRA, farWidth, farHeight);
+                check.scaled(StringView(u8"layer shrunk to a pixel"), AV_PIX_FMT_BGRA, 1, 1);
+                check.scaled(StringView(u8"layer shrunk to a pixel yuv444p"), AV_PIX_FMT_YUV444P, 1, 1);
+                check.scaled(StringView(u8"layer scaled pal8"), AV_PIX_FMT_PAL8, scaledWidth, scaledHeight);
+                check.scaled(StringView(u8"layer shrunk pal8"), AV_PIX_FMT_PAL8, shrunkWidth, shrunkHeight);
+                check.scaled(StringView(u8"layer scaled bayer"), AV_PIX_FMT_BAYER_RGGB8, scaledWidth, scaledHeight);
+                check.scaled(StringView(u8"layer shrunk bayer"), AV_PIX_FMT_BAYER_RGGB8, shrunkWidth, shrunkHeight);
+                check.matrices();
+                check.locations();
+                check.systems();
+                check.transfers();
+                check.primaries();
+            }
         } catch (...) {
             crashed = true;
             sysE << StringView(u8"video formats: ") << Exception::current() << endL;

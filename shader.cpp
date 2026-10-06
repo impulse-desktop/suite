@@ -4617,18 +4617,175 @@ namespace {
     }
 }
 
+namespace {
+    struct Facts {
+        u32 model;
+        u32 count;
+        u32 flags;
+        u32 system;
+        u32 transfer;
+        u32 conversion;
+        u32 target;
+        u32 tile;
+        i32 luma[5];
+        i32 components[20];
+        u32 planeOffset[4];
+        u32 lineSize[4];
+        u32 size[4];
+        float chroma[4];
+        float decode[9];
+        float bias[4];
+        float sites[2];
+        float weights[2];
+        float curve[11];
+        float oetf[11];
+        float inverse[11];
+        float toOutput[9];
+        float light[3];
+        float luminance[3];
+        float toSignal[9];
+        float toLight[9];
+        float clNegative[2];
+        float clPositive[2];
+    };
+
+    static_assert(sizeof(Facts) == 544);
+
+    double segmentValue(double v, const double* k) {
+        return k[0] * ::pow(v * k[2] + k[3], k[1]) - k[4];
+    }
+
+    double pieceValue(double v, const double (&table)[11]) {
+        if (table[10] < 0.) {
+            return segmentValue(v, table);
+        }
+
+        return v <= table[10] ? segmentValue(v, table + 5) : segmentValue(v, table);
+    }
+
+    double encodeValue(const VideoShader& s, double light) {
+        if (!strcmp(s.transfer, "curve") || !strcmp(s.transfer, "identity")) {
+            return pieceValue(::fmax(light, 0.), s.oetf);
+        }
+
+        if (!strcmp(s.transfer, "log")) {
+            double v = ::fmax(light, 1e-30);
+
+            return v < ::exp2(-3.32192809489 * s.light[0]) ? 0. : ::log2(v) * (0.30102999566 / s.light[0]) + 1.;
+        }
+
+        if (!strcmp(s.transfer, "pq")) {
+            double y = ::pow(::fmin(::fmax(light, 0.), 1.), 2610. / 16384.);
+
+            return ::pow((y * 18.8515625 + 0.8359375) / (y * 18.6875 + 1.), 2523. / 32.);
+        }
+
+        double v = ::fmax(light, 0.);
+
+        return v <= 1. / 12. ? ::sqrt(v * 3.) : ::log(::fmax(v * 12. - 0.28466892, 1e-6)) * 0.17883277 + 0.55991073;
+    }
+
+    void flatten(const double (&rows)[3][3], float (&out)[9]) {
+        for (int r = 0; r < 3; r++) {
+            for (int c = 0; c < 3; c++) {
+                out[r * 3 + c] = (float)rows[r][c];
+            }
+        }
+    }
+
+    void describeGeneric(const VideoShader& s, Facts& f) {
+        const VideoLayout& l = *s.layout;
+
+        memset(&f, 0, sizeof(f));
+        f.model = !strcmp(l.model, "yuv") ? 0 : !strcmp(l.model, "rgb") ? 1 : !strcmp(l.model, "gray") ? 2 : !strcmp(l.model, "xyz") ? 3 : !strcmp(l.model, "bayer") ? 4 : 5;
+        f.count = (u32)l.count;
+        f.flags = (l.bigEndian ? 1u : 0u) | (l.alpha ? 2u : 0u) | (l.floating ? 4u : 0u) | (l.bits ? 8u : 0u) | (l.inverted ? 16u : 0u);
+        f.system = !strcmp(s.system, "cl") ? 1 : !strcmp(s.system, "ictcp") ? 2 : 0;
+        f.transfer = !strcmp(s.transfer, "log") ? 1 : !strcmp(s.transfer, "pq") ? 2 : !strcmp(s.transfer, "hlg") ? 3 : 0;
+        f.conversion = !strcmp(s.conversion, "convert") ? 1 : 0;
+        f.target = strcmp(s.output, "sdr") ? 1 : 0;
+        f.tile = s.tile;
+
+        for (int i = 0; i < 5; i++) {
+            f.luma[i] = l.luma[i];
+        }
+
+        for (int c = 0; c < 4; c++) {
+            for (int k = 0; k < 5; k++) {
+                f.components[c * 5 + k] = l.components[c][k];
+            }
+
+            f.planeOffset[c] = s.planeOffset[c];
+            f.lineSize[c] = s.lineSize[c];
+            f.size[c] = s.size[c];
+            f.chroma[c] = (float)s.chroma[c];
+            f.bias[c] = (float)s.bias[c];
+        }
+
+        flatten(s.decode, f.decode);
+        flatten(s.toOutput, f.toOutput);
+
+        for (int i = 0; i < 2; i++) {
+            f.sites[i] = (float)s.sites[i];
+            f.weights[i] = (float)s.weights[i];
+        }
+
+        for (int i = 0; i < 11; i++) {
+            f.curve[i] = (float)s.curve[i];
+            f.oetf[i] = (float)s.oetf[i];
+            f.inverse[i] = (float)s.inverse[i];
+        }
+
+        for (int i = 0; i < 3; i++) {
+            f.light[i] = (float)s.light[i];
+            f.luminance[i] = (float)s.luminance[i];
+        }
+
+        if (f.system == 2) {
+            double toSignal[3][3];
+            double toLight[3][3];
+
+            ictcp(f.transfer == 2 ? pqToIctcp : hlgToIctcp, toSignal);
+            ictcp(toLms, toLight);
+            flatten(toSignal, f.toSignal);
+            flatten(toLight, f.toLight);
+        }
+
+        if (f.system == 1) {
+            double kr = s.weights[0];
+            double kb = s.weights[1];
+
+            f.clNegative[0] = (float)encodeValue(s, 1. - kb);
+            f.clNegative[1] = (float)encodeValue(s, 1. - kr);
+            f.clPositive[0] = (float)(1. - encodeValue(s, kb));
+            f.clPositive[1] = (float)(1. - encodeValue(s, kr));
+        }
+    }
+}
+
 CompiledShader compile(ObjPool& pool, const VideoShader& shader, const ShaderOptions& options) {
-    static constexpr ShaderParameter kernelParameters[] = {{ShaderInput::TargetSize, 0, 8}, {ShaderInput::VideoOrigin, 8, 8}, {ShaderInput::TilesAcross, 16, 4}, {ShaderInput::FirstTile, 20, 4}, {ShaderInput::White, 24, 4}, {ShaderInput::Words, 0, 0}, {ShaderInput::Tiles, 0, 0}, {ShaderInput::Target, 0, 0}};
+    static constexpr ShaderParameter kernelParameters[] = {{ShaderInput::TargetSize, 0, 8}, {ShaderInput::VideoOrigin, 8, 8}, {ShaderInput::TilesAcross, 16, 4}, {ShaderInput::FirstTile, 20, 4}, {ShaderInput::White, 24, 4}, {ShaderInput::Words, 0, 0}, {ShaderInput::Headers, 0, 0}, {ShaderInput::List, 0, 0}, {ShaderInput::Ops, 0, 0}, {ShaderInput::Tiles, 0, 0}, {ShaderInput::Target, 0, 0}};
     static constexpr ShaderParameter layerParameters[] = {{ShaderInput::TargetSize, 0, 8}, {ShaderInput::VideoOrigin, 8, 8}, {ShaderInput::TilesAcross, 16, 4}, {ShaderInput::FirstTile, 20, 4}, {ShaderInput::White, 24, 4}, {ShaderInput::Words, 0, 0}};
+    static constexpr ShaderParameter genericKernelParameters[] = {{ShaderInput::TargetSize, 0, 8}, {ShaderInput::VideoOrigin, 8, 8}, {ShaderInput::TilesAcross, 16, 4}, {ShaderInput::FirstTile, 20, 4}, {ShaderInput::White, 24, 4}, {ShaderInput::BoxSize, 32, 8}, {ShaderInput::Constant, 0, sizeof(Facts)}, {ShaderInput::Words, 0, 0}, {ShaderInput::Headers, 0, 0}, {ShaderInput::List, 0, 0}, {ShaderInput::Ops, 0, 0}, {ShaderInput::Tiles, 0, 0}, {ShaderInput::Target, 0, 0}};
+    static constexpr ShaderParameter genericLayerParameters[] = {{ShaderInput::TargetSize, 0, 8}, {ShaderInput::VideoOrigin, 8, 8}, {ShaderInput::TilesAcross, 16, 4}, {ShaderInput::FirstTile, 20, 4}, {ShaderInput::White, 24, 4}, {ShaderInput::BoxSize, 32, 8}, {ShaderInput::Constant, 0, sizeof(Facts)}, {ShaderInput::Words, 0, 0}};
     bool mixed = options.tiles == ShaderTiles::Mixed;
-    CompiledShader out{StringView(), mixed ? layerParameters : kernelParameters, (u32)(mixed ? sizeof(layerParameters) : sizeof(kernelParameters)) / (u32)sizeof(ShaderParameter), StringView()};
-    Graph g(pool);
-    Video video{g, shader, *shader.layout, options};
-    Kernel layer;
 
     if (!shader.tile || shader.tile > 32) {
         fail(StringView(u8"a video layer has an invalid tile"));
     }
+
+    if (options.generic) {
+        Facts* facts = (Facts*)pool.allocate(sizeof(Facts));
+
+        describeGeneric(shader, *facts);
+
+        return CompiledShader{StringView(), mixed ? genericLayerParameters : genericKernelParameters, (u32)(mixed ? sizeof(genericLayerParameters) : sizeof(genericKernelParameters)) / (u32)sizeof(ShaderParameter), StringView((const u8*)facts, sizeof(Facts))};
+    }
+
+    CompiledShader out{StringView(), mixed ? layerParameters : kernelParameters, (u32)(mixed ? sizeof(layerParameters) : sizeof(kernelParameters)) / (u32)sizeof(ShaderParameter), StringView()};
+    Graph g(pool);
+    Video video{g, shader, *shader.layout, options};
+    Kernel layer;
 
     layer.tile = shader.tile;
 
