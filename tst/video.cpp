@@ -1441,12 +1441,56 @@ void FormatCheck::scaled(StringView what, AVPixelFormat format, int width, int h
         write(frame, kase);
     }
 
+    Vector<double> encoded = expected;
+
     linearize(kase);
 
     VideoShader facts = describe(frame, "hdr");
     Vector<double> source = expected;
     Vector<double> got;
     double spread = 0.;
+
+    // the generic kernel reads the source at each target pixel's centre in
+    // the source's own signal, the nearest sample of a palette or a mosaic
+    // and a bilinear blend of any other, and lights what it read
+    if (generic) {
+        bool nearest = model == Model::Palette || model == Model::Bayer;
+
+        expected.clear();
+
+        for (int y = 0; y < sampleHeight; y++) {
+            double aty = ((y < height ? y : height - 1) + 0.5) * sampleHeight / height - 0.5;
+
+            for (int x = 0; x < sampleWidth; x++) {
+                double atx = ((x < width ? x : width - 1) + 0.5) * sampleWidth / width - 0.5;
+                double bx = nearest ? floor(atx + 0.5) : floor(atx);
+                double by = nearest ? floor(aty + 0.5) : floor(aty);
+                double fx = nearest ? 0. : atx - bx;
+                double fy = nearest ? 0. : aty - by;
+                int x0 = (int)fmin(fmax(bx, 0.), sampleWidth - 1.);
+                int x1 = (int)fmin(fmax(bx + 1., 0.), sampleWidth - 1.);
+                int y0 = (int)fmin(fmax(by, 0.), sampleHeight - 1.);
+                int y1 = (int)fmin(fmax(by + 1., 0.), sampleHeight - 1.);
+
+                for (int c = 0; c < 4; c++) {
+                    auto texel = [&](int column, int row) {
+                        return encoded[((size_t)row * sampleWidth + (size_t)column) * 4 + (size_t)c];
+                    };
+                    double left = (1. - fy) * texel(x0, y0) + fy * texel(x0, y1);
+                    double right = (1. - fy) * texel(x1, y0) + fy * texel(x1, y1);
+
+                    expected.pushBack((1. - fx) * left + fx * right);
+                }
+            }
+        }
+
+        linearize(kase);
+        shade(frame, facts, true, width, height, got);
+        compare(what, StringView(u8"hdr"), got, 2.4 * tolerance(kase, layout), true, width, height);
+
+        return;
+    }
+
     auto taps = [](int pixel, int size, int target, int (&index)[256], double (&weight)[256]) {
         double full = (double)size / target;
         int box = full > 32. ? (int)ceil(full / 32. - 1e-9) : 1;
