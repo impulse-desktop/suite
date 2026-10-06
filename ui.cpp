@@ -472,7 +472,13 @@ void UiImpl::key(const plt::KeyInput& input) {
     }
 
     if (key != ImGuiKey_None) {
-        io.AddKeyEvent(key, input.action == plt::InputAction::Press);
+        bool press = input.action == plt::InputAction::Press;
+
+        if (press && ImGui::IsKeyDown(key)) {
+            io.AddKeyEvent(key, false);
+        }
+
+        io.AddKeyEvent(key, press);
     }
 }
 
