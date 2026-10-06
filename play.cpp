@@ -2387,8 +2387,9 @@ void Screen::draw() {
     ImGui::SetCursorScreenPos(ImVec2(corner.x + pad, hi.y + pad));
 
     float square = ImGui::GetFrameHeight();
+    bool lit = panel;
 
-    if (panel) {
+    if (lit) {
         ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
     }
 
@@ -2396,7 +2397,7 @@ void Screen::draw() {
         panel = !panel;
     }
 
-    if (panel) {
+    if (lit) {
         ImGui::PopStyleColor();
     }
 
