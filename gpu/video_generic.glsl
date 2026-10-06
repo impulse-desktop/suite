@@ -557,7 +557,7 @@ vec4 genericLayer(uvec2 local, ivec2 origin ARGS_DECL) {
         }
     }
 
-    bool near = cells[0] > 1 || cells[1] > 1 || ratio[0] > 1.0 || ratio[1] > 1.0;
+    bool near = cells[0] > 1 || cells[1] > 1;
     float share = 1.0 / float(cells[0] * cells[1]);
     vec4 acc = vec4(0.0);
 

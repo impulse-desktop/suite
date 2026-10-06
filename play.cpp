@@ -49,7 +49,7 @@ namespace {
     constexpr Design buttonWidth = 72_d;
     constexpr size_t framePermits = 10;
     constexpr size_t planeAlignment = 64;
-    constexpr size_t shaderBudget = 1 << 20;
+    constexpr size_t shaderBudget = 64;
     constexpr size_t channelCapacity = 1024;
     constexpr size_t threadStack = 8u << 20;
     constexpr size_t controllerStack = 8u << 20;
@@ -66,7 +66,9 @@ namespace {
         Frame,
         End,
         Clock,
-        Failure
+        Failure,
+        Compile,
+        Compiled
     };
 
     struct Message {
@@ -87,7 +89,7 @@ namespace {
 
     struct Player;
 
-    struct VideoImage final: public Runable {
+    struct VideoImage final: public Runable, public ShaderFactory {
         Player* player;
         AVFrame* frame;
         ObjPool* pool = nullptr;
@@ -97,26 +99,18 @@ namespace {
 
         explicit VideoImage(Player* player);
         void run() override;
+        RenderShader& shader(const ShaderOptions& options) override;
         void forget();
     };
 
     struct Screen;
 
-    struct VideoFactory final: public ShaderFactory {
-        struct Made {
-            ShaderOptions options;
-            RenderShader* shader;
-        };
-
-        Screen* screen;
-        ObjPool* pool;
+    struct Made {
         VideoShader facts;
-        Vector<Made> made;
-        size_t bytes = 0;
-        u64 used = 0;
-
-        VideoFactory(Screen* screen, ObjPool* pool, const VideoShader& facts);
-        RenderShader& shader(const ShaderOptions& options) override;
+        ShaderOptions options;
+        ObjPool* pool;
+        RenderShader* shader;
+        u64 used;
     };
 
     struct Control final: public Typed<Kind::Control> {
@@ -166,6 +160,33 @@ namespace {
         Buffer text;
 
         explicit Failure(StringView text);
+    };
+
+    struct Compile final: public Typed<Kind::Compile> {
+        VideoShader facts;
+        ShaderOptions options;
+
+        Compile(const VideoShader& facts, const ShaderOptions& options);
+    };
+
+    struct Compiled final: public Typed<Kind::Compiled> {
+        VideoShader facts;
+        ShaderOptions options;
+        ObjPool* pool;
+        RenderShader* shader;
+        u64 compileUs;
+        u64 driverUs;
+
+        Compiled(const VideoShader& facts, const ShaderOptions& options, ObjPool* pool, RenderShader* shader, u64 compileUs, u64 driverUs);
+        ~Compiled() noexcept override;
+    };
+
+    struct Compiler final: public Runable {
+        Player* player;
+
+        explicit Compiler(Player* player);
+        void run() override;
+        void compile(const Compile& request);
     };
 
     struct Stream {
@@ -264,9 +285,8 @@ namespace {
         bool hasVideo;
         bool hasAudio;
         double duration;
-        Vector<VideoFactory*> factories;
-        size_t compiledBytes = 0;
-        u64 compiledClock = 0;
+        Vector<Made> made;
+        u64 madeClock = 0;
         int shownWidth = 0;
         int shownHeight = 0;
         int shownFormat = AV_PIX_FMT_NONE;
@@ -302,8 +322,10 @@ namespace {
         void retired(VideoImage* image);
         void applyClock(const Clock& clock);
         void makeRender(VideoImage* image);
-        VideoFactory& factoryFor(const VideoShader& facts);
-        void trim(const VideoFactory* keep);
+        RenderShader& shaderFor(const VideoShader& facts, const ShaderOptions& options);
+        Made* find(const VideoShader& facts, const ShaderOptions& options);
+        void adopt(Compiled& compiled);
+        void trim();
         void seek(double to, bool play);
         void toggle();
         void sendControl(Channel* to);
@@ -329,12 +351,15 @@ namespace {
         Channel* videoInbox;
         Channel* audioInbox;
         Channel* screenInbox;
+        Channel* shaderInbox;
         plt::LoopWake* wake;
         Video* video;
         Audio* audio;
         Screen* screen;
+        Compiler* compiler;
         Thread* videoThread;
         Thread* audioThread;
+        Thread* shaderThread;
 
         Player(ObjPool& pool, Ui& ui, const char* path);
         ~Player() noexcept;
@@ -1497,8 +1522,8 @@ Screen::~Screen() noexcept {
 
     delete shown;
 
-    for (VideoFactory* known : factories) {
-        delete known->pool;
+    for (const Made& known : made) {
+        delete known.pool;
     }
 }
 
@@ -1567,6 +1592,8 @@ void Screen::drain() {
             videoEnded = videoEnded || end->generation == generation;
         } else if (Failure* failure = cast<Failure>(message.ptr)) {
             halt(StringView(failure->text));
+        } else if (Compiled* compiled = cast<Compiled>(message.ptr)) {
+            adopt(*compiled);
         }
     }
 }
@@ -1717,84 +1744,196 @@ void Screen::makeRender(VideoImage* image) {
 
     image->facts = describeFrame(frame, hdr ? "hdr" : "sdr", RendererOptions{}.sdrWhiteNits);
 
-    VideoFactory& factory = factoryFor(image->facts);
     ScopedPtr<ObjPool> owner{ObjPool::fromMemoryRaw()};
 
-    image->render = player->ui->shadeImage(*owner.ptr, factory, (u32)frame->width, (u32)frame->height, frame->buf[0]->data, frame->buf[0]->size, hdr, *image);
+    image->render = player->ui->shadeImage(*owner.ptr, *image, (u32)frame->width, (u32)frame->height, frame->buf[0]->data, frame->buf[0]->size, hdr, *image);
     image->render->prepare();
     image->pool = owner.ptr;
     owner.drop();
 }
 
-VideoFactory::VideoFactory(Screen* screen_, ObjPool* pool_, const VideoShader& facts_)
-    : screen(screen_)
-    , pool(pool_)
-    , facts(facts_)
+RenderShader& VideoImage::shader(const ShaderOptions& options) {
+    return player->screen->shaderFor(facts, options);
+}
+
+static bool sameOptions(const ShaderOptions& a, const ShaderOptions& b) {
+    return a.target == b.target && a.output == b.output && a.tiles == b.tiles && a.size[0] == b.size[0] && a.size[1] == b.size[1] && a.generic == b.generic;
+}
+
+Made* Screen::find(const VideoShader& facts, const ShaderOptions& options) {
+    for (size_t i = 0; i < made.length(); i++) {
+        if (sameOptions(made[i].options, options) && !memcmp(&made[i].facts, &facts, sizeof(facts))) {
+            return &made.mut(i);
+        }
+    }
+
+    return nullptr;
+}
+
+RenderShader& Screen::shaderFor(const VideoShader& facts, const ShaderOptions& options) {
+    Made* exact = find(facts, options);
+
+    madeClock++;
+
+    if (exact && exact->shader) {
+        exact->used = madeClock;
+
+        return *exact->shader;
+    }
+
+    if (!exact) {
+        made.pushBack(Made{facts, options, nullptr, nullptr, madeClock});
+        player->shaderInbox->enqueue(new Compile(facts, options));
+    }
+
+    ShaderOptions wanted = options;
+
+    wanted.generic = true;
+
+    if (Made* generic = find(facts, wanted)) {
+        generic->used = madeClock;
+
+        return *generic->shader;
+    }
+
+    ScopedPtr<ObjPool> scratch{ObjPool::fromMemoryRaw()};
+    CompiledShader code = compile(*scratch.ptr, facts, wanted);
+    ScopedPtr<ObjPool> owner{ObjPool::fromMemoryRaw()};
+    RenderShader* shader = player->ui->compileKernel(*owner.ptr, code, facts.tile, wanted);
+
+    made.pushBack(Made{facts, wanted, owner.ptr, shader, madeClock});
+    owner.drop();
+
+    return *shader;
+}
+
+void Screen::adopt(Compiled& compiled) {
+    static const char* outputs[4] = {"srgb", "pq", "linear", "wide"};
+    static const char* tiles[3] = {"inside", "edge", "mixed"};
+    Made* known = find(compiled.facts, compiled.options);
+
+    if (known && known->shader) {
+        return;
+    }
+
+    if (known) {
+        known->pool = compiled.pool;
+        known->shader = compiled.shader;
+    } else {
+        made.pushBack(Made{compiled.facts, compiled.options, compiled.pool, compiled.shader, madeClock});
+    }
+
+    compiled.pool = nullptr;
+    player->ui->trace(StringView(StringBuilder() << StringView(u8"compiled video shader ") << StringView(compiled.facts.layout->name) << StringView(u8" ") << StringView(compiled.facts.system) << StringView(u8" ") << StringView(compiled.facts.transfer) << StringView(u8" ") << StringView(compiled.facts.conversion) << StringView(u8" ") << StringView(compiled.facts.output) << StringView(u8" ") << (u64)compiled.options.size[0] << StringView(u8"x") << (u64)compiled.options.size[1] << StringView(u8" ") << StringView(outputs[(int)compiled.options.output]) << StringView(u8" ") << StringView(tiles[(int)compiled.options.tiles]) << StringView(u8" compile_us=") << compiled.compileUs << StringView(u8" driver_us=") << compiled.driverUs));
+    trim();
+    player->ui->requestFrame();
+}
+
+void Screen::trim() {
+    while (made.length() > shaderBudget) {
+        size_t oldest = 0;
+
+        for (size_t i = 1; i < made.length(); i++) {
+            oldest = made[i].used < made[oldest].used ? i : oldest;
+        }
+
+        delete made[oldest].pool;
+        made.mut(oldest) = made.back();
+        made.popBack();
+    }
+}
+
+Compile::Compile(const VideoShader& facts_, const ShaderOptions& options_)
+    : facts(facts_)
+    , options(options_)
 {
 }
 
-RenderShader& VideoFactory::shader(const ShaderOptions& options) {
-    static const char* outputs[4] = {"srgb", "pq", "linear", "wide"};
-    static const char* tiles[3] = {"inside", "edge", "mixed"};
+Compiled::Compiled(const VideoShader& facts_, const ShaderOptions& options_, ObjPool* pool_, RenderShader* shader_, u64 compileUs_, u64 driverUs_)
+    : facts(facts_)
+    , options(options_)
+    , pool(pool_)
+    , shader(shader_)
+    , compileUs(compileUs_)
+    , driverUs(driverUs_)
+{
+}
 
-    used = ++screen->compiledClock;
+Compiled::~Compiled() noexcept {
+    delete pool;
+}
 
-    for (const Made& known : made) {
-        if (known.options.target == options.target && known.options.output == options.output && known.options.tiles == options.tiles && known.options.size[0] == options.size[0] && known.options.size[1] == options.size[1]) {
-            return *known.shader;
+Compiler::Compiler(Player* player_)
+    : player(player_)
+{
+}
+
+void Compiler::run() {
+    Vector<Compile*> pending;
+
+    try {
+        for (;;) {
+            void* item;
+
+            if (pending.empty()) {
+                if (!player->shaderInbox->dequeue(&item)) {
+                    return;
+                }
+
+                pending.pushBack((Compile*)item);
+            }
+
+            while (player->shaderInbox->tryDequeue(&item)) {
+                pending.pushBack((Compile*)item);
+            }
+
+            for (Compile* request : pending) {
+                if (cast<Stop>(request)) {
+                    for (Compile* left : pending) {
+                        delete (Message*)left;
+                    }
+
+                    return;
+                }
+            }
+
+            ScopedPtr<Message> request{pending[0]};
+            Compile& wanted = *static_cast<Compile*>(request.ptr);
+            Vector<Compile*> rest;
+
+            for (size_t i = 1; i < pending.length(); i++) {
+                Compile& other = *pending[i];
+
+                if (sameOptions(other.options, wanted.options) && !memcmp(&other.facts, &wanted.facts, sizeof(wanted.facts))) {
+                    delete (Message*)pending[i];
+                } else {
+                    rest.pushBack(pending[i]);
+                }
+            }
+
+            pending.xchg(rest);
+            compile(wanted);
         }
-    }
+    } catch (...) {
+        for (Compile* left : pending) {
+            delete (Message*)left;
+        }
 
+        player->post(new Failure(Exception::current()));
+    }
+}
+
+void Compiler::compile(const Compile& request) {
     u64 start = monotonicNowUs();
     ScopedPtr<ObjPool> scratch{ObjPool::fromMemoryRaw()};
-    CompiledShader code = compile(*scratch.ptr, facts, options);
+    CompiledShader code = ::compile(*scratch.ptr, request.facts, request.options);
     u64 built = monotonicNowUs();
-    RenderShader* compiled = screen->player->ui->compileKernel(*pool, code, facts.tile, options);
+    ScopedPtr<ObjPool> owner{ObjPool::fromMemoryRaw()};
+    RenderShader* shader = player->ui->compileKernel(*owner.ptr, code, request.facts.tile, request.options);
     u64 done = monotonicNowUs();
 
-    made.pushBack(Made{options, compiled});
-    bytes += code.code.length();
-    screen->compiledBytes += code.code.length();
-    screen->trim(this);
-    screen->player->ui->trace(StringView(StringBuilder() << StringView(u8"compiled video shader ") << StringView(facts.layout->name) << StringView(u8" ") << StringView(facts.system) << StringView(u8" ") << StringView(facts.transfer) << StringView(u8" ") << StringView(facts.conversion) << StringView(u8" ") << StringView(facts.output) << StringView(u8" ") << (u64)options.size[0] << StringView(u8"x") << (u64)options.size[1] << StringView(u8" ") << StringView(outputs[(int)options.output]) << StringView(u8" ") << StringView(tiles[(int)options.tiles]) << StringView(u8" compile_us=") << (built - start) << StringView(u8" driver_us=") << (done - built)));
-
-    return *compiled;
-}
-
-VideoFactory& Screen::factoryFor(const VideoShader& facts) {
-    compiledClock++;
-
-    for (VideoFactory* known : factories) {
-        if (!memcmp(&known->facts, &facts, sizeof(facts))) {
-            known->used = compiledClock;
-
-            return *known;
-        }
-    }
-
-    ScopedPtr<ObjPool> owner{ObjPool::fromMemoryRaw()};
-    VideoFactory* made = owner.ptr->make<VideoFactory>(this, owner.ptr, facts);
-
-    made->used = compiledClock;
-    factories.pushBack(made);
+    player->post(new Compiled(request.facts, request.options, owner.ptr, shader, built - start, done - built));
     owner.drop();
-
-    return *made;
-}
-
-void Screen::trim(const VideoFactory* keep) {
-    while (compiledBytes > shaderBudget && factories.length() > 1) {
-        size_t oldest = factories[0] == keep ? 1 : 0;
-
-        for (size_t i = 0; i < factories.length(); i++) {
-            oldest = factories[i] != keep && factories[i]->used < factories[oldest]->used ? i : oldest;
-        }
-
-        compiledBytes -= factories[oldest]->bytes;
-        delete factories[oldest]->pool;
-        factories.mut(oldest) = factories.back();
-        factories.popBack();
-    }
 }
 
 void Screen::seek(double to, bool play) {
@@ -2030,22 +2169,27 @@ Player::Player(ObjPool& pool_, Ui& ui_, const char* path_)
     , videoInbox(Channel::create(pool, channelCapacity))
     , audioInbox(Channel::create(pool, channelCapacity))
     , screenInbox(Channel::create(pool, channelCapacity))
+    , shaderInbox(Channel::create(pool, channelCapacity))
     , wake(ui->platform()->createLoopWake(*pool, *pool->make<CallScreen>(this)))
     , video(pool->make<Video>(this))
     , audio(pool->make<Audio>(this))
     , screen(pool->make<Screen>(this))
+    , compiler(pool->make<Compiler>(this))
     , videoThread(Thread::create(pool, *video, pool->allocateOverAligned(threadStack, (size_t)sysconf(_SC_PAGESIZE)), threadStack))
     , audioThread(Thread::create(pool, *audio, pool->allocateOverAligned(threadStack, (size_t)sysconf(_SC_PAGESIZE)), threadStack))
+    , shaderThread(Thread::create(pool, *compiler, pool->allocateOverAligned(threadStack, (size_t)sysconf(_SC_PAGESIZE)), threadStack))
 {
 }
 
 Player::~Player() noexcept {
     videoInbox->enqueue(new Stop());
     audioInbox->enqueue(new Stop());
+    shaderInbox->enqueue(new Stop());
     videoThread->join();
     audioThread->join();
+    shaderThread->join();
 
-    Channel* inboxes[] = {videoInbox, audioInbox, screenInbox};
+    Channel* inboxes[] = {videoInbox, audioInbox, screenInbox, shaderInbox};
 
     for (Channel* inbox : inboxes) {
         void* item;
