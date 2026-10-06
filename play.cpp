@@ -2146,22 +2146,17 @@ void Screen::draw() {
         float aspect = (float)shown->aspect;
         float w = width;
         float h = w / aspect;
-
-        if (h > height) {
-            h = height;
-            w = h * aspect;
-        }
-
-        ImVec2 p0(floorf(lo.x + (width - w) / 2.f), floorf(lo.y + (height - h) / 2.f));
+        ImVec2 p0(lo.x, floorf(lo.y + (height - h) / 2.f));
         ImVec2 p1(p0.x + fmaxf(floorf(w), 1.f), p0.y + fmaxf(floorf(h), 1.f));
         VideoImage* image = shown->image;
 
         image->draws++;
         image->render->draw(*dl, p0, p1);
-        dl->AddRectFilled(lo, ImVec2(hi.x, p0.y), black);
-        dl->AddRectFilled(ImVec2(lo.x, p1.y), hi, black);
-        dl->AddRectFilled(ImVec2(lo.x, p0.y), ImVec2(p0.x, p1.y), black);
-        dl->AddRectFilled(ImVec2(p1.x, p0.y), ImVec2(hi.x, p1.y), black);
+
+        if (p0.y > lo.y) {
+            dl->AddRectFilled(lo, ImVec2(hi.x, p0.y), black);
+            dl->AddRectFilled(ImVec2(lo.x, p1.y), hi, black);
+        }
     } else {
         const char* text = hasVideo ? "opening" : "no video";
 
