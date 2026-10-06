@@ -203,14 +203,27 @@ namespace {
         u32 slot = 0;
     };
 
+    // What the frame asks of every image it draws: the size, whether it
+    // wants the wide mode, and whom to tell when the frame that drew it
+    // lands. Each renderer's images derive from it.
+    struct Image: RenderImage {
+        u32 width = 0;
+        u32 height = 0;
+        bool hdr = false;
+        Runable* retired = nullptr;
+
+        void prepare() override {
+        }
+    };
+
     struct Layer {
-        RenderImage* image;
+        Image* image;
         float lo[2];
         float hi[2];
     };
 
     struct LayerDraw {
-        RenderImage* image;
+        Image* image;
         float lo[2];
         float hi[2];
     };
@@ -229,7 +242,7 @@ namespace {
     }
 
     struct Placement {
-        RenderImage* image;
+        Image* image;
         i32 box[4];
     };
 
@@ -271,8 +284,8 @@ namespace {
         void cover(u32 tile, const Op& op, u32 index, bool opaque);
         void append(u32 tile, u32 entry);
         u32 slot(ComposeTexture* texture);
-        u32 layer(RenderImage* image, const i32 (&box)[4]);
-        void addLayer(RenderImage* image, const float (&lo)[2], const float (&hi)[2], const i32 (&clip)[4]);
+        u32 layer(Image* image, const i32 (&box)[4]);
+        void addLayer(Image* image, const float (&lo)[2], const float (&hi)[2], const i32 (&clip)[4]);
         void addCommand(const ImDrawList& list, const ImDrawCmd& command);
         void finish();
     };
@@ -379,7 +392,7 @@ u32 Tiles::slot(ComposeTexture* texture) {
     return texture->slot;
 }
 
-u32 Tiles::layer(RenderImage* image, const i32 (&box)[4]) {
+u32 Tiles::layer(Image* image, const i32 (&box)[4]) {
     Placement placement{image, {box[0], box[1], box[2], box[3]}};
 
     layers.pushBack(placement);
@@ -479,7 +492,7 @@ void Tiles::place(const Op& op, u32 index, const i32 (&box)[4], bool fills, bool
     }
 }
 
-void Tiles::addLayer(RenderImage* image, const float (&lo)[2], const float (&hi)[2], const i32 (&clip)[4]) {
+void Tiles::addLayer(Image* image, const float (&lo)[2], const float (&hi)[2], const i32 (&clip)[4]) {
     i64 x0 = snap(lo[0], 0);
     i64 y0 = snap(lo[1], 1);
     i64 x1 = snap(hi[0], 0);
@@ -911,29 +924,57 @@ namespace {
         u32 parameterCount = 0;
     };
 
-    struct MetalImage final: RenderImage {
-        MetalRenderer* renderer = nullptr;
-        MetalTexture texture;
-        PixelLayout layout = PixelLayout::Rgba8;
-        bool hdr = false;
-        u32 width = 0;
-        u32 height = 0;
-        const void* source = nullptr;
-        size_t sourceStride = 0;
-        size_t sourceSize = 0;
-        size_t bufferStride = 0;
+    // A producer's memory as the GPU reads it: the producer's own pages
+    // when Metal takes them, otherwise a shared buffer the image copies the
+    // source into before each frame.
+    struct HostBuffer {
         id<MTLBuffer> buffer = nil;
-        ShaderFactory* factory = nullptr;
+        const void* source = nullptr;
+        size_t bytes = 0;
+        bool imported = false;
+    };
+
+    // An image the frame draws, with the commands it records into the frame
+    // before the compositor runs.
+    struct MetalImage: Image {
+        MetalRenderer* renderer = nullptr;
         id<MTLCommandBuffer> lastUse = nil;
-        Runable* retired = nullptr;
-        bool hostImported = false;
-        bool dirty = false;
 
         ~MetalImage() noexcept;
-        void prepare() override;
+        virtual void record(id<MTLCommandBuffer> command);
+    };
+
+    // A texture filled once: uploaded pixels or an imported IOSurface.
+    struct TextureImage: MetalImage {
+        MetalTexture texture;
+        PixelLayout layout = PixelLayout::Rgba8;
+
+        ~TextureImage() noexcept;
         void draw(ImDrawList& list, ImVec2 lo, ImVec2 hi) override;
         void read(int x0, int y0, int x1, int y1, ImagePixels& out) override;
-        void readShaded(int x0, int y0, int x1, int y1, ImagePixels& out);
+    };
+
+    // A texture refilled from the producer's buffer before each frame.
+    struct BoundImage final: TextureImage {
+        HostBuffer host;
+        size_t sourceStride = 0;
+        size_t bufferStride = 0;
+        bool dirty = false;
+
+        void prepare() override;
+        void record(id<MTLCommandBuffer> command) override;
+    };
+
+    // The producer's words, drawn as a layer by the kernel its factory makes.
+    struct ShadedImage final: MetalImage {
+        HostBuffer host;
+        ShaderFactory* factory = nullptr;
+        bool dirty = false;
+
+        void prepare() override;
+        void record(id<MTLCommandBuffer> command) override;
+        void draw(ImDrawList& list, ImVec2 lo, ImVec2 hi) override;
+        void read(int x0, int y0, int x1, int y1, ImagePixels& out) override;
     };
 
     struct Flight {
@@ -968,6 +1009,7 @@ namespace {
         Tiles tiles;
 
         void stamp(id<MTLCommandBuffer> command);
+        void allocateHost(HostBuffer& host, const void* source, size_t size, size_t bytes, bool importable);
         bool beginFrame(u32 width, u32 height) override;
         void poll();
         bool endFrame(ImDrawData* draw) override;
@@ -1303,41 +1345,60 @@ MetalImage::~MetalImage() noexcept {
         STD_INSIST(image != this);
     }
     [lastUse waitUntilCompleted];
+}
+
+TextureImage::~TextureImage() noexcept {
     [texture.lastUse waitUntilCompleted];
 }
 
-void MetalImage::prepare() {
-    if (source && factory) {
-        if (!hostImported) {
-            memcpy(buffer.contents, source, sourceSize);
-        }
-        dirty = true;
-    } else if (source) {
-        if (!hostImported) {
-            for (size_t y = 0; y < height; y++) {
-                memcpy((u8*)buffer.contents + y * bufferStride, (const u8*)source + y * sourceStride, (size_t)width * 4);
-            }
-        }
-        dirty = true;
-    }
+void MetalImage::record(id<MTLCommandBuffer>) {
 }
 
-void MetalImage::draw(ImDrawList& list, ImVec2 lo, ImVec2 hi) {
-    renderer->drawn.pushBack(this);
-    if (factory) {
-        LayerDraw layer{this, {lo.x, lo.y}, {hi.x, hi.y}};
-        list.AddCallback(drawLayer, &layer, sizeof(layer));
+void BoundImage::prepare() {
+    if (!host.imported) {
+        for (size_t y = 0; y < height; y++) {
+            memcpy((u8*)host.buffer.contents + y * bufferStride, (const u8*)host.source + y * sourceStride, (size_t)width * 4);
+        }
+    }
+    dirty = true;
+}
+
+void BoundImage::record(id<MTLCommandBuffer> command) {
+    if (!dirty) {
         return;
     }
+    id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
+    if (!blit) {
+        fail(StringView(u8"cannot begin Metal image upload"));
+    }
+    [blit copyFromBuffer:host.buffer sourceOffset:0 sourceBytesPerRow:bufferStride sourceBytesPerImage:bufferStride * height sourceSize:MTLSizeMake(width, height, 1) toTexture:texture.texture destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+    [blit endEncoding];
+    dirty = false;
+}
+
+void ShadedImage::prepare() {
+    if (!host.imported) {
+        memcpy(host.buffer.contents, host.source, host.bytes);
+    }
+    dirty = true;
+}
+
+void ShadedImage::record(id<MTLCommandBuffer>) {
+    dirty = false;
+}
+
+void TextureImage::draw(ImDrawList& list, ImVec2 lo, ImVec2 hi) {
+    renderer->drawn.pushBack(this);
     list.AddImage(ImTextureRef((ImTextureID)(uintptr_t)&texture), lo, hi);
 }
 
-void MetalImage::read(int x0, int y0, int x1, int y1, ImagePixels& out) {
-    if (factory) {
-        checkImageRegion(renderer->maxTextureSide(), renderer->maxTextureSide(), x0, y0, x1, y1);
-        readShaded(x0, y0, x1, y1, out);
-        return;
-    }
+void ShadedImage::draw(ImDrawList& list, ImVec2 lo, ImVec2 hi) {
+    renderer->drawn.pushBack(this);
+    LayerDraw layer{this, {lo.x, lo.y}, {hi.x, hi.y}};
+    list.AddCallback(drawLayer, &layer, sizeof(layer));
+}
+
+void TextureImage::read(int x0, int y0, int x1, int y1, ImagePixels& out) {
     checkImageRegion((u32)texture.texture.width, (u32)texture.texture.height, x0, y0, x1, y1);
     @autoreleasepool {
         u32 w = (u32)(x1 - x0);
@@ -1359,7 +1420,9 @@ void MetalImage::read(int x0, int y0, int x1, int y1, ImagePixels& out) {
     }
 }
 
-void MetalImage::readShaded(int x0, int y0, int x1, int y1, ImagePixels& out) {
+// Draws the image into the region of a wide target and copies the region out.
+void ShadedImage::read(int x0, int y0, int x1, int y1, ImagePixels& out) {
+    checkImageRegion(renderer->maxTextureSide(), renderer->maxTextureSide(), x0, y0, x1, y1);
     @autoreleasepool {
         u32 w = (u32)(x1 - x0);
         u32 h = (u32)(y1 - y0);
@@ -1480,7 +1543,7 @@ void MetalRenderer::encode(id<MTLCommandBuffer> command, id<MTLTexture> target, 
             continue;
         }
         const Placement& placed = t.layers[(p - 1) / 3];
-        MetalImage* image = static_cast<MetalImage*>(placed.image);
+        ShadedImage* image = static_cast<ShadedImage*>(placed.image);
         ShaderOptions options{ShaderTarget::Air, output, (ShaderTiles)((p - 1) % 3), {(u32)(placed.box[2] - placed.box[0]), (u32)(placed.box[3] - placed.box[1])}};
         MetalShader& shader = static_cast<MetalShader&>(image->factory->shader(options));
         call.video[0] = placed.box[0];
@@ -1491,7 +1554,7 @@ void MetalRenderer::encode(id<MTLCommandBuffer> command, id<MTLTexture> target, 
         [compute setComputePipelineState:shader.pipeline];
         for (u32 i = 0; i < shader.parameterCount; i++) {
             if (shader.parameters[i].input == ShaderInput::Words) {
-                [compute setBuffer:image->buffer offset:0 atIndex:7];
+                [compute setBuffer:image->host.buffer offset:0 atIndex:7];
             } else if (shader.parameters[i].input == ShaderInput::Constant) {
                 [compute setBuffer:shader.constants offset:0 atIndex:8];
             }
@@ -1553,7 +1616,7 @@ RenderImage* MetalRenderer::upload(ObjPool& pool, u32 width, u32 height, const v
         fail(StringView(u8"invalid renderer image source"));
     }
     @autoreleasepool {
-        MetalImage* image = pool.make<MetalImage>();
+        TextureImage* image = pool.make<TextureImage>();
         image->renderer = this;
         image->hdr = imageHdr;
         image->width = width;
@@ -1575,7 +1638,7 @@ RenderImage* MetalRenderer::upload(ObjPool& pool, u32 width, u32 height, const v
 RenderImage* MetalRenderer::import(ObjPool& pool, SharedImage& shared, bool imageHdr) {
     SurfaceImage& source = static_cast<SurfaceImage&>(shared);
     @autoreleasepool {
-        MetalImage* image = pool.make<MetalImage>();
+        TextureImage* image = pool.make<TextureImage>();
         image->renderer = this;
         image->hdr = imageHdr;
         image->layout = source.layout;
@@ -1675,17 +1738,7 @@ bool MetalRenderer::endFrame(ImDrawData* draw) {
             fail(StringView(u8"cannot begin Metal command buffer"));
         }
         for (MetalImage* image : drawn) {
-            if (image->factory) {
-                image->dirty = false;
-            } else if (image->dirty) {
-                id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
-                if (!blit) {
-                    fail(StringView(u8"cannot begin Metal image upload"));
-                }
-                [blit copyFromBuffer:image->buffer sourceOffset:0 sourceBytesPerRow:image->bufferStride sourceBytesPerImage:image->bufferStride * image->height sourceSize:MTLSizeMake(image->width, image->height, 1) toTexture:image->texture.texture destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
-                [blit endEncoding];
-                image->dirty = false;
-            }
+            image->record(command);
             image->lastUse = command;
         }
         Flight* flight = smallObjects->make<Flight>(drawn);
@@ -1720,30 +1773,38 @@ RenderImage* MetalRenderer::bind(ObjPool& pool, u32 width, u32 height, const voi
         fail(StringView(u8"invalid bound image buffer"));
     }
     @autoreleasepool {
-        MetalImage* image = pool.make<MetalImage>();
+        BoundImage* image = pool.make<BoundImage>();
+        size_t packed = ((size_t)width * 4 + 255) & ~(size_t)255;
         image->renderer = this;
-        image->source = data;
-        image->sourceStride = stride;
-        image->retired = &retired;
         image->width = width;
         image->height = height;
-        size_t page = (size_t)getpagesize();
-        if ((uintptr_t)data % page == 0 && size % page == 0 && stride % 256 == 0) {
-            image->buffer = [device newBufferWithBytesNoCopy:const_cast<void*>(data) length:size options:MTLResourceStorageModeShared deallocator:nil];
-            image->hostImported = image->buffer != nil;
-        }
-        image->bufferStride = image->hostImported ? stride : ((size_t)width * 4 + 255) & ~(size_t)255;
-        if (!image->hostImported) {
-            image->buffer = [device newBufferWithLength:image->bufferStride * height options:MTLResourceStorageModeShared];
-        }
+        image->retired = &retired;
+        image->sourceStride = stride;
+        allocateHost(image->host, data, size, packed * height, stride % 256 == 0);
+        image->bufferStride = image->host.imported ? stride : packed;
         MTLTextureDescriptor* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm_sRGB width:width height:height mipmapped:NO];
         descriptor.storageMode = MTLStorageModePrivate;
         descriptor.usage = MTLTextureUsageShaderRead;
         image->texture.texture = [device newTextureWithDescriptor:descriptor];
-        if (!image->buffer || !image->texture.texture) {
+        if (!image->host.buffer || !image->texture.texture) {
             fail(StringView(u8"cannot allocate bound Metal image"));
         }
         return image;
+    }
+}
+
+// Takes the producer's pages as the buffer when they are whole pages and
+// the caller allows it, otherwise allocates a shared buffer of bytes.
+void MetalRenderer::allocateHost(HostBuffer& host, const void* source, size_t size, size_t bytes, bool importable) {
+    size_t page = (size_t)getpagesize();
+    host.source = source;
+    host.bytes = bytes;
+    if (importable && (uintptr_t)source % page == 0 && size % page == 0) {
+        host.buffer = [device newBufferWithBytesNoCopy:const_cast<void*>(source) length:size options:MTLResourceStorageModeShared deallocator:nil];
+        host.imported = host.buffer != nil;
+    }
+    if (!host.imported) {
+        host.buffer = [device newBufferWithLength:bytes options:MTLResourceStorageModeShared];
     }
 }
 
@@ -1814,25 +1875,15 @@ RenderImage* MetalRenderer::shade(ObjPool& pool, ShaderFactory& factory, u32 wid
         fail(StringView(u8"invalid shaded image source"));
     }
     @autoreleasepool {
-        MetalImage* image = pool.make<MetalImage>();
+        ShadedImage* image = pool.make<ShadedImage>();
         image->renderer = this;
-        image->layout = PixelLayout::Rgba16f;
         image->hdr = imageHdr;
         image->width = width;
         image->height = height;
-        image->source = data;
-        image->sourceSize = size;
         image->factory = &factory;
         image->retired = &retired;
-        size_t page = (size_t)getpagesize();
-        if ((uintptr_t)data % page == 0 && size % page == 0) {
-            image->buffer = [device newBufferWithBytesNoCopy:const_cast<void*>(data) length:size options:MTLResourceStorageModeShared deallocator:nil];
-            image->hostImported = image->buffer != nil;
-        }
-        if (!image->hostImported) {
-            image->buffer = [device newBufferWithLength:size options:MTLResourceStorageModeShared];
-        }
-        if (!image->buffer) {
+        allocateHost(image->host, data, size, size, true);
+        if (!image->host.buffer) {
             fail(StringView(u8"cannot allocate shaded Metal image"));
         }
         return image;
@@ -2389,19 +2440,13 @@ namespace {
         ~VulkanShader() noexcept;
     };
 
-    // What every drawn image tells the frame: its size, whether it asks for
-    // the wide mode, whom to tell when the frame that drew it lands, and the
-    // commands it records into the frame before the compositor runs.
-    struct VulkanImage: RenderImage {
+    // An image the frame draws, with the commands it records into the frame
+    // before the compositor runs.
+    struct VulkanImage: Image {
         Gpu* gpu = nullptr;
-        u32 width = 0;
-        u32 height = 0;
-        bool hdr = false;
-        Runable* retired = nullptr;
         u64 lastUse = 0;
 
         ~VulkanImage() noexcept;
-        void prepare() override;
         virtual void record(VkCommandBuffer command);
     };
 
@@ -4199,9 +4244,6 @@ void Gpu::flushHost(HostBuffer& host) {
     range.memory = host.memory;
     range.size = VK_WHOLE_SIZE;
     vkc(vkFlushMappedMemoryRanges(device, 1, &range));
-}
-
-void VulkanImage::prepare() {
 }
 
 void VulkanImage::record(VkCommandBuffer) {
