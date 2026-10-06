@@ -1754,7 +1754,12 @@ Renderer* createMetalRenderer(ObjPool& pool, plt::Platform& platform, plt::Windo
     layer.presentsWithTransaction = NO;
     renderer->setMode(false);
     renderer->plainLibrary = renderer->composeLibrary("#define GROUP 8\n", false);
+    renderer->genericLibrary = renderer->composeLibrary("#define GROUP 24\n#define GENERIC 1\n#define GENERIC_KERNEL 1\n", true);
+    renderer->genericLayeredLibrary = renderer->composeLibrary("#define GROUP 24\n#define GENERIC 1\n#define LAYER 1\n", true);
     renderer->plain[(u32)ShaderOutput::Srgb] = renderer->pipeline(renderer->plainLibrary, ShaderOutput::Srgb, composeGroup, nil, false);
+    renderer->generic[(u32)ShaderOutput::Srgb][0] = renderer->pipeline(renderer->genericLibrary, ShaderOutput::Srgb, composeTile, nil, false);
+    renderer->generic[(u32)ShaderOutput::Srgb][1] = renderer->pipeline(renderer->genericLibrary, ShaderOutput::Srgb, composeTile, nil, true);
+    renderer->genericLayer[(u32)ShaderOutput::Srgb] = renderer->pipeline(renderer->genericLayeredLibrary, ShaderOutput::Srgb, composeTile, nil, false);
     renderer->wake = platform.createLoopWake(pool, *pool.make<PollMetal>(renderer));
     renderer->smallObjects = SmallObjAllocator::create(&pool);
     renderer->landed = Channel::create(&pool, 64);

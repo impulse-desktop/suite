@@ -10,7 +10,6 @@ struct Facts {
     uint conversion;
     uint target;
     uint tile;
-    uint chromaTaps;
     int luma[5];
     int components[20];
     uint planeOffset[4];
@@ -160,37 +159,33 @@ float genericLanczos(float x) {
     return abs(px) < 1e-6 ? 1.0 : 3.0 * sin(px) * sin(px / 3.0) / (px * px);
 }
 
-vec2 genericChroma(vec2 at ARGS_DECL) {
+float genericChroma(int c, vec2 at ARGS_DECL) {
     vec2 base = floor(at);
     vec2 f = at - base;
-    int taps = int(facts.chromaTaps);
-    int before = taps / 2 - 1;
-    int bx = int(base.x) - before;
-    int by = int(base.y) - before;
+    int bx = int(base.x);
+    int by = int(base.y);
     int lastX = int(facts.size[2]) - 1;
     int lastY = int(facts.size[3]) - 1;
-    vec2 sum = vec2(0.0);
+    float sum = 0.0;
     float totalX = 0.0;
     float totalY = 0.0;
-    float wx[8];
-    float wy[8];
+    float wx[6];
+    float wy[6];
 
-    for (int k = 0; k < taps; k++) {
-        wx[k] = genericLanczos(float(k - before) - f.x);
-        wy[k] = genericLanczos(float(k - before) - f.y);
+    for (int k = 0; k < 6; k++) {
+        wx[k] = genericLanczos(float(k - 2) - f.x);
+        wy[k] = genericLanczos(float(k - 2) - f.y);
         totalX += wx[k];
         totalY += wy[k];
     }
 
-    for (int j = 0; j < taps; j++) {
-        uint line = uint(clamp(by + j, 0, lastY));
+    for (int j = 0; j < 6; j++) {
+        uint line = uint(clamp(by - 2 + j, 0, lastY));
 
-        for (int k = 0; k < taps; k++) {
-            uint column = uint(clamp(bx + k, 0, lastX));
-            float w = wx[k] * wy[j];
+        for (int k = 0; k < 6; k++) {
+            uint column = uint(clamp(bx - 2 + k, 0, lastX));
 
-            sum.x += w * genericSample(1, column, line ARGS);
-            sum.y += w * genericSample(2, column, line ARGS);
+            sum += wx[k] * wy[j] * genericSample(c, column, line ARGS);
         }
     }
 
@@ -287,7 +282,8 @@ vec4 genericDecode(ivec2 at, bool near ARGS_DECL) {
             codes.y = genericNearChroma(1, chromaAt ARGS);
             codes.z = genericNearChroma(2, chromaAt ARGS);
         } else {
-            codes.yz = genericChroma(chromaAt ARGS);
+            codes.y = genericChroma(1, chromaAt ARGS);
+            codes.z = genericChroma(2, chromaAt ARGS);
         }
     }
 
