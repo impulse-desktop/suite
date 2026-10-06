@@ -102,13 +102,56 @@ namespace {
     static_assert(sizeof(Op) == 80);
     static_assert(sizeof(Triangle) == 176);
 
-    struct Push {
+    constexpr size_t callBytes = 32;
+    constexpr ShaderParameter hostParameters[] = {{ShaderInput::TargetSize, 0, 8}, {ShaderInput::VideoOrigin, 8, 8}, {ShaderInput::TilesAcross, 16, 4}, {ShaderInput::FirstTile, 20, 4}, {ShaderInput::White, 24, 4}};
+    constexpr u32 hostParameterCount = (u32)(sizeof(hostParameters) / sizeof(hostParameters[0]));
+
+    struct Call {
         i32 size[2];
         i32 video[2];
+        i32 box[2];
         u32 tilesX;
         u32 first;
         float white;
     };
+
+    void fillCall(const ShaderParameter* parameters, u32 count, const Call& call, u8 (&block)[callBytes]) {
+        memset(block, 0, callBytes);
+
+        for (u32 i = 0; i < count; i++) {
+            const ShaderParameter& parameter = parameters[i];
+            const void* from;
+
+            switch (parameter.input) {
+                case ShaderInput::TargetSize:
+                    from = call.size;
+                    break;
+                case ShaderInput::VideoOrigin:
+                    from = call.video;
+                    break;
+                case ShaderInput::BoxSize:
+                    from = call.box;
+                    break;
+                case ShaderInput::TilesAcross:
+                    from = &call.tilesX;
+                    break;
+                case ShaderInput::FirstTile:
+                    from = &call.first;
+                    break;
+                case ShaderInput::White:
+                    from = &call.white;
+                    break;
+                default:
+                    continue;
+            }
+
+            if (parameter.offset > callBytes || parameter.size > callBytes - parameter.offset) {
+                fail(StringView(u8"a shader's call block exceeds the compositor's"));
+            }
+
+            memcpy(block + parameter.offset, from, parameter.size);
+        }
+    }
 
     struct Buffer {
         VkBuffer buffer = VK_NULL_HANDLE;
@@ -579,6 +622,8 @@ namespace {
     struct VulkanShader final: RenderShader {
         Gpu* gpu = nullptr;
         VkPipeline pipeline = VK_NULL_HANDLE;
+        const ShaderParameter* parameters = nullptr;
+        u32 parameterCount = 0;
         u64 lastUse = 0;
 
         ~VulkanShader() noexcept;
@@ -1949,7 +1994,8 @@ void Gpu::bindCompose(VkDescriptorSet set, Buffer (&buffers)[composeBuffers], Vk
 
 void Gpu::dispatch(VkCommandBuffer command, VkDescriptorSet set, u32 width, u32 height, ShaderOutput output) {
     const Tiles& t = tiles;
-    Push push{{(i32)width, (i32)height}, {0, 0}, t.tilesX, 0, sdrWhiteNits};
+    Call call{{(i32)width, (i32)height}, {0, 0}, {0, 0}, t.tilesX, 0, sdrWhiteNits};
+    u8 block[callBytes];
     u32 groups = (composeTile / composeGroup) * (composeTile / composeGroup);
 
     vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_COMPUTE, composeLayout, 0, 1, &set, 0, nullptr);
@@ -1961,15 +2007,16 @@ void Gpu::dispatch(VkCommandBuffer command, VkDescriptorSet set, u32 width, u32 
             continue;
         }
 
-        push.first = t.programs[p * 2];
+        call.first = t.programs[p * 2];
 
         if (p == 0) {
             if (!plain[(u32)output]) {
                 plain[(u32)output] = pipeline(compose_comp_spv, sizeof(compose_comp_spv), output);
             }
 
+            fillCall(hostParameters, hostParameterCount, call, block);
             vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, plain[(u32)output]);
-            vkCmdPushConstants(command, composeLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+            vkCmdPushConstants(command, composeLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, callBytes, block);
             vkCmdDispatch(command, count, groups, 1);
             continue;
         }
@@ -1986,11 +2033,20 @@ void Gpu::dispatch(VkCommandBuffer command, VkDescriptorSet set, u32 width, u32 
         write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         write.pBufferInfo = &words;
         shader.lastUse = submitted + 1;
-        push.video[0] = placed.box[0];
-        push.video[1] = placed.box[1];
+        call.video[0] = placed.box[0];
+        call.video[1] = placed.box[1];
+        call.box[0] = placed.box[2] - placed.box[0];
+        call.box[1] = placed.box[3] - placed.box[1];
+        fillCall(shader.parameters, shader.parameterCount, call, block);
         vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, shader.pipeline);
-        pushDescriptorSet(command, VK_PIPELINE_BIND_POINT_COMPUTE, composeLayout, 1, 1, &write);
-        vkCmdPushConstants(command, composeLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+
+        for (u32 i = 0; i < shader.parameterCount; i++) {
+            if (shader.parameters[i].input == ShaderInput::Words) {
+                pushDescriptorSet(command, VK_PIPELINE_BIND_POINT_COMPUTE, composeLayout, 1, 1, &write);
+            }
+        }
+
+        vkCmdPushConstants(command, composeLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, callBytes, block);
         vkCmdDispatch(command, count, 1, 1);
     }
 }
@@ -2377,7 +2433,7 @@ void Gpu::setupCompose(ObjPool& pool) {
     });
 
     VkDescriptorSetLayout sets[2] = {composeSetLayout, wordsSetLayout};
-    VkPushConstantRange range{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(Push)};
+    VkPushConstantRange range{VK_SHADER_STAGE_COMPUTE_BIT, 0, callBytes};
     VkPipelineLayoutCreateInfo pl{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
 
     pl.setLayoutCount = 2;
@@ -2890,7 +2946,7 @@ namespace {
         RenderImage* import(ObjPool& pool, SharedImage& source, bool hdr) override;
 
         RenderImage* bind(ObjPool& pool, u32 width, u32 height, const void* data, size_t size, size_t stride, Runable& retired) override;
-        RenderShader* compileKernel(ObjPool& pool, const void* code, size_t size, u32 tile, const ShaderOptions& options) override;
+        RenderShader* compileKernel(ObjPool& pool, const CompiledShader& compiled, u32 tile, const ShaderOptions& options) override;
         RenderImage* shade(ObjPool& pool, ShaderFactory& factory, u32 width, u32 height, const void* data, size_t size, bool hdr, Runable& retired) override;
         bool beginFrame(u32 width, u32 height) override;
         bool endFrame(ImDrawData* draw) override;
@@ -2962,15 +3018,23 @@ RenderImage* VulkanRenderer::bind(ObjPool& pool, u32 width, u32 height, const vo
     return image;
 }
 
-RenderShader* VulkanRenderer::compileKernel(ObjPool& pool, const void* code, size_t size, u32 tile, const ShaderOptions& options) {
+RenderShader* VulkanRenderer::compileKernel(ObjPool& pool, const CompiledShader& compiled, u32 tile, const ShaderOptions& options) {
     if (tile != composeTile) {
         fail(StringView(u8"a kernel is not made for the compositor's tile"));
     }
+    const void* code = compiled.code.data();
+    size_t size = compiled.code.length();
     if (!code || !size || size % 4) {
         fail(StringView(u8"invalid shader code"));
     }
     VulkanShader* shader = pool.make<VulkanShader>();
     shader->gpu = gpu;
+    if (compiled.parameterCount) {
+        ShaderParameter* parameters = (ShaderParameter*)pool.allocate(compiled.parameterCount * sizeof(ShaderParameter));
+        memcpy(parameters, compiled.parameters, compiled.parameterCount * sizeof(ShaderParameter));
+        shader->parameters = parameters;
+        shader->parameterCount = compiled.parameterCount;
+    }
     if (options.tiles == ShaderTiles::Mixed) {
         Vector<u32> merged;
         mergeLayer(compose_layer_comp_spv, sizeof(compose_layer_comp_spv) / 4, (const u32*)code, size / 4, merged);

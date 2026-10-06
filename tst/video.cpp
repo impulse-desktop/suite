@@ -829,8 +829,8 @@ RenderShader& VideoFactory::shader(const ShaderOptions& options) {
     }
 
     ScopedPtr<ObjPool> scratch{ObjPool::fromMemoryRaw()};
-    StringView code = compile(*scratch.ptr, facts, options);
-    RenderShader* compiled = ui->compileKernel(*pool, code.data(), code.length(), facts.tile, options);
+    CompiledShader code = compile(*scratch.ptr, facts, options);
+    RenderShader* compiled = ui->compileKernel(*pool, code, facts.tile, options);
 
     made.pushBack(Made{options, compiled});
 

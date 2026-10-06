@@ -148,7 +148,7 @@ int main(int argc, char** argv) {
     }
 
     sysE << StringView(u8"compile ") << (monotonicNowUs() - start) * 10 << StringView(u8" ns") << endL;
-    sysO << compile(*owner, shader, options);
+    sysO << compile(*owner, shader, options).code;
 
     return 0;
 }

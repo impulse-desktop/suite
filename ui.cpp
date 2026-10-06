@@ -383,7 +383,7 @@ namespace {
         RenderImage* uploadImage(ObjPool& pool, u32 width, u32 height, const void* rgba, bool hdr) override;
         RenderImage* importImage(ObjPool& pool, SharedImage& source, bool hdr) override;
         RenderImage* bindImage(ObjPool& pool, u32 width, u32 height, const void* data, size_t size, size_t stride, Runable& retired) override;
-        RenderShader* compileKernel(ObjPool& pool, const void* code, size_t size, u32 tile, const ShaderOptions& options) override;
+        RenderShader* compileKernel(ObjPool& pool, const CompiledShader& compiled, u32 tile, const ShaderOptions& options) override;
         RenderImage* shadeImage(ObjPool& pool, ShaderFactory& factory, u32 width, u32 height, const void* data, size_t size, bool hdr, Runable& retired) override;
         ImTextureRef loadTexture(u32 width, u32 height, const void* rgba) override;
         void releaseTexture(ImTextureRef texture) override;
@@ -617,8 +617,8 @@ RenderImage* UiImpl::bindImage(ObjPool& owner, u32 width, u32 height, const void
     return renderer->bind(owner, width, height, data, size, stride, retired);
 }
 
-RenderShader* UiImpl::compileKernel(ObjPool& owner, const void* code, size_t size, u32 tile, const ShaderOptions& options) {
-    return renderer->compileKernel(owner, code, size, tile, options);
+RenderShader* UiImpl::compileKernel(ObjPool& owner, const CompiledShader& compiled, u32 tile, const ShaderOptions& options) {
+    return renderer->compileKernel(owner, compiled, tile, options);
 }
 
 RenderImage* UiImpl::shadeImage(ObjPool& owner, ShaderFactory& factory, u32 width, u32 height, const void* data, size_t size, bool hdr, Runable& retired) {

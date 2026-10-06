@@ -4617,7 +4617,11 @@ namespace {
     }
 }
 
-StringView compile(ObjPool& pool, const VideoShader& shader, const ShaderOptions& options) {
+CompiledShader compile(ObjPool& pool, const VideoShader& shader, const ShaderOptions& options) {
+    static constexpr ShaderParameter kernelParameters[] = {{ShaderInput::TargetSize, 0, 8}, {ShaderInput::VideoOrigin, 8, 8}, {ShaderInput::TilesAcross, 16, 4}, {ShaderInput::FirstTile, 20, 4}, {ShaderInput::White, 24, 4}, {ShaderInput::Words, 0, 0}, {ShaderInput::Tiles, 0, 0}, {ShaderInput::Target, 0, 0}};
+    static constexpr ShaderParameter layerParameters[] = {{ShaderInput::TargetSize, 0, 8}, {ShaderInput::VideoOrigin, 8, 8}, {ShaderInput::TilesAcross, 16, 4}, {ShaderInput::FirstTile, 20, 4}, {ShaderInput::White, 24, 4}, {ShaderInput::Words, 0, 0}};
+    bool mixed = options.tiles == ShaderTiles::Mixed;
+    CompiledShader out{StringView(), mixed ? layerParameters : kernelParameters, (u32)(mixed ? sizeof(layerParameters) : sizeof(kernelParameters)) / (u32)sizeof(ShaderParameter), StringView()};
     Graph g(pool);
     Video video{g, shader, *shader.layout, options};
     Kernel layer;
@@ -4639,8 +4643,10 @@ StringView compile(ObjPool& pool, const VideoShader& shader, const ShaderOptions
     }
 
     if (options.target == ShaderTarget::Air) {
-        return options.tiles == ShaderTiles::Mixed ? airLayer(pool, layer) : airKernel(pool, layer);
+        out.code = mixed ? airLayer(pool, layer) : airKernel(pool, layer);
+    } else {
+        out.code = mixed ? spirvLayer(pool, g, layer) : spirvKernel(pool, g, layer);
     }
 
-    return options.tiles == ShaderTiles::Mixed ? spirvLayer(pool, g, layer) : spirvKernel(pool, g, layer);
+    return out;
 }

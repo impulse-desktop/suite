@@ -1747,14 +1747,14 @@ RenderShader& VideoFactory::shader(const ShaderOptions& options) {
 
     u64 start = monotonicNowUs();
     ScopedPtr<ObjPool> scratch{ObjPool::fromMemoryRaw()};
-    StringView code = compile(*scratch.ptr, facts, options);
+    CompiledShader code = compile(*scratch.ptr, facts, options);
     u64 built = monotonicNowUs();
-    RenderShader* compiled = screen->player->ui->compileKernel(*pool, code.data(), code.length(), facts.tile, options);
+    RenderShader* compiled = screen->player->ui->compileKernel(*pool, code, facts.tile, options);
     u64 done = monotonicNowUs();
 
     made.pushBack(Made{options, compiled});
-    bytes += code.length();
-    screen->compiledBytes += code.length();
+    bytes += code.code.length();
+    screen->compiledBytes += code.code.length();
     screen->trim(this);
     screen->player->ui->trace(StringView(StringBuilder() << StringView(u8"compiled video shader ") << StringView(facts.layout->name) << StringView(u8" ") << StringView(facts.system) << StringView(u8" ") << StringView(facts.transfer) << StringView(u8" ") << StringView(facts.conversion) << StringView(u8" ") << StringView(facts.output) << StringView(u8" ") << (u64)options.size[0] << StringView(u8"x") << (u64)options.size[1] << StringView(u8" ") << StringView(outputs[(int)options.output]) << StringView(u8" ") << StringView(tiles[(int)options.tiles]) << StringView(u8" compile_us=") << (built - start) << StringView(u8" driver_us=") << (done - built)));
 

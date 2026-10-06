@@ -61,7 +61,7 @@ struct Ui {
     virtual RenderImage* bindImage(stl::ObjPool& pool, u32 width, u32 height, const void* data, size_t size, size_t stride, stl::Runable& retired) = 0;
     virtual RenderImage* shadeImage(stl::ObjPool& pool, ShaderFactory& factory, u32 width, u32 height, const void* data, size_t size, bool hdr, stl::Runable& retired) = 0;
 
-    virtual RenderShader* compileKernel(stl::ObjPool& pool, const void* code, size_t size, u32 tile, const ShaderOptions& options) = 0;
+    virtual RenderShader* compileKernel(stl::ObjPool& pool, const CompiledShader& compiled, u32 tile, const ShaderOptions& options) = 0;
 
     virtual ImTextureRef loadTexture(u32 width, u32 height, const void* rgba) = 0;
     virtual void releaseTexture(ImTextureRef texture) = 0;

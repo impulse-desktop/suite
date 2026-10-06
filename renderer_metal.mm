@@ -88,13 +88,52 @@ namespace {
     static_assert(sizeof(Op) == 80);
     static_assert(sizeof(Triangle) == 176);
 
-    struct Push {
-        alignas(8) i32 size[2];
+    constexpr size_t callBytes = 32;
+    constexpr ShaderParameter hostParameters[] = {{ShaderInput::TargetSize, 0, 8}, {ShaderInput::VideoOrigin, 8, 8}, {ShaderInput::TilesAcross, 16, 4}, {ShaderInput::FirstTile, 20, 4}, {ShaderInput::White, 24, 4}};
+    constexpr u32 hostParameterCount = (u32)(sizeof(hostParameters) / sizeof(hostParameters[0]));
+
+    struct Call {
+        i32 size[2];
         i32 video[2];
+        i32 box[2];
         u32 tilesX;
         u32 first;
         float white;
     };
+
+    void fillCall(const ShaderParameter* parameters, u32 count, const Call& call, u8 (&block)[callBytes]) {
+        memset(block, 0, callBytes);
+        for (u32 i = 0; i < count; i++) {
+            const ShaderParameter& parameter = parameters[i];
+            const void* from;
+            switch (parameter.input) {
+                case ShaderInput::TargetSize:
+                    from = call.size;
+                    break;
+                case ShaderInput::VideoOrigin:
+                    from = call.video;
+                    break;
+                case ShaderInput::BoxSize:
+                    from = call.box;
+                    break;
+                case ShaderInput::TilesAcross:
+                    from = &call.tilesX;
+                    break;
+                case ShaderInput::FirstTile:
+                    from = &call.first;
+                    break;
+                case ShaderInput::White:
+                    from = &call.white;
+                    break;
+                default:
+                    continue;
+            }
+            if (parameter.offset > callBytes || parameter.size > callBytes - parameter.offset) {
+                fail(StringView(u8"a shader's call block exceeds the compositor's"));
+            }
+            memcpy(block + parameter.offset, from, parameter.size);
+        }
+    }
 
     struct MetalTexture {
         id<MTLTexture> texture = nil;
@@ -123,6 +162,8 @@ namespace {
 
     struct MetalShader final: RenderShader {
         id<MTLComputePipelineState> pipeline = nil;
+        const ShaderParameter* parameters = nullptr;
+        u32 parameterCount = 0;
     };
 
     struct MetalImage final: RenderImage {
@@ -253,7 +294,7 @@ namespace {
         RenderImage* import(ObjPool& pool, SharedImage& source, bool hdr) override;
 
         RenderImage* bind(ObjPool& pool, u32 width, u32 height, const void* data, size_t size, size_t stride, Runable& retired) override;
-        RenderShader* compileKernel(ObjPool& pool, const void* code, size_t size, u32 tile, const ShaderOptions& options) override;
+        RenderShader* compileKernel(ObjPool& pool, const CompiledShader& compiled, u32 tile, const ShaderOptions& options) override;
         RenderImage* shade(ObjPool& pool, ShaderFactory& factory, u32 width, u32 height, const void* data, size_t size, bool hdr, Runable& retired) override;
         id<MTLLibrary> library(NSString* source);
         id<MTLComputePipelineState> pipeline(id<MTLLibrary> library, ShaderOutput output, u32 side, id<MTLFunction> linked);
@@ -1262,19 +1303,21 @@ void MetalRenderer::encode(id<MTLCommandBuffer> command, id<MTLTexture> target, 
     }
     [compute setBuffer:textures offset:0 atIndex:6];
     [compute setTexture:target atIndex:0];
-    Push push{{(i32)target.width, (i32)target.height}, {0, 0}, t.tilesX, 0, sdrWhiteNits};
+    Call call{{(i32)target.width, (i32)target.height}, {0, 0}, {0, 0}, t.tilesX, 0, sdrWhiteNits};
+    u8 block[callBytes];
     for (u32 p = 0; p * 2 < t.programs.length(); p++) {
         u32 count = t.programs[p * 2 + 1];
         if (!count) {
             continue;
         }
-        push.first = t.programs[p * 2];
+        call.first = t.programs[p * 2];
         if (p == 0) {
             if (!plain[(u32)output]) {
                 plain[(u32)output] = pipeline(plainLibrary, output, composeGroup, nil);
             }
+            fillCall(hostParameters, hostParameterCount, call, block);
             [compute setComputePipelineState:plain[(u32)output]];
-            [compute setBytes:&push length:sizeof(push) atIndex:5];
+            [compute setBytes:block length:callBytes atIndex:5];
             [compute dispatchThreadgroups:MTLSizeMake(count, (composeTile / composeGroup) * (composeTile / composeGroup), 1) threadsPerThreadgroup:MTLSizeMake(composeGroup, composeGroup, 1)];
             continue;
         }
@@ -1282,11 +1325,18 @@ void MetalRenderer::encode(id<MTLCommandBuffer> command, id<MTLTexture> target, 
         MetalImage* image = placed.image;
         ShaderOptions options{ShaderTarget::Air, output, (ShaderTiles)((p - 1) % 3), {(u32)(placed.box[2] - placed.box[0]), (u32)(placed.box[3] - placed.box[1])}};
         MetalShader& shader = static_cast<MetalShader&>(image->factory->shader(options));
-        push.video[0] = placed.box[0];
-        push.video[1] = placed.box[1];
+        call.video[0] = placed.box[0];
+        call.video[1] = placed.box[1];
+        call.box[0] = placed.box[2] - placed.box[0];
+        call.box[1] = placed.box[3] - placed.box[1];
+        fillCall(shader.parameters, shader.parameterCount, call, block);
         [compute setComputePipelineState:shader.pipeline];
-        [compute setBuffer:image->buffer offset:0 atIndex:7];
-        [compute setBytes:&push length:sizeof(push) atIndex:5];
+        for (u32 i = 0; i < shader.parameterCount; i++) {
+            if (shader.parameters[i].input == ShaderInput::Words) {
+                [compute setBuffer:image->buffer offset:0 atIndex:7];
+            }
+        }
+        [compute setBytes:block length:callBytes atIndex:5];
         [compute dispatchThreadgroups:MTLSizeMake(count, 1, 1) threadsPerThreadgroup:MTLSizeMake(composeTile, composeTile, 1)];
     }
     [compute endEncoding];
@@ -1530,21 +1580,27 @@ RenderImage* MetalRenderer::bind(ObjPool& pool, u32 width, u32 height, const voi
     }
 }
 
-RenderShader* MetalRenderer::compileKernel(ObjPool& pool, const void* code, size_t size, u32 tile, const ShaderOptions& options) {
+RenderShader* MetalRenderer::compileKernel(ObjPool& pool, const CompiledShader& compiled, u32 tile, const ShaderOptions& options) {
     if (tile != composeTile) {
         fail(StringView(u8"a kernel is not made for the compositor's tile"));
     }
-    if (!code || !size) {
+    if (compiled.code.empty()) {
         fail(StringView(u8"invalid shader code"));
     }
     @autoreleasepool {
         NSError* error = nil;
-        dispatch_data_t bytes = dispatch_data_create(code, size, nil, DISPATCH_DATA_DESTRUCTOR_DEFAULT);
+        dispatch_data_t bytes = dispatch_data_create(compiled.code.data(), compiled.code.length(), nil, DISPATCH_DATA_DESTRUCTOR_DEFAULT);
         id<MTLLibrary> made = [device newLibraryWithData:bytes error:&error];
         if (!made) {
             fail(StringView(StringBuilder() << StringView(u8"Metal shader: ") << StringView(error ? error.localizedDescription.UTF8String : "no library")));
         }
         MetalShader* shader = pool.make<MetalShader>();
+        if (compiled.parameterCount) {
+            ShaderParameter* parameters = (ShaderParameter*)pool.allocate(compiled.parameterCount * sizeof(ShaderParameter));
+            memcpy(parameters, compiled.parameters, compiled.parameterCount * sizeof(ShaderParameter));
+            shader->parameters = parameters;
+            shader->parameterCount = compiled.parameterCount;
+        }
         if (options.tiles != ShaderTiles::Mixed) {
             shader->pipeline = pipeline(made, options.output, composeTile, nil);
             return shader;

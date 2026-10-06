@@ -45,6 +45,32 @@ void checkImageRegion(u32 width, u32 height, int x0, int y0, int x1, int y1);
 
 struct RenderShader {};
 
+enum class ShaderInput : u8 {
+    TargetSize,
+    VideoOrigin,
+    BoxSize,
+    TilesAcross,
+    FirstTile,
+    White,
+    Constant,
+    Words,
+    Tiles,
+    Target
+};
+
+struct ShaderParameter {
+    ShaderInput input;
+    u32 offset;
+    u32 size;
+};
+
+struct CompiledShader {
+    stl::StringView code;
+    const ShaderParameter* parameters;
+    u32 parameterCount;
+    stl::StringView constants;
+};
+
 enum class ShaderTarget : u8 {
     Spirv,
     Air
@@ -99,7 +125,7 @@ struct Renderer {
     virtual RenderImage* bind(stl::ObjPool& pool, u32 width, u32 height, const void* data, size_t size, size_t stride, stl::Runable& retired) = 0;
     virtual RenderImage* shade(stl::ObjPool& pool, ShaderFactory& factory, u32 width, u32 height, const void* data, size_t size, bool hdr, stl::Runable& retired) = 0;
 
-    virtual RenderShader* compileKernel(stl::ObjPool& pool, const void* code, size_t size, u32 tile, const ShaderOptions& options) = 0;
+    virtual RenderShader* compileKernel(stl::ObjPool& pool, const CompiledShader& compiled, u32 tile, const ShaderOptions& options) = 0;
 
     static Renderer* create(stl::ObjPool& pool, plt::Platform& platform, plt::Window& window, const RendererOptions& options = {});
 };
