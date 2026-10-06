@@ -297,6 +297,7 @@ namespace {
         u64 drawableUs = 0;
         u32 drawableInFlight = 0;
         double drawableTaken = 0;
+        u64 buffersUs = 0;
         Tiles tiles;
 
         bool beginFrame(u32 width, u32 height) override;
@@ -1333,6 +1334,7 @@ void MetalRenderer::encode(id<MTLCommandBuffer> command, id<MTLTexture> target, 
     }
     const void* sources[5] = {t.headers.data(), t.list.data(), t.ops.data(), t.triangles.data(), t.tiles.data()};
     size_t sizes[5] = {t.headers.length() * sizeof(Header), t.list.length() * sizeof(u32), t.ops.length() * sizeof(Op), t.triangles.length() * sizeof(Triangle), t.tiles.length() * sizeof(u32)};
+    u64 allocating = monotonicNowUs();
     for (NSUInteger i = 0; i < 5; i++) {
         id<MTLBuffer> buffer = sizes[i] ? [device newBufferWithBytes:sources[i] length:sizes[i] options:MTLResourceStorageModeShared] : [device newBufferWithLength:16 options:MTLResourceStorageModeShared];
         if (!buffer) {
@@ -1344,6 +1346,7 @@ void MetalRenderer::encode(id<MTLCommandBuffer> command, id<MTLTexture> target, 
     if (!textures) {
         fail(StringView(u8"cannot allocate the Metal compositor's textures"));
     }
+    buffersUs = monotonicNowUs() - allocating;
     MTLResourceID* ids = (MTLResourceID*)textures.contents;
     for (size_t i = 0; i < t.textures.length(); i++) {
         ids[i] = t.textures[i]->texture.gpuResourceID;
@@ -1548,6 +1551,7 @@ bool MetalRenderer::endFrame(ImDrawData* draw) {
         bool want = false;
         u64 began = monotonicNowUs();
         updateTextures(draw);
+        u64 textured = monotonicNowUs();
         for (const MetalImage* image : drawn) {
             want = want || image->hdr;
         }
@@ -1563,6 +1567,7 @@ bool MetalRenderer::endFrame(ImDrawData* draw) {
         if (!command) {
             fail(StringView(u8"cannot begin Metal command buffer"));
         }
+        u64 commanded = monotonicNowUs();
         for (MetalImage* image : drawn) {
             if (image->factory) {
                 image->dirty = false;
@@ -1581,6 +1586,7 @@ bool MetalRenderer::endFrame(ImDrawData* draw) {
         drawn.clear();
         const float clear[4] = {srgbTable[25], srgbTable[25], srgbTable[25], 1.f};
         tiles.compose(draw, Vector<Layer>(), (u32)drawable.texture.width, (u32)drawable.texture.height, wide, ++frames, command, clear);
+        u64 composed = monotonicNowUs();
         encode(command, drawable.texture, wide ? ShaderOutput::WideLinear : ShaderOutput::Srgb);
         Channel* done = landed;
         plt::LoopWake* completed = wake;
@@ -1621,7 +1627,7 @@ bool MetalRenderer::endFrame(ImDrawData* draw) {
         if (traceFrames) {
             StringBuilder line;
 
-            line << StringView(u8"im metal: frame=") << (i64)frames << StringView(u8" in_flight=") << (i64)drawableInFlight << StringView(u8" drawable_us=") << (i64)drawableUs << StringView(u8" encode_us=") << (i64)(encoded - began) << StringView(u8" commit_us=") << (i64)(committed - encoded) << StringView(u8" scheduled_us=") << (i64)(scheduled - committed) << StringView(u8" present_us=") << (i64)(monotonicNowUs() - scheduled) << StringView(u8" transaction=") << (i64)layer.presentsWithTransaction << StringView(u8" ") << (i64)drawable.texture.width << StringView(u8"x") << (i64)drawable.texture.height << StringView(u8"\n");
+            line << StringView(u8"im metal: frame=") << (i64)frames << StringView(u8" in_flight=") << (i64)drawableInFlight << StringView(u8" drawable_us=") << (i64)drawableUs << StringView(u8" textures_us=") << (i64)(textured - began) << StringView(u8" command_us=") << (i64)(commanded - textured) << StringView(u8" compose_us=") << (i64)(composed - commanded) << StringView(u8" buffers_us=") << (i64)buffersUs << StringView(u8" encode_us=") << (i64)(encoded - composed) << StringView(u8" commit_us=") << (i64)(committed - encoded) << StringView(u8" scheduled_us=") << (i64)(scheduled - committed) << StringView(u8" present_us=") << (i64)(monotonicNowUs() - scheduled) << StringView(u8" transaction=") << (i64)layer.presentsWithTransaction << StringView(u8" ") << (i64)drawable.texture.width << StringView(u8"x") << (i64)drawable.texture.height << StringView(u8"\n");
             sysE << StringView(line);
         }
         last = command;
