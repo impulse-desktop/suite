@@ -16,6 +16,8 @@ build.cflags += ["-O2", "-g"]
 build.cxxflags += ["-std=c++26"]
 
 build.includes += [
+    # the suite's own headers, for the one source compiled from a copy in $(B)
+    "$(S)",
     # <plt/...>: the vendored platform layer's headers by their namespaced path
     "$(S)/ext",
     "$(S)/ext/imgui",
@@ -116,7 +118,8 @@ for shader, defines in [] if darwin else [
     ))
 
 # the generic video kernel for Metal, the same gpu/video_generic.glsl in
-# Metal's spelling, which renderer_metal.mm compiles behind its compositor
+# Metal's spelling, which the Metal renderer in renderer.cpp compiles behind
+# its compositor
 shader_rules.append(command(
     name="shader_generic_msl",
     inputs=["$(S)/gpu/video_shaders.py", "$(S)/gpu/video_generic.glsl"],
@@ -139,8 +142,8 @@ codes = command(
 )
 
 
-# ImGui's core; the compositors of renderer_vulkan.cpp and renderer_metal.mm
-# draw what it lists, in place of its renderer backends
+# ImGui's core; the compositors of renderer.cpp draw what it lists, in
+# place of its renderer backends
 imgui = library(
     name="imgui",
     srcs=build.glob("$(S)/ext/imgui/*.cpp"),
@@ -232,11 +235,23 @@ decode = library(
 )
 
 
-# Linux builds every tool over Vulkan; macOS the runtime's tools over Metal
-wayland_only = ["renderer_vulkan.cpp", "screenshot.cpp", "chaos_monkey.cpp"]
-im_sources = [path for path in build.glob("$(S)/*.cpp") if not (darwin and os.path.basename(path) in wayland_only)]
+# Linux builds every tool over Vulkan; macOS the runtime's tools over Metal.
+# renderer.cpp holds both renderers under one #if; its Metal half is
+# Objective-C++, which clang compiles by the .mm extension alone, so macOS
+# compiles the file through a copy named renderer.mm
+wayland_only = ["screenshot.cpp", "chaos_monkey.cpp"]
+renderer_source = "$(S)/renderer.cpp"
 if darwin:
-    im_sources.append("$(S)/renderer_metal.mm")
+    renderer_source = "$(B)/renderer.mm"
+    command(
+        name="renderer_mm",
+        inputs=["$(S)/renderer.cpp"],
+        outputs=[renderer_source],
+        cmd=["cp", "$(S)/renderer.cpp", renderer_source],
+        descr="CP",
+    )
+im_sources = [renderer_source if os.path.basename(path) == "renderer.cpp" else path for path in build.glob("$(S)/*.cpp") if not (darwin and os.path.basename(path) in wayland_only)]
+if darwin:
     warning_flags = [*warning_flags, "-fobjc-arc", "-fblocks"]
 # the vendored libraries' own dependencies come along by name: an imported
 # graph hands over its archive, not what the archive wants linked
@@ -269,7 +284,7 @@ im_test = program(
 renderer_test = program(
     name="renderer_test",
     output="$(B)/e2e/renderer_test",
-    srcs=["$(S)/tst/renderer.cpp", "$(S)/renderer.cpp", "$(S)/ui.cpp", "$(S)/error.cpp", "$(S)/number.cpp", "$(S)/timing.cpp", *(["$(S)/renderer_metal.mm", "$(S)/tst/renderer_metal.mm"] if darwin else ["$(S)/renderer_vulkan.cpp"])],
+    srcs=["$(S)/tst/renderer.cpp", renderer_source, "$(S)/ui.cpp", "$(S)/error.cpp", "$(S)/number.cpp", "$(S)/timing.cpp", *(["$(S)/tst/renderer_metal.mm"] if darwin else [])],
     cflags=warning_flags,
     deps=im_deps,
 )
@@ -279,7 +294,7 @@ renderer_test = program(
 video_test = program(
     name="video_test",
     output="$(B)/e2e/video_test",
-    srcs=["$(S)/tst/video.cpp", "$(S)/shader.cpp", "$(S)/codes.cpp", "$(S)/renderer.cpp", "$(S)/ui.cpp", "$(S)/error.cpp", "$(S)/number.cpp", "$(S)/timing.cpp", *(["$(S)/renderer_metal.mm"] if darwin else ["$(S)/renderer_vulkan.cpp"])],
+    srcs=["$(S)/tst/video.cpp", "$(S)/shader.cpp", "$(S)/codes.cpp", renderer_source, "$(S)/ui.cpp", "$(S)/error.cpp", "$(S)/number.cpp", "$(S)/timing.cpp"],
     cflags=warning_flags,
     deps=im_deps,
 )
