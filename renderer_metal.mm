@@ -5,6 +5,8 @@
 #include "shader.h"
 #include "renderer.h"
 
+#include <std/ios/sys.h>
+#include <std/sys/crt.h>
 #include <std/dbg/insist.h>
 #include <std/lib/vector.h>
 #include <std/str/builder.h>
@@ -14,6 +16,7 @@
 #include <std/mem/small_obj_allocator.h>
 
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <plt/poller.h>
@@ -287,8 +290,10 @@ namespace {
         id<MTLComputePipelineState> genericLayer[outputs] = {};
         bool edr = false;
         bool wide = false;
+        bool traceFrames = false;
         float sdrWhiteNits = 203.f;
         u64 frames = 0;
+        u64 drawableUs = 0;
         Tiles tiles;
 
         bool beginFrame(u32 width, u32 height) override;
@@ -1514,7 +1519,9 @@ bool MetalRenderer::beginFrame(u32 width, u32 height) {
         checkCommand(last);
         layer.drawableSize = CGSizeMake(width, height);
         layer.presentsWithTransaction = window.inLiveResize;
+        u64 began = monotonicNowUs();
         drawable = [layer nextDrawable];
+        drawableUs = monotonicNowUs() - began;
         return drawable != nil;
     }
 }
@@ -1534,6 +1541,7 @@ void MetalRenderer::setMode(bool want) {
 bool MetalRenderer::endFrame(ImDrawData* draw) {
     @autoreleasepool {
         bool want = false;
+        u64 began = monotonicNowUs();
         updateTextures(draw);
         for (const MetalImage* image : drawn) {
             want = want || image->hdr;
@@ -1575,13 +1583,26 @@ bool MetalRenderer::endFrame(ImDrawData* draw) {
           done->enqueue(flight);
           completed->signal();
         }];
+        u64 encoded = monotonicNowUs();
+        u64 committed = encoded;
+        u64 scheduled = encoded;
         if (layer.presentsWithTransaction) {
             [command commit];
+            committed = monotonicNowUs();
             [command waitUntilScheduled];
+            scheduled = monotonicNowUs();
             [drawable present];
         } else {
             [command presentDrawable:drawable];
             [command commit];
+            committed = monotonicNowUs();
+            scheduled = committed;
+        }
+        if (traceFrames) {
+            StringBuilder line;
+
+            line << StringView(u8"im metal: drawable_us=") << (i64)drawableUs << StringView(u8" encode_us=") << (i64)(encoded - began) << StringView(u8" commit_us=") << (i64)(committed - encoded) << StringView(u8" scheduled_us=") << (i64)(scheduled - committed) << StringView(u8" present_us=") << (i64)(monotonicNowUs() - scheduled) << StringView(u8" transaction=") << (i64)layer.presentsWithTransaction << StringView(u8" ") << (i64)drawable.texture.width << StringView(u8"x") << (i64)drawable.texture.height << StringView(u8"\n");
+            sysE << StringView(line);
         }
         last = command;
         drawable = nil;
@@ -1746,6 +1767,7 @@ Renderer* createMetalRenderer(ObjPool& pool, plt::Platform& platform, plt::Windo
     }
     NSScreen* screen = renderer->window.screen ? renderer->window.screen : NSScreen.mainScreen;
     renderer->edr = screen.maximumPotentialExtendedDynamicRangeColorComponentValue > 1.0;
+    renderer->traceFrames = getenv("IM_TRACE_FRAMES") != nullptr;
     CAMetalLayer* layer = renderer->layer;
     layer.device = renderer->device;
     layer.framebufferOnly = NO;
