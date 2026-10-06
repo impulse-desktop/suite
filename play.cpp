@@ -47,6 +47,7 @@ namespace {
     constexpr Design windowHeight = 600_d;
     constexpr Design barPadding = 8_d;
     constexpr Design buttonWidth = 72_d;
+    constexpr float sideShare = .2f;
     constexpr size_t framePermits = 10;
     constexpr size_t planeAlignment = 64;
     constexpr size_t shaderBudget = 64;
@@ -68,7 +69,11 @@ namespace {
         Clock,
         Failure,
         Compile,
-        Compiled
+        Compiled,
+        MediaInfo,
+        VideoInfo,
+        AudioInfo,
+        Select
     };
 
     struct Message {
@@ -181,6 +186,61 @@ namespace {
         ~Compiled() noexcept override;
     };
 
+    struct Track {
+        int index;
+        AVMediaType type;
+        bool preferred;
+        u32 codec;
+        u32 language;
+        u32 title;
+    };
+
+    struct MediaInfo final: public Typed<Kind::MediaInfo> {
+        Buffer format;
+        double duration = 0.;
+        i64 bitrate = 0;
+        i64 size = 0;
+        Vector<Track> tracks;
+        Buffer names;
+
+        u32 keep(StringView name);
+        StringView name(u32 at) const;
+    };
+
+    struct VideoInfo final: public Typed<Kind::VideoInfo> {
+        int index = -1;
+        Buffer codec;
+        Buffer pixels;
+        int width = 0;
+        int height = 0;
+        AVRational aspect{};
+        AVRational rate{};
+        Buffer primaries;
+        Buffer transfer;
+        Buffer matrix;
+        Buffer range;
+        i64 bitrate = 0;
+    };
+
+    struct AudioInfo final: public Typed<Kind::AudioInfo> {
+        int index = -1;
+        Buffer codec;
+        int rate = 0;
+        Buffer layout;
+        Buffer samples;
+        i64 bitrate = 0;
+        Buffer language;
+    };
+
+    struct Select final: public Typed<Kind::Select> {
+        int index;
+        u64 generation;
+        double position;
+        bool playing;
+
+        Select(int index, u64 generation, double position, bool playing);
+    };
+
     struct Compiler final: public Runable {
         Player* player;
 
@@ -194,6 +254,9 @@ namespace {
         AVCodecContext* codec = nullptr;
         AVPacket* packet = nullptr;
         AVFrame* frame = nullptr;
+        Player* player;
+        AVMediaType type;
+        void* slots;
         int index = -1;
         int cues = -1;
         double start = 0.;
@@ -201,6 +264,10 @@ namespace {
         bool eof = false;
 
         Stream(Player* player, AVMediaType type, void* slots = nullptr);
+        void select(int wanted);
+        MediaInfo* describeFile() const;
+        VideoInfo* describeVideo() const;
+        AudioInfo* describeAudio() const;
         void seek(double position);
         int receive();
         double seconds(i64 timestamp) const;
@@ -306,7 +373,11 @@ namespace {
         bool scrubbing = false;
         float scrub = 0.f;
         bool fullscreen = false;
+        bool panel = false;
         u64 clicked = 0;
+        MediaInfo* file = nullptr;
+        VideoInfo* video = nullptr;
+        AudioInfo* audio = nullptr;
         bool failed = false;
         Buffer error;
 
@@ -328,8 +399,11 @@ namespace {
         Made* find(const VideoShader& facts, const ShaderOptions& options);
         void adopt(Compiled& compiled);
         void trim();
+        void rewind(double to, bool play);
         void seek(double to, bool play);
+        void select(AVMediaType type, int index);
         void toggle();
+        void flipFullscreen();
         void sendControl(Channel* to);
         void halt(StringView text);
         bool audioMaster() const;
@@ -337,6 +411,7 @@ namespace {
         void setClock(double base, bool running, u64 at);
         void keys();
         void draw();
+        void drawPanel();
     };
 
     struct CallScreen final: public plt::TimerCallback {
@@ -843,7 +918,11 @@ void Slots::fill(AVFrame* frame, int width, int height, const int* align) {
     frame->extended_data = frame->data;
 }
 
-Stream::Stream(Player* player, AVMediaType type, void* slots) {
+Stream::Stream(Player* player_, AVMediaType type_, void* slots_)
+    : player(player_)
+    , type(type_)
+    , slots(slots_)
+{
     StringView path(player->path);
     int e = avformat_open_input(&format, player->path, nullptr, nullptr);
 
@@ -864,13 +943,36 @@ Stream::Stream(Player* player, AVMediaType type, void* slots) {
     duration = format->duration > 0 ? (double)format->duration / AV_TIME_BASE : 0.;
     start = format->start_time != AV_NOPTS_VALUE ? (double)format->start_time / AV_TIME_BASE : 0.;
 
+    packet = av_packet_alloc();
+    frame = av_frame_alloc();
+    pooledGuard(*player->pool, [this] {
+        av_frame_free(&frame);
+        av_packet_free(&packet);
+        avcodec_free_context(&codec);
+    });
+
+    if (!packet || !frame) {
+        fail(StringView(u8"cannot allocate a decoder"));
+    }
+
     int found = av_find_best_stream(format, type, -1, -1, nullptr, 0);
 
     if (found < 0 || (format->streams[found]->disposition & AV_DISPOSITION_ATTACHED_PIC)) {
         return;
     }
 
-    index = found;
+    select(found);
+}
+
+void Stream::select(int wanted) {
+    StringView path(player->path);
+
+    if (wanted < 0 || (unsigned)wanted >= format->nb_streams || format->streams[wanted]->codecpar->codec_type != type || (format->streams[wanted]->disposition & AV_DISPOSITION_ATTACHED_PIC)) {
+        raiseError(StringView(StringBuilder() << path << StringView(u8": no ") << StringView(av_get_media_type_string(type)) << StringView(u8" track ") << (i64)wanted));
+    }
+
+    avcodec_free_context(&codec);
+    index = wanted;
     cues = index;
 
     int keyed = av_find_best_stream(format, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
@@ -880,9 +982,7 @@ Stream::Stream(Player* player, AVMediaType type, void* slots) {
     }
 
     for (unsigned i = 0; i < format->nb_streams; i++) {
-        if ((int)i != index) {
-            format->streams[i]->discard = AVDISCARD_ALL;
-        }
+        format->streams[i]->discard = (int)i == index ? AVDISCARD_DEFAULT : AVDISCARD_ALL;
     }
 
     const AVCodecParameters* parameters = format->streams[index]->codecpar;
@@ -893,19 +993,12 @@ Stream::Stream(Player* player, AVMediaType type, void* slots) {
     }
 
     codec = avcodec_alloc_context3(decoder);
-    packet = av_packet_alloc();
-    frame = av_frame_alloc();
-    pooledGuard(*player->pool, [this] {
-        av_frame_free(&frame);
-        av_packet_free(&packet);
-        avcodec_free_context(&codec);
-    });
 
-    if (!codec || !packet || !frame) {
+    if (!codec) {
         fail(StringView(u8"cannot allocate a decoder"));
     }
 
-    e = avcodec_parameters_to_context(codec, parameters);
+    int e = avcodec_parameters_to_context(codec, parameters);
 
     if (e < 0) {
         failAv(path, e);
@@ -924,6 +1017,83 @@ Stream::Stream(Player* player, AVMediaType type, void* slots) {
     if (e < 0) {
         failAv(path, e);
     }
+
+    eof = false;
+}
+
+static Buffer named(const char* name) {
+    return Buffer(StringView(name ? name : "unknown"));
+}
+
+static Buffer tagged(const AVDictionary* tags, const char* key) {
+    const AVDictionaryEntry* entry = av_dict_get(tags, key, nullptr, 0);
+
+    return Buffer(StringView(entry ? entry->value : ""));
+}
+
+MediaInfo* Stream::describeFile() const {
+    MediaInfo* info = new MediaInfo();
+
+    info->format = named(format->iformat->long_name ? format->iformat->long_name : format->iformat->name);
+    info->duration = duration;
+    info->bitrate = format->bit_rate;
+    info->size = format->pb ? avio_size(format->pb) : 0;
+
+    for (unsigned i = 0; i < format->nb_streams; i++) {
+        const AVStream* track = format->streams[i];
+        AVMediaType kind = track->codecpar->codec_type;
+
+        if ((kind != AVMEDIA_TYPE_VIDEO && kind != AVMEDIA_TYPE_AUDIO) || (track->disposition & AV_DISPOSITION_ATTACHED_PIC)) {
+            continue;
+        }
+
+        Track entry{(int)i, kind, (track->disposition & AV_DISPOSITION_DEFAULT) != 0, 0, 0, 0};
+
+        entry.codec = info->keep(StringView(named(avcodec_get_name(track->codecpar->codec_id))));
+        entry.language = info->keep(StringView(tagged(track->metadata, "language")));
+        entry.title = info->keep(StringView(tagged(track->metadata, "title")));
+        info->tracks.pushBack(entry);
+    }
+
+    return info;
+}
+
+VideoInfo* Stream::describeVideo() const {
+    VideoInfo* info = new VideoInfo();
+    const AVStream* track = format->streams[index];
+    const AVCodecParameters* parameters = track->codecpar;
+
+    info->index = index;
+    info->codec = named(avcodec_get_name(parameters->codec_id));
+    info->pixels = named(av_get_pix_fmt_name((AVPixelFormat)parameters->format));
+    info->width = parameters->width;
+    info->height = parameters->height;
+    info->aspect = parameters->sample_aspect_ratio;
+    info->rate = av_guess_frame_rate(format, (AVStream*)track, nullptr);
+    info->primaries = named(av_color_primaries_name(parameters->color_primaries));
+    info->transfer = named(av_color_transfer_name(parameters->color_trc));
+    info->matrix = named(av_color_space_name(parameters->color_space));
+    info->range = named(av_color_range_name(parameters->color_range));
+    info->bitrate = parameters->bit_rate;
+
+    return info;
+}
+
+AudioInfo* Stream::describeAudio() const {
+    AudioInfo* info = new AudioInfo();
+    const AVStream* track = format->streams[index];
+    const AVCodecParameters* parameters = track->codecpar;
+    char layout[128];
+
+    info->index = index;
+    info->codec = named(avcodec_get_name(parameters->codec_id));
+    info->rate = parameters->sample_rate;
+    info->layout = av_channel_layout_describe(&parameters->ch_layout, layout, sizeof(layout)) >= 0 ? Buffer(StringView(layout)) : named(nullptr);
+    info->samples = named(av_get_sample_fmt_name((AVSampleFormat)parameters->format));
+    info->bitrate = parameters->bit_rate;
+    info->language = tagged(track->metadata, "language");
+
+    return info;
 }
 
 void Stream::seek(double position) {
@@ -990,6 +1160,12 @@ Video::Video(Player* player_)
     for (size_t i = 0; i < framePermits; i++) {
         idle.pushBack(player->pool->make<VideoImage>(player));
     }
+
+    player->post(stream.describeFile());
+
+    if (stream.index >= 0) {
+        player->post(stream.describeVideo());
+    }
 }
 
 void Video::run() {
@@ -1015,6 +1191,10 @@ void Video::run() {
                 apply(*control);
             } else if (Surface* surface = cast<Surface>(message.ptr)) {
                 idle.pushBack(surface->image);
+            } else if (Select* select = cast<Select>(message.ptr)) {
+                stream.select(select->index);
+                player->post(stream.describeVideo());
+                apply(Control(select->generation, select->position, select->playing));
             }
         }
     } catch (...) {
@@ -1218,6 +1398,10 @@ Audio::Audio(Player* player_)
     for (ALuint buffer : buffers) {
         idle.pushBack(buffer);
     }
+
+    if (stream.index >= 0) {
+        player->post(stream.describeAudio());
+    }
 }
 
 void Audio::run() {
@@ -1252,6 +1436,10 @@ void Audio::run() {
                 apply(*control);
             } else if (cast<Pulse>(message.ptr)) {
                 service();
+            } else if (Select* select = cast<Select>(message.ptr)) {
+                stream.select(select->index);
+                player->post(stream.describeAudio());
+                apply(Control(select->generation, select->position, select->playing));
             }
         }
     } catch (...) {
@@ -1532,6 +1720,9 @@ Screen::~Screen() noexcept {
     }
 
     delete shown;
+    delete file;
+    delete video;
+    delete audio;
 
     for (const Made& known : made) {
         delete known.pool;
@@ -1605,6 +1796,18 @@ void Screen::drain() {
             halt(StringView(failure->text));
         } else if (Compiled* compiled = cast<Compiled>(message.ptr)) {
             adopt(*compiled);
+        } else if (MediaInfo* info = cast<MediaInfo>(message.ptr)) {
+            delete file;
+            file = info;
+            message.drop();
+        } else if (VideoInfo* info = cast<VideoInfo>(message.ptr)) {
+            delete video;
+            video = info;
+            message.drop();
+        } else if (AudioInfo* info = cast<AudioInfo>(message.ptr)) {
+            delete audio;
+            audio = info;
+            message.drop();
         }
     }
 }
@@ -1872,6 +2075,27 @@ Compiled::~Compiled() noexcept {
     delete pool;
 }
 
+u32 MediaInfo::keep(StringView text) {
+    u32 at = (u32)names.used();
+
+    names.append(text.data(), text.length());
+    names.append("", 1);
+
+    return at;
+}
+
+StringView MediaInfo::name(u32 at) const {
+    return StringView((const char*)names.data() + at);
+}
+
+Select::Select(int index_, u64 generation_, double position_, bool playing_)
+    : index(index_)
+    , generation(generation_)
+    , position(position_)
+    , playing(playing_)
+{
+}
+
 Compiler::Compiler(Player* player_)
     : player(player_)
 {
@@ -1945,11 +2169,7 @@ void Compiler::compile(const Compile& request) {
     owner.drop();
 }
 
-void Screen::seek(double to, bool play) {
-    if (failed) {
-        return;
-    }
-
+void Screen::rewind(double to, bool play) {
     double end = duration > 0. ? duration : to;
 
     to = to < 0. ? 0. : to > end ? end : to;
@@ -1968,8 +2188,30 @@ void Screen::seek(double to, bool play) {
 
     waiting.clear();
     TRACE(player->ui, StringView(StringBuilder() << StringView(u8"seek generation=") << (i64)generation << StringView(u8" position_ms=") << (i64)llround(to * 1000.)));
+}
+
+void Screen::seek(double to, bool play) {
+    if (failed) {
+        return;
+    }
+
+    rewind(to, play);
     sendControl(player->videoInbox);
     sendControl(player->audioInbox);
+    player->ui->requestFrame();
+    resume();
+}
+
+void Screen::select(AVMediaType type, int index) {
+    if (failed) {
+        return;
+    }
+
+    bool chosen = type == AVMEDIA_TYPE_VIDEO;
+
+    rewind(position(monotonicNowUs()), playing && !ended);
+    (chosen ? player->videoInbox : player->audioInbox)->enqueue(new Select(index, generation, target, playing));
+    sendControl(chosen ? player->audioInbox : player->videoInbox);
     player->ui->requestFrame();
     resume();
 }
@@ -2055,9 +2297,14 @@ void Screen::keys() {
     }
 
     if (ImGui::IsKeyPressed(ImGuiKey_F, false) || ImGui::IsKeyPressed(ImGuiKey_F11, false)) {
-        fullscreen = !fullscreen;
-        player->ui->requestFullscreen(fullscreen);
+        flipFullscreen();
     }
+}
+
+void Screen::flipFullscreen() {
+    fullscreen = !fullscreen;
+    panel = panel && !fullscreen;
+    player->ui->requestFullscreen(fullscreen);
 }
 
 void Screen::draw() {
@@ -2077,13 +2324,23 @@ void Screen::draw() {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImVec2 corner = ImGui::GetCursorScreenPos();
     ImVec2 room = ImGui::GetContentRegionAvail();
-    ImVec2 lo = corner;
+    float side = panel ? floorf(room.x * sideShare) : 0.f;
+    ImVec2 lo(corner.x + side, corner.y);
     ImVec2 hi(corner.x + room.x, corner.y + room.y - bar);
     float width = hi.x - lo.x;
     float height = hi.y - lo.y;
     ImU32 black = IM_COL32(0, 0, 0, 255);
 
-    dl->AddRectFilled(ImVec2(lo.x, hi.y), ImVec2(hi.x, corner.y + room.y), ImGui::GetColorU32(ImGuiCol_WindowBg));
+    dl->AddRectFilled(ImVec2(corner.x, hi.y), ImVec2(hi.x, corner.y + room.y), ImGui::GetColorU32(ImGuiCol_WindowBg));
+
+    if (panel) {
+        ImGui::SetCursorScreenPos(corner);
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImGui::GetStyleColorVec4(ImGuiCol_WindowBg));
+        ImGui::BeginChild("panel", ImVec2(side, room.y - bar), ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoScrollbar);
+        drawPanel();
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
+    }
 
     if (shown && width >= 1.f && height >= 1.f) {
         float aspect = (float)shown->aspect;
@@ -2112,8 +2369,7 @@ void Screen::draw() {
     if (ImGui::IsMouseHoveringRect(lo, hi) && !ImGui::IsAnyItemActive()) {
         if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
             clicked = 0;
-            fullscreen = !fullscreen;
-            player->ui->requestFullscreen(fullscreen);
+            flipFullscreen();
         } else if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
             clicked = monotonicNowUs();
         }
@@ -2128,7 +2384,23 @@ void Screen::draw() {
         }
     }
 
-    ImGui::SetCursorScreenPos(ImVec2(lo.x + pad, hi.y + pad));
+    ImGui::SetCursorScreenPos(ImVec2(corner.x + pad, hi.y + pad));
+
+    float square = ImGui::GetFrameHeight();
+
+    if (panel) {
+        ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+    }
+
+    if (ImGui::Button("i##panel", ImVec2(square, square))) {
+        panel = !panel;
+    }
+
+    if (panel) {
+        ImGui::PopStyleColor();
+    }
+
+    ImGui::SameLine();
 
     if (ImGui::Button(playing ? "Pause##toggle" : "Play##toggle", ImVec2(ui.px(buttonWidth), 0.f))) {
         toggle();
@@ -2174,6 +2446,137 @@ void Screen::draw() {
     ImGui::AlignTextToFramePadding();
     ImGui::TextUnformatted(time.cStr());
     ImGui::End();
+}
+
+void Screen::drawPanel() {
+    auto key = [&](const char* name) {
+        ImGui::TableNextRow();
+        ImGui::TableSetColumnIndex(0);
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextDisabled("%s", name);
+        ImGui::TableSetColumnIndex(1);
+    };
+    auto row = [&](const char* name, StringView value) {
+        key(name);
+        ImGui::AlignTextToFramePadding();
+        ImGui::PushTextWrapPos(0.f);
+        ImGui::TextUnformatted((const char*)value.begin(), (const char*)value.end());
+        ImGui::PopTextWrapPos();
+    };
+    auto table = [&](const char* id) {
+        if (!ImGui::BeginTable(id, 2, ImGuiTableFlags_SizingStretchSame)) {
+            return false;
+        }
+
+        ImGui::TableSetupColumn("key", ImGuiTableColumnFlags_WidthFixed);
+        ImGui::TableSetupColumn("value", ImGuiTableColumnFlags_WidthStretch, 1.f);
+
+        return true;
+    };
+    auto kilobits = [&](const char* name, i64 bitrate) {
+        if (bitrate > 0) {
+            row(name, StringView(StringBuilder() << (bitrate + 500) / 1000 << StringView(u8" kb/s")));
+        }
+    };
+    auto tracks = [&](const char* title, AVMediaType type, int current) {
+        if (!file || !ImGui::CollapsingHeader(title, ImGuiTreeNodeFlags_DefaultOpen)) {
+            return;
+        }
+
+        for (const Track& track : file->tracks) {
+            if (track.type != type) {
+                continue;
+            }
+
+            StringBuilder label;
+
+            label << StringView(u8"#") << (i64)track.index << StringView(u8" ") << file->name(track.codec);
+
+            if (!file->name(track.language).empty()) {
+                label << StringView(u8" ") << file->name(track.language);
+            }
+
+            if (!file->name(track.title).empty()) {
+                label << StringView(u8" ") << file->name(track.title);
+            }
+
+            if (track.preferred) {
+                label << StringView(u8" (default)");
+            }
+
+            label << StringView(u8"##track") << (i64)track.index;
+
+            if (ImGui::Selectable(label.cStr(), track.index == current) && track.index != current) {
+                select(type, track.index);
+            }
+        }
+    };
+
+    if (file && ImGui::CollapsingHeader("File", ImGuiTreeNodeFlags_DefaultOpen) && table("file")) {
+        StringBuilder length;
+
+        appendTime(length, file->duration);
+        row("Format", StringView(file->format));
+        row("Duration", StringView(length));
+        kilobits("Bitrate", file->bitrate);
+
+        if (file->size > 0) {
+            i64 tenths = (file->size + 50000) / 100000;
+
+            row("Size", StringView(StringBuilder() << tenths / 10 << StringView(u8".") << tenths % 10 << StringView(u8" MB")));
+        }
+
+        ImGui::EndTable();
+    }
+
+    if (video && ImGui::CollapsingHeader("Video", ImGuiTreeNodeFlags_DefaultOpen) && table("video")) {
+        StringBuilder size;
+        StringBuilder rate;
+
+        size << (i64)video->width << StringView(u8" \xc3\x97 ") << (i64)video->height;
+
+        if (video->aspect.num > 0 && video->aspect.den > 0 && video->aspect.num != video->aspect.den) {
+            size << StringView(u8"  SAR ") << (i64)video->aspect.num << StringView(u8":") << (i64)video->aspect.den;
+        }
+
+        row("Codec", StringView(video->codec));
+        row("Pixels", StringView(video->pixels));
+        row("Size", StringView(size));
+
+        if (video->rate.num > 0 && video->rate.den > 0) {
+            rate << (i64)video->rate.num;
+
+            if (video->rate.den != 1) {
+                rate << StringView(u8"/") << (i64)video->rate.den;
+            }
+
+            row("Frame rate", StringView(rate));
+        }
+
+        row("Primaries", StringView(video->primaries));
+        row("Transfer", StringView(video->transfer));
+        row("Matrix", StringView(video->matrix));
+        row("Range", StringView(video->range));
+        kilobits("Bitrate", video->bitrate);
+        ImGui::EndTable();
+    }
+
+    if (audio && ImGui::CollapsingHeader("Audio", ImGuiTreeNodeFlags_DefaultOpen) && table("audio")) {
+        row("Codec", StringView(audio->codec));
+        row("Sample rate", StringView(StringBuilder() << (i64)audio->rate << StringView(u8" Hz")));
+        row("Channels", StringView(audio->layout));
+        row("Samples", StringView(audio->samples));
+        kilobits("Bitrate", audio->bitrate);
+
+        if (!audio->language.empty()) {
+            row("Language", StringView(audio->language));
+        }
+
+        ImGui::EndTable();
+    }
+
+    tracks("Audio tracks", AVMEDIA_TYPE_AUDIO, audio ? audio->index : -1);
+    tracks("Video tracks", AVMEDIA_TYPE_VIDEO, video ? video->index : -1);
 }
 
 CallScreen::CallScreen(Player* player_)
