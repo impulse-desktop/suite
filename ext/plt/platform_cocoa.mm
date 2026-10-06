@@ -1210,6 +1210,15 @@ void WindowImpl::startDisplayLink() {
 }
 
 void WindowImpl::draw() {
+    if (inLiveResize()) {
+        // The link is silent for the whole live resize: every frame of it is
+        // the one AppKit asks for in displayLayer:, presented in the step's
+        // transaction. A link tick presenting that way outside a transaction
+        // held a drawable, and with two sources of frames the layer's pool of
+        // three ran dry: nextDrawable stalled the main thread for most of a
+        // second per step. The request stays for the step to draw.
+        return;
+    }
     if (!frameRequested || frame == nullptr) {
         // Idle frames coast for a while before the link stops. Starting
         // one costs a thread wake and a sync to the display, and a
@@ -1557,15 +1566,13 @@ void WindowImpl::resized() {
 void WindowImpl::resizeFrame() {
     // A frame the window system asked for during layout. Render synchronously in
     // the current (resize) transaction so bounds and contents commit together.
-    // Stop the display link for this frame: a link tick would present in its own
-    // transaction, one step out of sync with the bounds. frame() rebuilds the
-    // vterm to the new size and renders; it never re-enters (request* are async).
-    stopDisplayLink();
+    // The link's ticks do not draw while the view is in live resize (see draw()),
+    // so nothing here stops or restarts it. frame() rebuilds the vterm to the
+    // new size and renders; it never re-enters (request* are async).
     frameRequested = false;
     if (frame != nullptr) {
         frame->frame(info());
     }
-    startDisplayLink();
 }
 
 void WindowImpl::screenChanged() {
