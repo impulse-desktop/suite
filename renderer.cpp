@@ -5,13 +5,10 @@
 #include <math.h>
 #include <string.h>
 
-#if defined(__APPLE__)
-    #include "renderer_metal.h"
-#else
-    #include "renderer_vulkan.h"
-#endif
-
 using namespace stl;
+
+static Renderer* createRenderer(ObjPool& pool, plt::Platform& platform, plt::Window& window, const RendererOptions& options);
+static SharedImage* createSharedImage(ObjPool& pool, StringView description, intptr_t handle);
 
 void checkImageSize(u32 width, u32 height, u32 limit) {
     if (!width || !height || width > limit || height > limit || (u64)width * height > (1u << 28)) {
@@ -96,24 +93,14 @@ Renderer* Renderer::create(stl::ObjPool& pool, plt::Platform& platform, plt::Win
     if (!(options.sdrWhiteNits > 0.f) || options.sdrWhiteNits > 10000.f) {
         fail(StringView(u8"invalid SDR white level"));
     }
-#if defined(__APPLE__)
-    return createMetalRenderer(pool, platform, window, options);
-#else
-    return createVulkanRenderer(pool, platform, window, options);
-#endif
+    return createRenderer(pool, platform, window, options);
 }
 
 SharedImage* SharedImage::create(stl::ObjPool& pool, stl::StringView description, intptr_t handle) {
-#if defined(__APPLE__)
-    return createMetalSharedImage(pool, description, handle);
-#else
-    return createVulkanSharedImage(pool, description, handle);
-#endif
+    return createSharedImage(pool, description, handle);
 }
 
 #if defined(__APPLE__)
-
-    #include "renderer_metal.h"
 
     #include "error.h"
     #include "pooled.h"
@@ -1259,7 +1246,7 @@ SurfaceImage::~SurfaceImage() noexcept {
     }
 }
 
-SharedImage* createMetalSharedImage(ObjPool& pool, StringView description, intptr_t handle) {
+static SharedImage* createSharedImage(ObjPool& pool, StringView description, intptr_t handle) {
     if (!description.empty() || !handle) {
         fail(StringView(u8"a shared Metal image needs an IOSurface handle"));
     }
@@ -1837,7 +1824,7 @@ u32 MetalRenderer::maxTextures() {
     return 0xffffffffu;
 }
 
-Renderer* createMetalRenderer(ObjPool& pool, plt::Platform& platform, plt::Window& window, const RendererOptions& options) {
+static Renderer* createRenderer(ObjPool& pool, plt::Platform& platform, plt::Window& window, const RendererOptions& options) {
     plt::RenderContext context = window.renderContext();
     MetalRenderer* renderer = pool.make<MetalRenderer>();
     renderer->host = &window;
@@ -1900,8 +1887,6 @@ Renderer* createMetalRenderer(ObjPool& pool, plt::Platform& platform, plt::Windo
 }
 
 #else
-
-    #include "renderer_vulkan.h"
 
     #include "error.h"
     #include "pooled.h"
@@ -5188,7 +5173,7 @@ RenderImage* VulkanRenderer::upload(ObjPool& pool, u32 width, u32 height, const 
     return image;
 }
 
-Renderer* createVulkanRenderer(ObjPool& pool, plt::Platform& platform, plt::Window& window, const RendererOptions& options) {
+static Renderer* createRenderer(ObjPool& pool, plt::Platform& platform, plt::Window& window, const RendererOptions& options) {
     GpuOptions wants;
     wants.chaos = VulkanChaos::create(pool);
     wants.sharedBuffer = options.shared != nullptr;
@@ -5324,7 +5309,7 @@ namespace {
     }
 }
 
-SharedImage* createVulkanSharedImage(ObjPool& pool, StringView description, intptr_t handle) {
+static SharedImage* createSharedImage(ObjPool& pool, StringView description, intptr_t handle) {
     DmaImage* image = pool.make<DmaImage>();
     if (!parseShared(description, *image)) {
         fail(StringView(u8"bad shared screenshot metadata"));

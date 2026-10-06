@@ -59,10 +59,8 @@ HDR pipelines, readback and GPU fault injection, and the Metal one, under
 one `#if` for Apple. No Vulkan or Metal types or backend calls enter the
 tools or public headers. The vendored ImGui backend and build-time GLSL
 shaders stay separate. The common factories at the top of `renderer.cpp`
-select the platform through `renderer_vulkan.h` or `renderer_metal.h`;
-these headers expose creation functions using only portable types. On
-macOS the file is compiled as Objective-C++ through a copy named
-`renderer.mm`.
+call the creation functions of whichever half is compiled in. On macOS the
+file is compiled as Objective-C++ through a copy named `renderer.mm`.
 
 `Ui::create` prepares the window in the caller's pool. The client supplies
 its own `Runable` to `Ui::run`; the first `Ui::next` shows the window. This lets
