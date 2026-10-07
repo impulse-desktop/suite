@@ -53,7 +53,8 @@ namespace {
     constexpr Design windowWidth = 820_d;
     constexpr Design windowHeight = 560_d;
     constexpr Design placesWidth = 160_d;
-    constexpr Design gap = 4_d;
+    constexpr Design gap = 8_d;
+    constexpr Design ring = 2_d;
     constexpr Design cellWidth = 120_d;
     constexpr u32 thumbSide = 128;
     constexpr size_t workerCount = 4;
@@ -1483,8 +1484,11 @@ void ChooseApp::drawTable(float height) {
 
 // the entries as cells: a thumbnail for an image, its type for another
 // file, a folder for a directory, the name under each
+// The cells start at the corner of the block as the rows of the table
+// do, the gap between them; the chosen one is ringed within its cell.
 void ChooseApp::drawGrid(float height) {
     float g = ui->px(gap);
+    float r = ui->px(ring);
     float cell = ui->px(cellWidth);
     float lineH = ImGui::GetTextLineHeightWithSpacing();
     float cellH = cell + lineH + g;
@@ -1492,7 +1496,7 @@ void ChooseApp::drawGrid(float height) {
     ImGui::BeginChild("grid", ImVec2(0.f, height), 0, 0);
 
     float innerW = max(1.f, ImGui::GetContentRegionAvail().x);
-    size_t columns = max<size_t>(1, (size_t)(innerW / (cell + g)));
+    size_t columns = max<size_t>(1, (size_t)((innerW + g) / (cell + g)));
     size_t rows = (shown.length() + columns - 1) / columns;
     ImVec2 origin = ImGui::GetCursorScreenPos();
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -1503,14 +1507,14 @@ void ChooseApp::drawGrid(float height) {
     ImU32 frame = ImGui::GetColorU32(ImGuiCol_FrameBg);
     ImU32 chosenColor = ImGui::GetColorU32(ImGuiCol_Header);
 
-    ImGui::Dummy(ImVec2(innerW, rows * cellH + g));
+    ImGui::Dummy(ImVec2(innerW, rows * cellH));
     wanted.clear();
 
     for (size_t n = 0; n < shown.length(); n++) {
         size_t index = shown[n];
         Item& item = *items[index];
-        float x = origin.x + g + (float)(n % columns) * (cell + g);
-        float y = origin.y + g + (float)(n / columns) * cellH;
+        float x = origin.x + (float)(n % columns) * (cell + g);
+        float y = origin.y + (float)(n / columns) * cellH;
         bool inView = y + cellH > origin.y + scrollY && y < origin.y + scrollY + viewH;
 
         if (scrollToCursor && index == cursor) {
@@ -1536,20 +1540,21 @@ void ChooseApp::drawGrid(float height) {
 
         ImGui::PopID();
 
-        ImVec2 p0(x, y);
-        ImVec2 p1(x + cell, y + cell);
+        ImVec2 p0(x + r, y + r);
+        ImVec2 p1(x + cell - r, y + cell - r);
+        float side = cell - 2.f * r;
 
         if (item.selected) {
-            dl->AddRectFilled(ImVec2(p0.x - 2.f, p0.y - 2.f), ImVec2(p1.x + 2.f, y + cellH), chosenColor, 3.f);
+            dl->AddRectFilled(ImVec2(x, y), ImVec2(x + cell, y + cellH), chosenColor, 3.f);
         }
 
         dl->AddRectFilled(p0, p1, frame, 3.f);
 
         if (item.thumbW) {
-            float scale = min(cell / (float)item.thumbW, cell / (float)item.thumbH);
+            float scale = min(side / (float)item.thumbW, side / (float)item.thumbH);
             float w = (float)item.thumbW * scale;
             float h = (float)item.thumbH * scale;
-            ImVec2 t0(x + (cell - w) / 2.f, y + (cell - h) / 2.f);
+            ImVec2 t0(p0.x + (side - w) / 2.f, p0.y + (side - h) / 2.f);
 
             dl->AddImage(item.texture, t0, ImVec2(t0.x + w, t0.y + h));
         } else {
