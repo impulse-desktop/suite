@@ -2322,21 +2322,25 @@ void Screen::draw() {
     ImGui::Begin("##play", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoSavedSettings);
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    ImVec2 corner = ImGui::GetCursorScreenPos();
     ImVec2 room = ImGui::GetContentRegionAvail();
     float side = panel ? floorf(room.x * sideShare) : 0.f;
-    ImVec2 lo(corner.x + side, corner.y);
-    ImVec2 hi(corner.x + room.x, corner.y + room.y - bar);
-    float width = hi.x - lo.x;
-    float height = hi.y - lo.y;
     ImU32 black = IM_COL32(0, 0, 0, 255);
 
     if (panel) {
-        ImGui::SetCursorScreenPos(corner);
         ImGui::BeginChild("panel", ImVec2(side, room.y - bar), 0, ImGuiWindowFlags_NoScrollbar);
         drawPanel();
         ImGui::EndChild();
+        ImGui::SameLine();
     }
+
+    // the video is an item beside the panel, above the bar: the bar's line
+    // follows it as any item's
+    ImGui::InvisibleButton("video", ImVec2(fmaxf(ImGui::GetContentRegionAvail().x, 1.f), fmaxf(room.y - bar, 1.f)), ImGuiButtonFlags_MouseButtonLeft);
+
+    ImVec2 lo = ImGui::GetItemRectMin();
+    ImVec2 hi = ImGui::GetItemRectMax();
+    float width = hi.x - lo.x;
+    float height = hi.y - lo.y;
 
     if (shown && width >= 1.f && height >= 1.f) {
         float aspect = (float)shown->aspect;
@@ -2362,7 +2366,7 @@ void Screen::draw() {
         dl->AddText(ImVec2(lo.x + (width - extent.x) / 2.f, lo.y + (height - extent.y) / 2.f), ImGui::GetColorU32(ImGuiCol_TextDisabled), text);
     }
 
-    if (ImGui::IsMouseHoveringRect(lo, hi) && !ImGui::IsAnyItemActive()) {
+    if (ImGui::IsItemHovered()) {
         if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
             clicked = 0;
             flipFullscreen();
@@ -2379,8 +2383,6 @@ void Screen::draw() {
             ui.requestFrame();
         }
     }
-
-    ImGui::SetCursorScreenPos(ImVec2(corner.x, hi.y + ImGui::GetStyle().ItemSpacing.y));
 
     float square = ImGui::GetFrameHeight();
     bool lit = panel;
@@ -2449,13 +2451,11 @@ void Screen::drawPanel() {
     auto key = [&](const char* name) {
         ImGui::TableNextRow();
         ImGui::TableSetColumnIndex(0);
-        ImGui::AlignTextToFramePadding();
         ImGui::TextDisabled("%s", name);
         ImGui::TableSetColumnIndex(1);
     };
     auto row = [&](const char* name, StringView value) {
         key(name);
-        ImGui::AlignTextToFramePadding();
         ImGui::PushTextWrapPos(0.f);
         ImGui::TextUnformatted((const char*)value.begin(), (const char*)value.end());
         ImGui::PopTextWrapPos();

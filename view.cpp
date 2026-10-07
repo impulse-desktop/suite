@@ -1235,13 +1235,11 @@ void ViewApp::drawInfo() {
     auto key = [&](const char* name) {
         ImGui::TableNextRow();
         ImGui::TableSetColumnIndex(0);
-        ImGui::AlignTextToFramePadding();
         ImGui::TextDisabled("%s", name);
         ImGui::TableSetColumnIndex(1);
     };
     auto row = [&](const char* name, StringView value) {
         key(name);
-        ImGui::AlignTextToFramePadding();
         ImGui::PushTextWrapPos(0.f);
         ImGui::TextUnformatted((const char*)value.begin(), (const char*)value.end());
         ImGui::PopTextWrapPos();

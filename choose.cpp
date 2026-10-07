@@ -1692,7 +1692,6 @@ void ChooseApp::draw() {
 
     drawPlaces(bodyH);
     ImGui::SameLine();
-    ImGui::BeginGroup();
 
     if (!problem.empty()) {
         ImGui::BeginChild("problem", ImVec2(0.f, bodyH), 0, ImGuiWindowFlags_NoScrollbar);
@@ -1706,7 +1705,6 @@ void ChooseApp::draw() {
         drawTable(bodyH);
     }
 
-    ImGui::EndGroup();
     drawLine();
 
     if (askOverwrite) {
