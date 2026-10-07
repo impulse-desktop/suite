@@ -45,7 +45,6 @@ using namespace stl;
 namespace {
     constexpr Design windowWidth = 960_d;
     constexpr Design windowHeight = 600_d;
-    constexpr Design barPadding = 8_d;
     constexpr Design buttonWidth = 72_d;
     constexpr float sideShare = .2f;
     constexpr size_t framePermits = 10;
@@ -2313,8 +2312,9 @@ void Screen::flipFullscreen() {
 void Screen::draw() {
     Ui& ui = *player->ui;
     ImGuiViewport* vp = ImGui::GetMainViewport();
-    float pad = ui.px(barPadding);
-    float bar = ImGui::GetFrameHeight() + 2.f * pad;
+    // the bar is a line of controls under the video, the style's spacing
+    // between them; the window's padding keeps it from the edges
+    float bar = ImGui::GetFrameHeightWithSpacing();
     double at = position(monotonicNowUs());
 
     ImGui::SetNextWindowPos(vp->Pos);
@@ -2382,7 +2382,7 @@ void Screen::draw() {
         }
     }
 
-    ImGui::SetCursorScreenPos(ImVec2(corner.x + pad, hi.y + pad));
+    ImGui::SetCursorScreenPos(ImVec2(corner.x, hi.y + ImGui::GetStyle().ItemSpacing.y));
 
     float square = ImGui::GetFrameHeight();
     bool lit = panel;
@@ -2420,7 +2420,7 @@ void Screen::draw() {
     float label = ImGui::CalcTextSize(time.cStr()).x;
 
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(fmaxf(1.f, ImGui::GetContentRegionAvail().x - label - ImGui::GetStyle().ItemSpacing.x - pad));
+    ImGui::SetNextItemWidth(fmaxf(1.f, ImGui::GetContentRegionAvail().x - label - ImGui::GetStyle().ItemSpacing.x));
     ImGui::BeginDisabled(duration <= 0.);
 
     float value = scrubbing ? scrub : (float)at;
