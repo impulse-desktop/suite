@@ -27,6 +27,7 @@ namespace {
         ~Desktop();
         bool frame(const WindowInfo& info) override;
         void close() override;
+        void selection() override;
         void run() override;
         void command(const char* line);
         void key(const KeyInput& input) override;
@@ -84,6 +85,9 @@ bool Desktop::frame(const WindowInfo& info) {
     printf("FRAME %u %u %.3f %d %d %d %06x\n", info.width, info.height,
         info.contentScale, info.focused, info.maximized, info.fullscreen, color);
     return true;
+}
+
+void Desktop::selection() {
 }
 
 void Desktop::close() {

@@ -388,17 +388,13 @@ namespace {
         bool closePending = false;
         bool gone = false;
         bool parked = false;
-        // the clipboard as last read, what ImGui pastes; a paste chord is
-        // held back until a fresh read lands, then fed with its modifiers
+        // the selection as last read, what ImGui pastes; read again on
+        // every change the platform announces
         Buffer clipboardCache;
         ClipboardFetch* clipboardFetch = nullptr;
         FiberStack* clipboardStack = nullptr;
         bool clipboardFetching = false;
         bool clipboardAgain = false;
-        bool pasteHeld = false;
-        ImGuiKey heldKey = ImGuiKey_None;
-        u16 heldModifiers = 0;
-        u16 modifiers = 0;
 
         using Ui::px;
         float px(Design d) override;
@@ -425,6 +421,7 @@ namespace {
         bool frame(const plt::WindowInfo& info) override;
         int drawFrame();
         void close() override;
+        void selection() override;
 
         void beginInputFrame();
         void key(const plt::KeyInput& input) override;
@@ -444,12 +441,7 @@ namespace {
         void clipboardArrived(bool ok, Buffer& got);
         void setClipboardText(const char* text);
         const char* clipboardText();
-        void applyModifiers(u16 mask);
     };
-
-    bool pastes(const plt::KeyInput& input, ImGuiKey key) {
-        return (key == ImGuiKey_V && (input.modifiers & (plt::InputControl | plt::InputSuper)) != 0) || (key == ImGuiKey_Insert && (input.modifiers & plt::InputShift) != 0);
-    }
 }
 
 CallFrame::CallFrame(UiImpl* ui_)
@@ -501,7 +493,7 @@ void ClipboardFetch::run() {
 
 // a read on the fetch fiber, which runs on the platform's thread between
 // the loop's callbacks, never inside the tool's frame; one at a time, a
-// second request makes the running one read again
+// change announced meanwhile makes the running one read again
 void UiImpl::fetchClipboard() {
     if (gone || !window) {
         return;
@@ -528,22 +520,6 @@ void UiImpl::clipboardArrived(bool ok, Buffer& got) {
     } else {
         TRACE(this, StringView(StringBuilder() << StringView(u8"clipboard read failed: ") << StringView(got)));
     }
-
-    if (!pasteHeld) {
-        return;
-    }
-
-    pasteHeld = false;
-
-    if (ok && !gone) {
-        ImGuiIO& io = ImGui::GetIO();
-
-        applyModifiers(heldModifiers);
-        io.AddKeyEvent(heldKey, true);
-        io.AddKeyEvent(heldKey, false);
-        applyModifiers(modifiers);
-        window->requestFrame();
-    }
 }
 
 void UiImpl::setClipboardText(const char* text) {
@@ -562,15 +538,6 @@ void UiImpl::setClipboardText(const char* text) {
 
 const char* UiImpl::clipboardText() {
     return clipboardCache.cStr();
-}
-
-void UiImpl::applyModifiers(u16 mask) {
-    ImGuiIO& io = ImGui::GetIO();
-
-    io.AddKeyEvent(ImGuiMod_Ctrl, (mask & plt::InputControl) != 0);
-    io.AddKeyEvent(ImGuiMod_Shift, (mask & plt::InputShift) != 0);
-    io.AddKeyEvent(ImGuiMod_Alt, (mask & plt::InputAlt) != 0);
-    io.AddKeyEvent(ImGuiMod_Super, (mask & plt::InputSuper) != 0);
 }
 
 void CallFrame::schedule(float seconds) {
@@ -616,27 +583,8 @@ void UiImpl::key(const plt::KeyInput& input) {
         sysE << StringView(u8"im key: ") << (i64)key << (input.action == plt::InputAction::Press ? StringView(u8" press") : StringView(u8" release")) << StringView(u8" down ") << (i64)ImGui::IsKeyDown(key) << endL;
     }
 
-    modifiers = input.modifiers;
-
     if (key != ImGuiKey_None) {
         bool press = input.action == plt::InputAction::Press;
-
-        // a paste waits for the selection to be read (clipboardArrived
-        // feeds the chord then); the key's own release goes with it
-        if (press && pastes(input, key)) {
-            heldKey = key;
-            heldModifiers = input.modifiers;
-            pasteHeld = true;
-            fetchClipboard();
-
-            return;
-        }
-
-        if (!press && key == heldKey) {
-            heldKey = ImGuiKey_None;
-
-            return;
-        }
 
         if (press && ImGui::IsKeyDown(key)) {
             io.AddKeyEvent(key, false);
@@ -700,11 +648,10 @@ void UiImpl::focus(bool focused) {
     }
 
     ImGui::GetIO().AddFocusEvent(focused);
+}
 
-    // another client may have set the selection while the focus was away
-    if (focused) {
-        fetchClipboard();
-    }
+void UiImpl::selection() {
+    fetchClipboard();
 }
 
 void UiImpl::pointerPresence(bool present) {

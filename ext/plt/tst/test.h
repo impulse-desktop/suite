@@ -248,6 +248,10 @@ namespace plt::test {
             ++closeCount;
         }
 
+        void selection() override {
+            ++selectionCount;
+        }
+
         bool frame(const WindowInfo& info) override {
             ++frameCount;
             lastInfo = info;
@@ -256,6 +260,7 @@ namespace plt::test {
 
         WindowInfo lastInfo;
         u32 closeCount = 0;
+        u32 selectionCount = 0;
         u32 frameCount = 0;
         bool submitFrames = false;
     };
@@ -377,6 +382,9 @@ namespace plt::test {
             platform->stop();
         }
 
+        void selection() override {
+        }
+
         Platform*& platform;
         bool closed = false;
     };
@@ -393,6 +401,7 @@ namespace plt::test {
     bool rejectedSelection(int fd);
     bool pollerApi(int fd);
     bool deferredClipboard(int fd);
+    bool selectionEvent(int fd);
     bool fractionalRounding(int fd);
     bool initialFractionalSize(int fd);
     bool lateInitialScale(int fd);

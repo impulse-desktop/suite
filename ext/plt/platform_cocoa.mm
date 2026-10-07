@@ -614,6 +614,7 @@ namespace {
         bool frameRequested = false;
         u32 idleFrames = 0;
         bool preeditShown = false;
+        NSInteger pasteboardChange = 0;
     };
 
     // The run loop natively sleeps on a mach port set; a port message is
@@ -1622,6 +1623,16 @@ void WindowImpl::focused(bool value) {
     if (input != nullptr) {
         input->focus(value);
         input->flush();
+    }
+    // The pasteboard announces no changes: its change count is looked at
+    // whenever the window becomes key, which is when another application
+    // could have written it.
+    if (value && events != nullptr) {
+        const NSInteger change = [[NSPasteboard generalPasteboard] changeCount];
+        if (change != pasteboardChange) {
+            pasteboardChange = change;
+            events->selection();
+        }
     }
 }
 

@@ -1719,6 +1719,7 @@ int main() {
     success = runScenario("selection source cancellation", sourceCancellation) && success;
     success = runScenario("poller API", pollerApi) && success;
     success = runScenario("deferred clipboard", deferredClipboard) && success;
+    success = runScenario("selection event", selectionEvent) && success;
     success = runScenario("fractional rounding", fractionalRounding) && success;
     success = runScenario("initial fractional size", initialFractionalSize) && success;
     success = runScenario("late initial scale", lateInitialScale) && success;

@@ -8,6 +8,9 @@ namespace plt::test {
             void close() override {
             }
 
+            void selection() override {
+            }
+
             bool frame(const WindowInfo&) override {
                 ++frameCount;
                 if (window != nullptr) {

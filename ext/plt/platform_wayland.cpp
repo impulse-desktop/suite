@@ -699,15 +699,20 @@ namespace {
     void dataDeviceSelection(void* data, struct wl_data_device*, struct wl_data_offer* proxy) {
         PlatformImpl& platform = *(PlatformImpl*)(data);
         platform.clipboardOffer.reset();
-        if (proxy == nullptr) {
-            return;
+        if (proxy != nullptr) {
+            if (platform.pendingClipboardOffer.data == proxy) {
+                platform.clipboardOffer = platform.pendingClipboardOffer;
+                platform.pendingClipboardOffer = {};
+            } else {
+                platform.clipboardOffer.data = proxy;
+                wl_data_offer_add_listener(proxy, &dataOfferListener, &platform.clipboardOffer);
+            }
         }
-        if (platform.pendingClipboardOffer.data == proxy) {
-            platform.clipboardOffer = platform.pendingClipboardOffer;
-            platform.pendingClipboardOffer = {};
-        } else {
-            platform.clipboardOffer.data = proxy;
-            wl_data_offer_add_listener(proxy, &dataOfferListener, &platform.clipboardOffer);
+        // the compositor tells the keyboard's window, on its enter and on
+        // every change while it holds the keyboard
+        WindowImpl* const window = platform.keyboardFocus;
+        if (window != nullptr && window->events != nullptr) {
+            window->events->selection();
         }
     }
 

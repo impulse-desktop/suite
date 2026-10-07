@@ -32,13 +32,14 @@ with Session("edit", tool="edit") as s:
     s.type("hello, world\nline two")
     s.said("modified")
     # the clipboard goes through the compositor: Ctrl+A, Ctrl+C set the
-    # selection, End, Ctrl+V read it back and paste it at the end
+    # selection, the compositor announces it and the tool reads it back,
+    # End, Ctrl+V paste what was read at the end
     chord(s, KEY_A)
     chord(s, KEY_C)
     s.said("clipboard set bytes=21")
+    s.said("clipboard read bytes=21")
     s.tap(KEY_END)
     chord(s, KEY_V)
-    s.said("clipboard read bytes=21")
     chord(s, KEY_S)
     s.said("saved notes.txt bytes=42")
     assert notes.read_text() == "hello, world\nline two" * 2, f"the file is not what was typed and pasted: {notes.read_text()!r}"

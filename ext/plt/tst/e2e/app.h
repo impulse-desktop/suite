@@ -33,6 +33,7 @@ namespace plt::e2e {
         virtual void paint(Canvas& canvas) = 0;
         bool frame(const WindowInfo& info) override;
         void close() override;
+        void selection() override;
         void key(const KeyInput& input) override;
         void text(const TextInput& input) override;
         void preedit(stl::StringView text, i32 begin, i32 end) override;

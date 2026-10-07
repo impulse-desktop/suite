@@ -214,6 +214,9 @@ bool App::frame(const WindowInfo& info) {
     return true;
 }
 
+void App::selection() {
+}
+
 void App::close() {
     platform->stop();
 }
