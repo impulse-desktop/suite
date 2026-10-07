@@ -1455,11 +1455,9 @@ void ViewApp::draw() {
     bool right = info && !fullscreen;
 
     if (left) {
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImGui::GetStyleColorVec4(ImGuiCol_WindowBg));
         ImGui::BeginChild("gallery", ImVec2(sideW, 0.f), 0, ImGuiWindowFlags_NoScrollbar);
         drawGallery();
         ImGui::EndChild();
-        ImGui::PopStyleColor();
         ImGui::SameLine();
     }
 
@@ -1470,11 +1468,9 @@ void ViewApp::draw() {
 
     if (right) {
         ImGui::SameLine();
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImGui::GetStyleColorVec4(ImGuiCol_WindowBg));
-        ImGui::BeginChild("info", ImVec2(sideW, 0.f), ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoScrollbar);
+        ImGui::BeginChild("info", ImVec2(sideW, 0.f), 0, ImGuiWindowFlags_NoScrollbar);
         drawInfo();
         ImGui::EndChild();
-        ImGui::PopStyleColor();
     }
 
     ImGui::End();

@@ -1245,11 +1245,9 @@ void ReadApp::draw() {
     float sideW = floorf(vp->Size.x * sideShare);
 
     if (panel && !fullscreen) {
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImGui::GetStyleColorVec4(ImGuiCol_WindowBg));
         ImGui::BeginChild("pages", ImVec2(sideW, 0.f), 0, ImGuiWindowFlags_NoScrollbar);
         drawPages();
         ImGui::EndChild();
-        ImGui::PopStyleColor();
         ImGui::SameLine();
     }
 
