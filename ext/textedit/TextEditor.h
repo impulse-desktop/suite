@@ -2042,6 +2042,8 @@ protected:
 	static constexpr float miniMapViewPortActiveAlpha = 0.3f;
 
 	float cursorAnimationTimer = -0.3f;
+	// [suite] the frame timer behind the caret's blink (an ImGuiFrameTimer's handle)
+	void* caretTimer = nullptr;
 	size_t scrollToLineNumber = invalidLine;
 	Scroll scrollToAlignment = Scroll::alignMiddle;
 	float scrollToFraction = 0.0f;

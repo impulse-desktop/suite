@@ -304,9 +304,6 @@ int mainEdit(ObjPool& pool, int argc, char** argv) {
     Ui& ui = *Ui::create(pool, StringView(u8"edit"), UiOptions{windowWidth, windowHeight});
 
     app.ui = &ui;
-    // frames come on events; a caret that blinks on its own would want
-    // them on a clock
-    ImGui::GetIO().ConfigInputTextCursorBlink = false;
     app.open(StringView(argv[1]));
 
     auto body = makeRunable([&] {

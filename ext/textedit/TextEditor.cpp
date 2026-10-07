@@ -651,10 +651,25 @@ void TextEditor::renderText() {
 //
 
 void TextEditor::renderCursorCarets() {
+	// [suite] this ImGui draws a frame on request only: the blink asks for
+	// the next one through its frame timer, for the moment the caret's
+	// phase turns, as ImGui's own InputText does
+	ImGuiFrameTimer blink;
+	blink.Handle = caretTimer;
+
 	if (config.caretsVisible && ImGui::IsWindowFocused()) {
 		const auto& io = ImGui::GetIO();
 		cursorAnimationTimer += io.DeltaTime;
 		size_t cursorIndex = 0;
+
+		if (io.ConfigInputTextCursorBlink) {
+			if (cursorAnimationTimer <= 0.0f) {
+				blink.Schedule(-cursorAnimationTimer + 0.0001f);
+			} else {
+				const auto phase = std::fmod(cursorAnimationTimer, 1.2f);
+				blink.Schedule((phase <= 0.8f ? 0.8f : 1.2f) - phase + 0.0001f);
+			}
+		}
 
 		for (const auto& cursor : cursors) {
 			const auto docPos = cursor.getInteractiveEnd();
@@ -689,7 +704,12 @@ void TextEditor::renderCursorCarets() {
 
 			cursorIndex++;
 		}
+
+	} else {
+		blink.Cancel();
 	}
+
+	caretTimer = blink.Handle;
 }
 
 

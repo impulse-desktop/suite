@@ -6,8 +6,11 @@ for colouring, bracket matching, word wrap, folding and a minimap; many
 cursors, transactional undo, find and replace. Taken as is from
 [goossens/ImGuiColorTextEdit](https://github.com/goossens/ImGuiColorTextEdit)
 at commit 133614b0d5e1008527a26f46a93fdb1d751ca115 (2026-09-26), MIT
-license in LICENSE, no local changes; `TextEditor.cpp` and
-`TextEditor.h` only, the TextDiff widget and the examples are left out.
+license in LICENSE; `TextEditor.cpp` and `TextEditor.h` only, the
+TextDiff widget and the examples are left out. One local change, marked
+`[suite]` in the sources: the caret's blink asks for its next frame
+through the frame timer of the suite's ImGui, whose frames come on
+request, as that ImGui's own InputText does.
 
 Its public API moves between releases, so a newer copy is taken whole,
 and `edit.cpp` adjusted to it. It wants `imgui_internal.h` and C++17,
