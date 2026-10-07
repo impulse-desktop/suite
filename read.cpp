@@ -44,6 +44,9 @@ namespace {
     constexpr Design windowWidth = 1000_d;
     constexpr Design windowHeight = 700_d;
     constexpr float sideShare = .2f;
+    constexpr Design gap = 4_d;
+    constexpr Design pageGap = 12_d;
+    constexpr Design shadowOffset = 3_d;
     constexpr Design scrollStep = 48_d;
     constexpr float screenShare = .9f;
     constexpr float placeholderAspect = 1.4142f;
@@ -53,6 +56,10 @@ namespace {
     constexpr size_t workerCount = 4;
     constexpr u64 maxBytes = 1u << 30;
     constexpr u32 causeLimit = 256;
+    constexpr ImU32 canvasBg = IM_COL32(46, 46, 52, 255);
+    constexpr ImU32 paperColor = IM_COL32(255, 255, 255, 255);
+    constexpr ImU32 shadowNear = IM_COL32(0, 0, 0, 90);
+    constexpr ImU32 shadowFar = IM_COL32(0, 0, 0, 40);
 
     static float clampf(float v, float lo, float hi) {
         return v < lo ? lo : (v > hi ? hi : v);
@@ -893,11 +900,11 @@ void ReadApp::setThumb(u32 index, Rendered& result) {
     TRACE(ui, StringView(StringBuilder() << StringView(u8"thumbnail ") << (i64)(index + 1)));
 }
 
-// One zoom for every page, the widest filling the canvas's width: the
-// pages one under another, the style's spacing between them as between
-// any items, no page wider than a texture may be.
+// One zoom for every page, the widest filling the canvas's width, as
+// evince lays a document out: the pages one under another with a gap
+// between, each centred, no page wider than a texture may be.
 void ReadApp::layout(float width) {
-    float g = ImGui::GetStyle().ItemSpacing.y;
+    float g = ui->px(pageGap);
     float maxW = 1.f;
     float maxH = 1.f;
 
@@ -909,9 +916,9 @@ void ReadApp::layout(float width) {
     float limit = (float)max<u32>(1, maxSide);
 
     layoutW = width;
-    zoom = min(max(1.f, width) / maxW, min(limit / maxW, limit / maxH));
+    zoom = min(max(1.f, width - 2.f * g) / maxW, min(limit / maxW, limit / maxH));
 
-    float y = 0.f;
+    float y = g;
 
     for (Page* page : pages) {
         page->width = max<u32>(1, (u32)floorf(page->pw * zoom + .5f));
@@ -920,7 +927,7 @@ void ReadApp::layout(float width) {
         y += (float)page->height + g;
     }
 
-    totalH = max(0.f, y - g);
+    totalH = y;
 }
 
 // the page under a point of the content, or the one after the gap it is in
@@ -939,14 +946,14 @@ void ReadApp::scrollTo(float y) {
     ui->requestFrame();
 }
 
-// the page's top at the top of the view
+// the page's top at the top of the view, its gap above it
 void ReadApp::goTo(size_t index) {
     if (!opened) {
         return;
     }
 
     index = min(index, pages.length() - 1);
-    scrollTo(pages[index]->top);
+    scrollTo(pages[index]->top - ui->px(pageGap));
 }
 
 void ReadApp::keys() {
@@ -999,84 +1006,127 @@ void ReadApp::keys() {
     }
 }
 
-// The pages down the list, each a Selectable of the list's width and the
-// page's shape with its thumbnail over it, the current one tinted as a
-// selected one is and kept in view; a click goes to the page.
+// the pages down the list, each a row of the list's width and the page's
+// shape, the current one highlighted and kept in view; a click goes to
+// the page
 void ReadApp::drawPages() {
-    float innerW = max(1.f, ImGui::GetContentRegionAvail().x);
+    float g = ui->px(gap);
+    float innerW = max(1.f, ImGui::GetWindowWidth() - 2.f * g);
+    float listH = ImGui::GetWindowHeight();
+    ImVec2 origin = ImGui::GetCursorScreenPos();
     ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImU32 dimColor = ImGui::GetColorU32(ImGuiCol_TextDisabled);
+    ImFont* font = ImGui::GetFont();
+    float fontSize = ImGui::GetFontSize();
     StringView trouble(problem);
 
     thumbSide = thumbSideFor(innerW);
 
     if (!trouble.empty()) {
-        ImGui::PushTextWrapPos(0.f);
-        ImGui::TextUnformatted((const char*)trouble.begin(), (const char*)trouble.end());
-        ImGui::PopTextWrapPos();
+        float h = font->CalcTextSizeA(fontSize, FLT_MAX, innerW, (const char*)trouble.begin(), (const char*)trouble.end()).y;
+
+        ImGui::Dummy(ImVec2(innerW, h + 2.f * g));
+        dl->AddText(font, fontSize, ImVec2(origin.x + g, origin.y + g), ImGui::GetColorU32(ImGuiCol_Text), (const char*)trouble.begin(), (const char*)trouble.end(), innerW);
 
         return;
     }
 
-    for (size_t i = 0; i < pages.length(); i++) {
+    auto rowHeight = [&](size_t i) {
+        return max(1.f, floorf(innerW * (opened ? pages[i]->ph / pages[i]->pw : placeholderAspect) + .5f));
+    };
+
+    size_t count = pages.length();
+    float total = g;
+    float currentTop = total;
+    float currentH = 0.f;
+
+    for (size_t i = 0; i < count; i++) {
+        float h = rowHeight(i);
+
+        if (i == current) {
+            currentTop = total;
+            currentH = h;
+        }
+
+        total += h + g;
+    }
+
+    ImGui::Dummy(ImVec2(innerW, total));
+
+    float listScroll = clampf(ImGui::GetScrollY(), 0.f, max(0.f, total - listH));
+
+    if (followCurrent && count) {
+        if (currentTop - g < listScroll) {
+            ImGui::SetScrollY(currentTop - g);
+        } else if (currentTop + currentH + g > listScroll + listH) {
+            ImGui::SetScrollY(currentTop + currentH + g - listH);
+        }
+
+        followCurrent = false;
+    }
+
+    float top = g;
+
+    for (size_t i = 0; i < count; i++) {
         Thumb& thumb = pages[i]->thumb;
-        float h = max(1.f, floorf(innerW * (opened ? pages[i]->ph / pages[i]->pw : placeholderAspect) + .5f));
-        const char* mark = thumb.width ? "" : thumb.load == Load::Failed ? "?" : "\xe2\x80\xa6";
+        float h = rowHeight(i);
+        float bottom = top + h;
+        bool inView = bottom > listScroll && top < listScroll + listH;
 
-        ImGui::PushID((int)i);
+        if (inView) {
+            ImVec2 p0(origin.x + g, origin.y + top);
+            ImVec2 p1(p0.x + innerW, p0.y + h);
 
-        if (ImGui::Selectable(mark, i == current, 0, ImVec2(innerW, h))) {
-            goTo(i);
-        }
+            wantedThumbs.pushBack(i);
+            ImGui::SetCursorScreenPos(p0);
+            ImGui::PushID((int)i);
 
-        ImGui::PopID();
-
-        ImVec2 p0 = ImGui::GetItemRectMin();
-        ImVec2 p1 = ImGui::GetItemRectMax();
-
-        if (i == current && followCurrent) {
-            if (!ImGui::IsItemVisible() || p0.y < ImGui::GetWindowPos().y || p1.y > ImGui::GetWindowPos().y + ImGui::GetWindowHeight()) {
-                ImGui::SetScrollHereY(p0.y < ImGui::GetWindowPos().y ? 0.f : 1.f);
+            if (ImGui::InvisibleButton("##row", ImVec2(innerW, h))) {
+                goTo(i);
             }
 
-            followCurrent = false;
-        }
+            ImGui::PopID();
 
-        if (!ImGui::IsItemVisible()) {
-            continue;
-        }
-
-        wantedThumbs.pushBack(i);
-
-        if (thumb.width) {
-            dl->AddImage(thumb.texture, p0, p1);
-
-            // the thumbnail covers the Selectable's own band: the tint of
-            // its state goes over the thumbnail in the same colours
             if (i == current) {
-                dl->AddRectFilled(p0, p1, ImGui::GetColorU32(ImGuiCol_Header));
-            } else if (ImGui::IsItemHovered()) {
-                dl->AddRectFilled(p0, p1, ImGui::GetColorU32(ImGuiCol_HeaderHovered));
+                dl->AddRectFilled(ImVec2(p0.x - g, p0.y - g), ImVec2(p1.x + g, p1.y + g), ImGui::GetColorU32(ImGuiCol_Header));
+            }
+
+            if (thumb.width) {
+                dl->AddImage(thumb.texture, p0, p1);
+            } else {
+                const char* mark = thumb.load == Load::Failed ? "?" : "\xe2\x80\xa6";
+                ImVec2 extent = ImGui::CalcTextSize(mark);
+
+                dl->AddText(ImVec2(p0.x + (innerW - extent.x) / 2.f, p0.y + (h - extent.y) / 2.f), dimColor, mark);
             }
         }
+
+        top = bottom + g;
     }
 }
 
-// The pages one under another, scrolled as one column, each an Image
-// item, blank until its render arrives. The pages in view and a view's
-// worth around them are kept drawn; the rest let their textures go. A
-// change of width lays the column out again and keeps the view on the
-// same spot of the same page.
+// The pages one under another, scrolled as one column: each a sheet with
+// a shadow, blank until its render arrives. The pages in view and a
+// view's worth around them are kept drawn; the rest let their textures
+// go. A change of width lays the column out again and keeps the view on
+// the same spot of the same page.
 void ReadApp::drawCanvas() {
+    ImVec2 win = ImGui::GetWindowPos();
     float viewW = ImGui::GetContentRegionAvail().x;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
 
     viewH = ImGui::GetWindowHeight();
 
     if (!opened) {
-        ImGui::TextDisabled("%s", !problem.empty() ? "cannot open this document" : "opening");
+        const char* text = !problem.empty() ? "cannot open this document" : "opening";
+        ImVec2 extent = ImGui::CalcTextSize(text);
+
+        dl->AddText(ImVec2(win.x + (viewW - extent.x) / 2.f, win.y + (viewH - extent.y) / 2.f), ImGui::GetColorU32(ImGuiCol_TextDisabled), text);
 
         return;
     }
 
+    float shadow = ui->px(shadowOffset);
     float before = ImGui::GetScrollY();
 
     if (viewW != layoutW) {
@@ -1096,6 +1146,8 @@ void ReadApp::drawCanvas() {
             page->sheet.failedWidth = 0;
         }
     }
+
+    ImGui::Dummy(ImVec2(viewW, totalH));
 
     if (scrollTarget >= 0.f) {
         ImGui::SetScrollY(scrollTarget);
@@ -1124,6 +1176,7 @@ void ReadApp::drawCanvas() {
         Page& page = *pages[i];
         float top = page.top;
         float bottom = top + (float)page.height;
+        bool inView = bottom > scrollY && top < scrollY + viewH;
         bool inReach = bottom > reachTop && top < reachBottom;
 
         if (inReach) {
@@ -1140,12 +1193,22 @@ void ReadApp::drawCanvas() {
             page.sheet.failedWidth = 0;
         }
 
-        ImVec2 size((float)page.width, (float)page.height);
+        if (!inView) {
+            continue;
+        }
+
+        float x = win.x + floorf((viewW - (float)page.width) / 2.f);
+        float y = win.y + top - scrollY;
+        ImVec2 p0(x, y);
+        ImVec2 p1(x + (float)page.width, y + (float)page.height);
+
+        dl->AddRectFilled(ImVec2(p0.x + 2.f * shadow, p0.y + 2.f * shadow), ImVec2(p1.x + 2.f * shadow, p1.y + 2.f * shadow), shadowFar);
+        dl->AddRectFilled(ImVec2(p0.x + shadow, p0.y + shadow), ImVec2(p1.x + shadow, p1.y + shadow), shadowNear);
 
         if (page.sheet.width) {
-            ImGui::Image(page.sheet.texture, size);
+            dl->AddImage(page.sheet.texture, p0, p1);
         } else {
-            ImGui::Dummy(size);
+            dl->AddRectFilled(p0, p1, paperColor);
         }
     }
 
@@ -1190,9 +1253,11 @@ void ReadApp::draw() {
 
     // the scrollbar is always there, so the width the pages fit does not
     // depend on whether they overflow
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, canvasBg);
     ImGui::BeginChild("canvas", ImVec2(0.f, 0.f), 0, ImGuiWindowFlags_AlwaysVerticalScrollbar);
     drawCanvas();
     ImGui::EndChild();
+    ImGui::PopStyleColor();
 
     ImGui::End();
 }
