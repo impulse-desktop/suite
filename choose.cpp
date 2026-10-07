@@ -53,7 +53,7 @@ namespace {
     constexpr Design windowWidth = 820_d;
     constexpr Design windowHeight = 560_d;
     constexpr Design placesWidth = 160_d;
-    constexpr Design gap = 8_d;
+    constexpr Design spacing = 8_d;
     constexpr Design ring = 2_d;
     constexpr Design cellWidth = 120_d;
     constexpr u32 thumbSide = 128;
@@ -287,9 +287,6 @@ namespace {
         bool showHidden = false;
         bool grid = false;
         bool scrollToCursor = false;
-        // the spacing of the style, kept for within the blocks: between
-        // the blocks the window has the gap instead
-        ImVec2 itemSpacing;
         // the one line: the directory, then what is typed after its slash,
         // a name to look for or the name to save under
         char field[fieldBytes] = {};
@@ -1406,8 +1403,6 @@ void ChooseApp::keys() {
 }
 
 void ChooseApp::drawPlaces() {
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, itemSpacing);
-
     for (size_t i = 0; i < places.length(); i++) {
         Place& place = *places[i];
         bool here = StringView(place.path) == StringView(dir);
@@ -1420,26 +1415,12 @@ void ChooseApp::drawPlaces() {
 
         ImGui::PopID();
     }
-
-    ImGui::PopStyleVar();
 }
 
 // the entries as rows: name, size, modified; a click selects, a double
-// click enters or takes; a black ring on the perimeter of the block, the
-// rows within it
+// click enters or takes
 void ChooseApp::drawTable(float height) {
-    float r = ui->px(ring);
-    ImVec2 corner = ImGui::GetCursorScreenPos();
-    float width = ImGui::GetContentRegionAvail().x;
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-
-    dl->AddRect(ImVec2(corner.x + r / 2.f, corner.y + r / 2.f), ImVec2(corner.x + width - r / 2.f, corner.y + height - r / 2.f), IM_COL32(0, 0, 0, 255), 0.f, 0, r);
-    ImGui::SetCursorScreenPos(ImVec2(corner.x + r, corner.y + r));
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, itemSpacing);
-
-    if (!ImGui::BeginTable("entries", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchProp, ImVec2(width - 2.f * r, height - 2.f * r))) {
-        ImGui::PopStyleVar();
-
+    if (!ImGui::BeginTable("entries", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchProp, ImVec2(0.f, height))) {
         return;
     }
 
@@ -1499,17 +1480,14 @@ void ChooseApp::drawTable(float height) {
     }
 
     ImGui::EndTable();
-    ImGui::PopStyleVar();
-    ImGui::SetCursorScreenPos(ImVec2(corner.x, corner.y + height));
-    ImGui::Dummy(ImVec2(width, 0.f));
 }
 
 // the entries as cells: a thumbnail for an image, its type for another
 // file, a folder for a directory, the name under each
-// The cells start at the corner of the block as the rows of the table
-// do, the gap between them; the chosen one is ringed within its cell.
+// The cells are the style's spacing apart; the chosen one is ringed
+// within its cell.
 void ChooseApp::drawGrid(float height) {
-    float g = ui->px(gap);
+    float g = ImGui::GetStyle().ItemSpacing.y;
     float r = ui->px(ring);
     float cell = ui->px(cellWidth);
     float lineH = ImGui::GetTextLineHeightWithSpacing();
@@ -1687,30 +1665,24 @@ void ChooseApp::drawLine() {
     }
 }
 
-// the blocks are the gap from the edges and from each other; the places
-// are padded by it too, as the entries are by their cells
+// ImGui lays the blocks out as it lays anything out: the style's padding
+// from the edges, its spacing between them; the line's room is left at
+// the bottom by the body's negative height
 void ChooseApp::draw() {
     ImGuiViewport* vp = ImGui::GetMainViewport();
-    float g = ui->px(gap);
-
-    itemSpacing = ImGui::GetStyle().ItemSpacing;
 
     ImGui::SetNextWindowPos(vp->Pos);
     ImGui::SetNextWindowSize(vp->Size);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(g, g));
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(g, g));
     ImGui::Begin("##choose", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBackground);
 
     if (!title.empty()) {
         ImGui::TextUnformatted((const char*)title.data(), (const char*)title.data() + title.length());
-        ImGui::Spacing();
     }
 
-    float lineH = ImGui::GetFrameHeight() + g;
-    float bodyH = max(1.f, ImGui::GetContentRegionAvail().y - lineH);
+    float bodyH = -ImGui::GetFrameHeightWithSpacing();
 
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImGui::GetStyleColorVec4(ImGuiCol_WindowBg));
-    ImGui::BeginChild("places", ImVec2(ui->px(placesWidth), bodyH), ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoScrollbar);
+    ImGui::BeginChild("places", ImVec2(ui->px(placesWidth), bodyH), 0, ImGuiWindowFlags_NoScrollbar);
     drawPlaces();
     ImGui::EndChild();
     ImGui::PopStyleColor();
@@ -1718,10 +1690,11 @@ void ChooseApp::draw() {
     ImGui::BeginGroup();
 
     if (!problem.empty()) {
+        ImGui::BeginChild("problem", ImVec2(0.f, bodyH), 0, ImGuiWindowFlags_NoScrollbar);
         ImGui::PushTextWrapPos(0.f);
         ImGui::TextUnformatted((const char*)problem.data(), (const char*)problem.data() + problem.length());
         ImGui::PopTextWrapPos();
-        ImGui::Dummy(ImVec2(0.f, max(0.f, bodyH - ImGui::GetTextLineHeightWithSpacing() * 2.f)));
+        ImGui::EndChild();
     } else if (grid) {
         drawGrid(bodyH);
     } else {
@@ -1729,9 +1702,7 @@ void ChooseApp::draw() {
     }
 
     ImGui::EndGroup();
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, itemSpacing);
     drawLine();
-    ImGui::PopStyleVar();
 
     if (askOverwrite) {
         ImGui::OpenPopup("Replace");
@@ -1767,7 +1738,6 @@ void ChooseApp::draw() {
     }
 
     ImGui::End();
-    ImGui::PopStyleVar(2);
 }
 
 int mainChoose(ObjPool& pool, int argc, char** argv) {
@@ -1842,6 +1812,7 @@ int mainChoose(ObjPool& pool, int argc, char** argv) {
 
     Ui& ui = *Ui::create(pool, StringView(u8"choose"), UiOptions{windowWidth, windowHeight});
 
+    ImGui::GetStyle().ItemSpacing = ImVec2(ui.px(spacing), ui.px(spacing));
     app.ui = &ui;
     app.startWorkers(pool);
     app.setup(start.empty() ? StringView(u8".") : start);
