@@ -209,7 +209,47 @@ namespace {
             }
         }
 
-        // whether the file's first bytes are an image of any kind
+        // What file calls image/ but is no picture: a document of pages, a
+        // drawing or a model of CAD, a volume of data, a texture for a GPU,
+        // a sequence, or a thing with a picture somewhere in it. The rest
+        // of image/ is the viewer's, decodable or not.
+        static bool picture(StringView type) {
+            static const StringView notPictures[] = {
+                StringView(u8"image/vnd.djvu"),
+                StringView(u8"image/x-ms-awd"),
+                StringView(u8"image/x-eps"),
+                StringView(u8"image/jpm"),
+                StringView(u8"image/vnd.dwg"),
+                StringView(u8"image/vnd.dxf"),
+                StringView(u8"image/x-sld"),
+                StringView(u8"image/x-3ds"),
+                StringView(u8"image/x.nifti"),
+                StringView(u8"image/x.nrrd"),
+                StringView(u8"image/ktx"),
+                StringView(u8"image/ktx2"),
+                StringView(u8"image/x-godot-stex"),
+                StringView(u8"image/heic-sequence"),
+                StringView(u8"image/heif-sequence"),
+                StringView(u8"image/x-epoc-record"),
+                StringView(u8"image/x-garmin-exe"),
+                StringView(u8"image/x-ulead-tpl"),
+                StringView(u8"image/x.sf3-vector"),
+            };
+
+            if (!type.startsWith(StringView(u8"image/"))) {
+                return false;
+            }
+
+            for (StringView other : notPictures) {
+                if (type == other) {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        // whether the file's first bytes are a picture
         bool image(StringView path) {
             Buffer file(path);
             Buffer kind;
@@ -235,7 +275,7 @@ namespace {
                 return false;
             }
 
-            return type(StringView((const u8*)head.mutData(), got), kind) && StringView(kind).startsWith(StringView(u8"image/"));
+            return type(StringView((const u8*)head.mutData(), got), kind) && picture(StringView(kind));
         }
     };
 

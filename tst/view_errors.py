@@ -4,9 +4,12 @@ cannot be read leaves the list empty, the path's trouble written at its
 top; a file no coder takes or a truncated one stays in the list with its
 error in place of its thumbnail and in the properties panel, its
 neighbours showing all the same; a file that is no image by its bytes is
-not in the list; a Vulkan that fails ends the tool with the error."""
+not in the list, nor is a document file calls an image; a Vulkan that
+fails ends the tool with the error."""
 
 import os
+import shutil
+from pathlib import Path
 
 from session import KEY_RIGHT, Session, png, write_png
 
@@ -45,6 +48,8 @@ with Session("view_errors", tool="view") as s:
     whole = png(64, 48, bytes((0, 255, 0)) * (64 * 48))
     (pics / "trunc.png").write_bytes(whole[: len(whole) * 2 // 3])
     (pics / "notes.png").write_bytes(b"not an image at all\n")
+    # a DjVu is image/vnd.djvu to file, and a document to us
+    shutil.copy(Path(__file__).parent / "page.djvu", pics / "scan.djvu")
     s.launch(str(pics))
     s.focus()
     s.said("listed 3")
