@@ -277,10 +277,12 @@ void main() {
         }
     }
 
+    // the readback takes the colour straight; the window system takes it
+    // premultiplied in the encoded domain: encoded, then weighed by the alpha
     if (OUTPUT == 2) {
         imageStore(target, pixel, acc.a > 0.0 ? vec4(acc.rgb / acc.a, acc.a) : vec4(0.0));
     } else {
-        imageStore(target, pixel, vec4(encode(acc.rgb, pixel), 1.0));
+        imageStore(target, pixel, acc.a > 0.0 ? vec4(encode(acc.rgb / acc.a, pixel) * acc.a, acc.a) : vec4(0.0));
     }
 }
 #endif

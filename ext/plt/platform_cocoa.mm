@@ -1134,6 +1134,10 @@ WindowImpl::WindowImpl(PlatformImpl& platform_, const WindowOptions& options)
     const CGFloat scale = screen != nil ? screen.backingScaleFactor : 1.0;
     const NSRect frame = NSMakeRect(0, 0, max(1u, options.width) / scale, max(1u, options.height) / scale);
     window = [[PltWindow alloc] initWithContentRect:frame styleMask:(NSWindowStyleMask)cocoaWindowStyleMask(options.decorations) backing:NSBackingStoreBuffered defer:NO screen:screen];
+    // [plt] the window shows what is behind it where its content's alpha
+    // is short, as a Wayland surface does
+    window.opaque = NO;
+    window.backgroundColor = NSColor.clearColor;
     delegate = [PltWindowDelegate new];
     delegate.owner = this;
     window.delegate = delegate;

@@ -277,7 +277,7 @@ namespace {
         ImTextureID atlas = ImTextureID_Invalid;
         ImVec2 white = {};
 
-        void compose(const ImDrawData* draw, const Vector<Layer>& underlays, u32 width, u32 height, bool wide, u64 frame, const float (&clear)[4]);
+        void compose(const ImDrawData* draw, const Vector<Layer>& underlays, u32 width, u32 height, bool wide, u64 frame);
         void reset(u32 width, u32 height);
         i64 snap(float pos, int axis) const;
         void place(const Op& op, u32 index, const i32 (&box)[4], bool fills, bool opaque);
@@ -792,19 +792,13 @@ void Tiles::finish() {
     }
 }
 
-void Tiles::compose(const ImDrawData* draw, const Vector<Layer>& underlays, u32 w, u32 h, bool wideFrame, u64 mark, const float (&clear)[4]) {
+// Nothing lies under the frame: a tile starts transparent, the identity
+// of over, and what no layer covers stays at zero alpha for the window
+// system to show what is behind.
+void Tiles::compose(const ImDrawData* draw, const Vector<Layer>& underlays, u32 w, u32 h, bool wideFrame, u64 mark) {
     reset(w, h);
     wide = wideFrame;
     frame = mark;
-
-    for (u32 i = 0; i < tilesX * tilesY; i++) {
-        float* c = color.mutData() + (size_t)i * 4;
-
-        c[0] = clear[0] * clear[3];
-        c[1] = clear[1] * clear[3];
-        c[2] = clear[2] * clear[3];
-        c[3] = clear[3];
-    }
 
     float size[2] = {(float)w, (float)h};
     float position[2] = {0.f, 0.f};
@@ -1289,7 +1283,7 @@ kernel void compose(device const Header* headers [[buffer(0)]], device const uin
     if (OUTPUT == 2) {
         target.write(acc.a > 0.0 ? float4(acc.rgb / acc.a, acc.a) : float4(0.0), uint2(pixel));
     } else {
-        target.write(float4(encode(acc.rgb, pixel, frame), 1.0), uint2(pixel));
+        target.write(acc.a > 0.0 ? float4(encode(acc.rgb / acc.a, pixel, frame) * acc.a, acc.a) : float4(0.0), uint2(pixel));
     }
 }
 #endif
@@ -1426,7 +1420,6 @@ void ShadedImage::read(int x0, int y0, int x1, int y1, ImagePixels& out) {
     @autoreleasepool {
         u32 w = (u32)(x1 - x0);
         u32 h = (u32)(y1 - y0);
-        const float clear[4] = {0.f, 0.f, 0.f, 0.f};
         Vector<Layer> whole;
         MTLTextureDescriptor* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float width:(NSUInteger)x1 height:(NSUInteger)y1 mipmapped:NO];
         descriptor.storageMode = MTLStorageModePrivate;
@@ -1439,7 +1432,7 @@ void ShadedImage::read(int x0, int y0, int x1, int y1, ImagePixels& out) {
             fail(StringView(u8"cannot allocate Metal readback"));
         }
         whole.pushBack(Layer{this, {(float)x0, (float)y0}, {(float)x1, (float)y1}});
-        renderer->tiles.compose(nullptr, whole, (u32)x1, (u32)y1, hdr, ++renderer->frames, clear);
+        renderer->tiles.compose(nullptr, whole, (u32)x1, (u32)y1, hdr, ++renderer->frames);
         renderer->stamp(command);
         renderer->encode(command, target, hdr ? ShaderOutput::WideLinear : ShaderOutput::Linear);
         id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
@@ -1743,9 +1736,7 @@ bool MetalRenderer::endFrame(ImDrawData* draw) {
         }
         Flight* flight = smallObjects->make<Flight>(drawn);
         drawn.clear();
-        // the base where nothing is drawn: black, the windows paint their own
-        const float clear[4] = {0.f, 0.f, 0.f, 1.f};
-        tiles.compose(draw, Vector<Layer>(), (u32)drawable.texture.width, (u32)drawable.texture.height, wide, ++frames, clear);
+        tiles.compose(draw, Vector<Layer>(), (u32)drawable.texture.width, (u32)drawable.texture.height, wide, ++frames);
         stamp(command);
         encode(command, drawable.texture, wide ? ShaderOutput::WideLinear : ShaderOutput::Srgb);
         Channel* done = landed;
@@ -1923,6 +1914,7 @@ static Renderer* createRenderer(ObjPool& pool, plt::Platform& platform, plt::Win
     CAMetalLayer* layer = renderer->layer;
     layer.device = renderer->device;
     layer.framebufferOnly = NO;
+    layer.opaque = NO;
     layer.maximumDrawableCount = drawables;
     layer.allowsNextDrawableTimeout = NO;
     layer.presentsWithTransaction = NO;
@@ -3005,7 +2997,10 @@ void Gpu::createSwapchain(u32 width, u32 height) {
     ci.imageUsage = VK_IMAGE_USAGE_STORAGE_BIT;
     ci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     ci.preTransform = caps.currentTransform;
-    ci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+    // the frame is premultiplied with its alpha, and the window system shows
+    // what is behind where the alpha is short; a surface that cannot takes
+    // the colour as it is and shows nothing behind
+    ci.compositeAlpha = caps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR ? VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR : caps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR ? VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR : VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
     ci.presentMode = VK_PRESENT_MODE_FIFO_KHR;
     ci.clipped = VK_TRUE;
     ci.oldSwapchain = present.swapchain;
@@ -3013,6 +3008,15 @@ void Gpu::createSwapchain(u32 width, u32 height) {
     VkSwapchainKHR swapchain = VK_NULL_HANDLE;
 
     VkResult made = vkCreateSwapchainKHR(device, &ci, alloc, &swapchain);
+
+    // the surface may lack the format with alpha in this colour space (a
+    // 10-bit one, say): then without the alpha; the old swapchain is retired
+    // by the first try whatever its result
+    if (made != VK_SUCCESS && ci.compositeAlpha != VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR) {
+        ci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+        ci.oldSwapchain = VK_NULL_HANDLE;
+        made = vkCreateSwapchainKHR(device, &ci, alloc, &swapchain);
+    }
 
     if (chaos->vulkanAt(StringView(u8"swapchain"), made) < 0) {
         if (made == VK_SUCCESS) {
@@ -3385,8 +3389,6 @@ void Gpu::switchMode(bool wide) {
 void Gpu::frameRender(ImDrawData* draw) {
     Sync& sync = present.syncs.mut(present.syncIndex);
     Frame& fd = present.frames.mut(present.frameIndex);
-    // the base where nothing is drawn: black, the windows paint their own
-    const float clear[4] = {0.f, 0.f, 0.f, 1.f};
 
     vkc(vkResetFences(device, 1, &fd.fence));
     vkc(vkResetCommandPool(device, fd.commandPool, 0));
@@ -3396,7 +3398,7 @@ void Gpu::frameRender(ImDrawData* draw) {
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkc(vkBeginCommandBuffer(fd.commandBuffer, &bi));
     recordImages(fd.commandBuffer);
-    tiles.compose(draw, Vector<Layer>(), (u32)present.width, (u32)present.height, present.wide, ++frames, clear);
+    tiles.compose(draw, Vector<Layer>(), (u32)present.width, (u32)present.height, present.wide, ++frames);
     stamp(submitted + 1);
     bindCompose(fd.set, fd.buffers, VK_NULL_HANDLE, true);
 
@@ -4489,7 +4491,6 @@ void ShadedImage::read(int x0, int y0, int x1, int y1, ImagePixels& out) {
     ImGuiPlatformIO& pio = ImGui::GetPlatformIO();
     u32 limit = (u32)(pio.Renderer_TextureMaxWidth < pio.Renderer_TextureMaxHeight ? pio.Renderer_TextureMaxWidth : pio.Renderer_TextureMaxHeight);
     checkImageRegion(limit, limit, x0, y0, x1, y1);
-    const float clear[4] = {0.f, 0.f, 0.f, 0.f};
     Vector<Layer> whole;
     Texture target;
 
@@ -4499,7 +4500,7 @@ void ShadedImage::read(int x0, int y0, int x1, int y1, ImagePixels& out) {
         gpu->destroyTexture(target);
     };
     whole.pushBack(Layer{this, {(float)x0, (float)y0}, {(float)x1, (float)y1}});
-    gpu->tiles.compose(nullptr, whole, (u32)x1, (u32)y1, hdr, ++gpu->frames, clear);
+    gpu->tiles.compose(nullptr, whole, (u32)x1, (u32)y1, hdr, ++gpu->frames);
     gpu->stamp(gpu->submitted);
     gpu->bindCompose(gpu->readSet, gpu->readBuffers, target.view, true);
     gpu->oneShot([&](VkCommandBuffer cmd) {
