@@ -1463,7 +1463,8 @@ void ViewApp::draw() {
         ImGui::SameLine();
     }
 
-    ImGui::BeginChild("canvas", ImVec2(right ? -sideW : 0.f, 0.f), 0, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    // the canvas leaves the info panel its width and the spacing before it
+    ImGui::BeginChild("canvas", ImVec2(right ? -(sideW + ImGui::GetStyle().ItemSpacing.x) : 0.f, 0.f), 0, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     drawCanvas();
     ImGui::EndChild();
 
