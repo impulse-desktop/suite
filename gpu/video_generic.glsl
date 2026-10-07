@@ -448,26 +448,30 @@ void genericKernel(uvec2 local, uint group ARGS_DECL) {
     vec4 color = headers[tile].color;
     vec4 acc = vec4(shown.xyz * cover, cover) + color * (1.0 - cover);
     float noise = genericNoise(pixel);
+    // the window system takes the pixel premultiplied in the encoded
+    // domain: the colour unweighed, encoded, weighed by the alpha again;
+    // where nothing is, the alpha is zero and so is the pixel
+    vec3 straight = acc.w > 0.0 ? acc.xyz / acc.w : vec3(0.0);
 
     if (OUTPUT == 0) {
-        vec3 v = clamp(acc.xyz, 0.0, 1.0);
+        vec3 v = clamp(straight, 0.0, 1.0);
         vec3 coded;
 
         for (int c = 0; c < 3; c++) {
             coded[c] = v[c] <= 0.0031308 ? v[c] * 12.92 : pow(v[c], 1.0 / 2.4) * 1.055 - 0.055;
         }
 
-        STORE(pixel, vec4(coded + noise / 255.0, 1.0));
+        STORE(pixel, vec4((coded + noise / 255.0) * acc.w, acc.w));
     } else if (OUTPUT == 1) {
         vec3 coded;
 
         for (int c = 0; c < 3; c++) {
-            float y = pow(clamp(acc[c] * frame.white / 10000.0, 0.0, 1.0), 2610.0 / 16384.0);
+            float y = pow(clamp(straight[c] * frame.white / 10000.0, 0.0, 1.0), 2610.0 / 16384.0);
 
             coded[c] = pow((y * 18.8515625 + 0.8359375) / (y * 18.6875 + 1.0), 2523.0 / 32.0);
         }
 
-        STORE(pixel, vec4(coded + noise / 1023.0, 1.0));
+        STORE(pixel, vec4((coded + noise / 1023.0) * acc.w, acc.w));
     } else {
         STORE(pixel, acc.w > 0.0 ? vec4(acc.xyz / acc.w, acc.w) : vec4(0.0));
     }
