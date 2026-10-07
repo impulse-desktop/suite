@@ -55,7 +55,7 @@ with Session("read", tool="read") as s:
     docs.mkdir()
     red, green, blue = (255, 0, 0), (0, 255, 0), (0, 0, 255)
     # the second page is the widest: it sets the zoom, the others stand
-    # narrower, centred
+    # narrower
     (docs / "three.pdf").write_bytes(pdf([(200, 300, red), (300, 200, green), (200, 300, blue)]))
 
     s.launch(str(docs / "three.pdf"))
@@ -70,7 +70,7 @@ with Session("read", tool="read") as s:
     s.said("opened pages=3")
     s.said("page 1")
     s.said("showing page 1 ")
-    # the first page, 2:3, is taller than the canvas: its top part, 517 px
+    # the first page, 2:3, is taller than the canvas: its top part, 508 px
     # wide, fills the view
     shows(red, 300000, "first")
     top = s.capture("top", region=canvas)
@@ -81,7 +81,7 @@ with Session("read", tool="read") as s:
     s.tap(KEY_N)
     s.said("page 2")
     s.said("showing page 2 ")
-    # the second page, 3:2, as wide as the canvas allows: 776x517
+    # the second page, 3:2, as wide as the canvas allows: 762x508
     shows(green, 350000, "second")
     s.tap(KEY_END)
     s.said("page 3")
@@ -91,12 +91,12 @@ with Session("read", tool="read") as s:
     s.said("page 1", 2)
     shows(red, 300000, "home")
     # the pages down the list, each as wide as the list and shaped as the
-    # page: the first row 288 px tall, the second 128, the third 288, the
-    # list 8 px down for the window's padding
+    # page, 8 px apart: the first row 300 px tall, the second 133, the
+    # third 300, the list 8 px down for the window's padding
     s.said("thumbnail 1")
     s.said("thumbnail 2")
     s.said("thumbnail 3")
-    s.click(side // 2, 8 + 4 + 288 + 4 + 128 + 4 + 100)
+    s.click(side // 2, 8 + 300 + 8 + 133 + 8 + 100)
     s.said("page 3", 2)
     shows(blue, 300000, "clicked")
     s.tap(KEY_TAB)
