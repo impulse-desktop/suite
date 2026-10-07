@@ -19,10 +19,8 @@
 #include <std/mem/obj_pool.h>
 
 #include <math.h>
-#include <time.h>
 #include <imgui.h>
 #include <string.h>
-#include <sys/stat.h>
 
 // The engines, PDFium and DjVuLibre, as wasm2c turned their wasm modules
 // into C: each instance has a memory of its own, every access checked,
@@ -47,6 +45,10 @@ namespace {
     constexpr Design windowHeight = 700_d;
     constexpr float sideShare = .2f;
     constexpr Design gap = 4_d;
+    constexpr Design pageGap = 12_d;
+    constexpr Design shadowOffset = 3_d;
+    constexpr Design scrollStep = 48_d;
+    constexpr float screenShare = .9f;
     constexpr float placeholderAspect = 1.4142f;
     constexpr u32 thumbTexelsStep = 64;
     constexpr u32 thumbTexelsMin = 128;
@@ -54,6 +56,10 @@ namespace {
     constexpr size_t workerCount = 4;
     constexpr u64 maxBytes = 1u << 30;
     constexpr u32 causeLimit = 256;
+    constexpr ImU32 canvasBg = IM_COL32(46, 46, 52, 255);
+    constexpr ImU32 paperColor = IM_COL32(255, 255, 255, 255);
+    constexpr ImU32 shadowNear = IM_COL32(0, 0, 0, 90);
+    constexpr ImU32 shadowFar = IM_COL32(0, 0, 0, 40);
 
     static float clampf(float v, float lo, float hi) {
         return v < lo ? lo : (v > hi ? hi : v);
@@ -184,43 +190,50 @@ namespace {
         u32 width;
         u32 height;
         bool thumb;
-        u64 request;
         Buffer rgba;
         Buffer timing;
 
-        Rendered(ObjPool* owner, ReadApp& app, u32 page, u32 width, u32 height, bool thumb, u64 request);
+        Rendered(ObjPool* owner, ReadApp& app, u32 page, u32 width, u32 height, bool thumb);
         void work(Document& document) override;
     };
 
+    // the page's row in the list, at the list's width
     struct Thumb {
         Load load = Load::None;
         bool loading = false;
         ImTextureRef texture;
         u32 width = 0;
         u32 height = 0;
-        u32 side = 0;
         Buffer error;
     };
 
-    struct Shown {
-        Ui* ui;
-        u32 page;
+    // the page on the canvas, at the size the layout gives it; a render
+    // in flight, a texture of some size, or the error of the last attempt
+    // at the size it was asked
+    struct Sheet {
+        bool loading = false;
         ImTextureRef texture;
         u32 width = 0;
         u32 height = 0;
+        u32 failedWidth = 0;
         Buffer error;
+    };
 
-        Shown(Ui* ui, Rendered& result);
-        ~Shown() noexcept;
+    struct Page {
+        float pw = 1.f;
+        float ph = 1.f;
+        // the layout's size and place for it, in the canvas's content
+        u32 width = 1;
+        u32 height = 1;
+        float top = 0.f;
+        Thumb thumb;
+        Sheet sheet;
     };
 
     struct ReadApp {
         Ui* ui = nullptr;
         ObjPool* pool = nullptr;
         Buffer path;
-        size_t nameAt = 0;
-        i64 fileBytes = -1;
-        Buffer fileModified;
         Source source;
         Channel* jobs = nullptr;
         Channel* results = nullptr;
@@ -229,22 +242,25 @@ namespace {
         bool opening = false;
         bool opened = false;
         Buffer problem;
-        u32 pageCount = 0;
-        Vector<float> sizes;
-        Vector<Thumb*> thumbs;
-        Vector<size_t> wanted;
+        Vector<Page*> pages;
+        Vector<size_t> wantedThumbs;
+        Vector<size_t> wantedSheets;
         u32 thumbSide = thumbTexelsMin;
         u32 maxSide = 0;
-        size_t current = 0;
-        u64 showRequest = 0;
-        bool showPending = false;
-        u32 canvasW = 0;
-        u32 canvasH = 0;
-        Shown* shown = nullptr;
+        // the canvas: one column of the pages, scrolled as a whole
+        float zoom = 0.f;
+        float layoutW = 0.f;
+        float totalH = 0.f;
+        float viewH = 0.f;
+        float scrollY = 0.f;
+        float scrollTarget = -1.f;
+        size_t keepFirst = 0;
+        size_t keepLast = 0;
+        // the page under the middle of the view; none before the first frame
+        size_t current = (size_t)-1;
+        bool followCurrent = true;
         bool fullscreen = false;
         bool panel = true;
-        bool info = true;
-        bool scrollToCurrent = true;
 
         void startWorkers(ObjPool& pool);
         void stopWorkers();
@@ -254,18 +270,16 @@ namespace {
         void take(Rendered& rendered);
         void submit();
         void dispatch(Job* job);
-        void fitSize(u32 page, u32& width, u32& height);
         void thumbSize(u32 page, u32& width, u32& height);
         void setThumb(u32 page, Rendered& result);
-        void select(size_t index);
-        void show(size_t index);
-        void replaceShown(Shown* next);
-        void step(long delta);
+        void layout(float width);
+        size_t pageAt(float y);
+        void scrollTo(float y);
+        void goTo(size_t index);
         void keys();
         void draw();
         void drawPages();
         void drawCanvas();
-        void drawInfo();
     };
 
     // a worker: its own engine with the document open, made on its first job
@@ -346,32 +360,6 @@ namespace {
         u32 side = (u32)ceilf(innerW / (float)thumbTexelsStep) * thumbTexelsStep;
 
         return side < thumbTexelsMin ? thumbTexelsMin : side > thumbTexelsMax ? thumbTexelsMax : side;
-    }
-
-    void appendBytes(StringBuilder& text, i64 bytes) {
-        static const StringView units[] = {StringView(u8"KB"), StringView(u8"MB"), StringView(u8"GB"), StringView(u8"TB")};
-
-        if (bytes < 1024) {
-            text << bytes << StringView(u8" bytes");
-
-            return;
-        }
-
-        i64 tenths = bytes * 10 / 1024;
-        size_t unit = 0;
-
-        while (tenths >= 10240 && unit + 1 < sizeof(units) / sizeof(units[0])) {
-            tenths /= 1024;
-            unit++;
-        }
-
-        text << tenths / 10 << StringView(u8".") << tenths % 10 << StringView(u8" ") << units[unit];
-    }
-
-    void appendPoints(StringBuilder& text, float value) {
-        i64 tenths = (i64)(value * 10.f + .5f);
-
-        text << tenths / 10 << StringView(u8".") << tenths % 10;
     }
 }
 
@@ -573,13 +561,12 @@ void Opened::work(Document& document) {
     }
 }
 
-Rendered::Rendered(ObjPool* owner, ReadApp& app, u32 page_, u32 width_, u32 height_, bool thumb_, u64 request_)
+Rendered::Rendered(ObjPool* owner, ReadApp& app, u32 page_, u32 width_, u32 height_, bool thumb_)
     : Job(owner, app, false)
     , page(page_)
     , width(width_)
     , height(height_)
     , thumb(thumb_)
-    , request(request_)
 {
 }
 
@@ -594,27 +581,6 @@ void Rendered::work(Document& document) {
 
     text << StringView(u8"im render page ") << (i64)(page + 1) << StringView(u8" ") << (i64)width << StringView(u8"x") << (i64)height << StringView(u8": ") << MS{monotonicNowUs() - began};
     timing = Buffer(StringView(text));
-}
-
-// the page at the size it was asked, or the error in its place: a size
-// all the same, so the page is not asked again at that size
-Shown::Shown(Ui* ui_, Rendered& result)
-    : ui(ui_)
-    , page(result.page)
-    , width(result.width)
-    , height(result.height)
-{
-    error = Buffer(StringView(result.error));
-
-    if (error.empty()) {
-        texture = ui->loadTexture(width, height, result.rgba.data());
-    }
-}
-
-Shown::~Shown() noexcept {
-    if (error.empty()) {
-        ui->releaseTexture(texture);
-    }
 }
 
 Worker::Worker(ReadApp& app_)
@@ -706,33 +672,19 @@ void ReadApp::stopWorkers() {
         delete ((Job*)item)->owner;
     }
 
-    replaceShown(nullptr);
+    for (Page* page : pages) {
+        if (page->thumb.width) {
+            ui->releaseTexture(page->thumb.texture);
+        }
 
-    for (Thumb* thumb : thumbs) {
-        if (thumb->width) {
-            ui->releaseTexture(thumb->texture);
+        if (page->sheet.width) {
+            ui->releaseTexture(page->sheet.texture);
         }
     }
 }
 
 void ReadApp::open(StringView given) {
-    struct stat st;
-
     path = Buffer(given);
-    nameAt = given.length() - nameOf(given).length();
-
-    if (stat(path.cStr(), &st) == 0) {
-        struct tm tm;
-        char stamp[32];
-
-        fileBytes = (i64)st.st_size;
-        localtime_r(&st.st_mtime, &tm);
-
-        if (strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M", &tm)) {
-            fileModified = Buffer(StringView(stamp));
-        }
-    }
-
     readFileContent(path, source.bytes);
 
     if (!sniff(nameOf(given), source.bytes, source.kind)) {
@@ -779,24 +731,28 @@ void ReadApp::take(Opened& result) {
     }
 
     opened = true;
-    pageCount = result.pages;
-    sizes.append(result.sizes.begin(), result.sizes.end());
 
-    for (u32 page = 0; page < pageCount; page++) {
-        thumbs.pushBack(pool->make<Thumb>());
+    for (u32 i = 0; i < result.pages; i++) {
+        Page* page = pool->make<Page>();
+
+        page->pw = max(1.f, result.sizes[(size_t)i * 2]);
+        page->ph = max(1.f, result.sizes[(size_t)i * 2 + 1]);
+        pages.pushBack(page);
     }
 
-    TRACE(ui, StringView(StringBuilder() << StringView(u8"opened pages=") << (i64)pageCount));
-    select(0);
+    TRACE(ui, StringView(StringBuilder() << StringView(u8"opened pages=") << (i64)result.pages));
+    ui->requestFrame();
 }
 
 void ReadApp::take(Rendered& result) {
+    Page& page = *pages[result.page];
+
     if (!result.timing.empty()) {
         ui->timing(StringView(result.timing));
     }
 
     if (result.thumb) {
-        Thumb& thumb = *thumbs[result.page];
+        Thumb& thumb = page.thumb;
 
         thumb.loading = false;
 
@@ -811,23 +767,38 @@ void ReadApp::take(Rendered& result) {
         return;
     }
 
-    showPending = false;
+    Sheet& sheet = page.sheet;
 
-    if (result.request != showRequest || result.page != current) {
+    sheet.loading = false;
+
+    // a page that scrolled out of reach while it was drawn
+    if (!opened || result.page < keepFirst || result.page > keepLast) {
         TRACE(ui, StringView(StringBuilder() << StringView(u8"discarded page ") << (i64)(result.page + 1)));
 
         return;
     }
 
-    Shown* next = new Shown(ui, result);
+    if (!result.error.empty()) {
+        sheet.failedWidth = result.width;
+        sheet.error = Buffer(StringView(result.error));
+        TRACE(ui, StringView(StringBuilder() << StringView(u8"cannot show page ") << (i64)(result.page + 1) << StringView(u8": ") << StringView(result.error)));
+        ui->requestFrame();
 
-    replaceShown(next);
-
-    if (!next->error.empty()) {
-        TRACE(ui, StringView(StringBuilder() << StringView(u8"cannot show page ") << (i64)(result.page + 1) << StringView(u8": ") << StringView(next->error)));
-    } else {
-        TRACE(ui, StringView(StringBuilder() << StringView(u8"showing page ") << (i64)(result.page + 1) << StringView(u8" ") << (i64)next->width << StringView(u8"x") << (i64)next->height));
+        return;
     }
+
+    ImTextureRef texture = ui->loadTexture(result.width, result.height, result.rgba.data());
+
+    if (sheet.width) {
+        ui->releaseTexture(sheet.texture);
+    }
+
+    sheet.texture = texture;
+    sheet.width = result.width;
+    sheet.height = result.height;
+    sheet.error = Buffer();
+    TRACE(ui, StringView(StringBuilder() << StringView(u8"showing page ") << (i64)(result.page + 1) << StringView(u8" ") << (i64)result.width << StringView(u8"x") << (i64)result.height));
+    ui->requestFrame();
 }
 
 void ReadApp::dispatch(Job* job) {
@@ -835,9 +806,9 @@ void ReadApp::dispatch(Job* job) {
     jobs->enqueue(job);
 }
 
-// the current page at the size the canvas fits it, and its thumbnail
-// at the panel's width; thumbnails of the pages in view, missing ones
-// first, then the ones rendered for a narrower panel
+// the pages of the canvas at the layout's size, the ones in view first,
+// then the thumbnails of the rows in view, missing ones first, then the
+// ones drawn for a narrower list
 void ReadApp::submit() {
     if (!opening && !opened && problem.empty() && inFlight < workerCount) {
         ObjPool* owner = ObjPool::fromMemoryRaw();
@@ -851,34 +822,38 @@ void ReadApp::submit() {
         return;
     }
 
-    if (!showPending && inFlight < workerCount && canvasW && canvasH) {
-        u32 width;
-        u32 height;
-
-        fitSize((u32)current, width, height);
-
-        if (!shown || shown->page != current || shown->width != width || shown->height != height) {
-            ObjPool* owner = ObjPool::fromMemoryRaw();
-
-            showPending = true;
-            TRACE(ui, StringView(StringBuilder() << StringView(u8"loading page ") << (i64)(current + 1)));
-            dispatch(owner->make<Rendered>(owner, *this, (u32)current, width, height, false, showRequest));
+    for (size_t index : wantedSheets) {
+        if (inFlight == workerCount) {
+            return;
         }
+
+        Page& page = *pages[index];
+        Sheet& sheet = page.sheet;
+
+        if (sheet.loading || sheet.width == page.width || sheet.failedWidth == page.width) {
+            continue;
+        }
+
+        ObjPool* owner = ObjPool::fromMemoryRaw();
+
+        sheet.loading = true;
+        TRACE(ui, StringView(StringBuilder() << StringView(u8"loading page ") << (i64)(index + 1)));
+        dispatch(owner->make<Rendered>(owner, *this, (u32)index, page.width, page.height, false));
     }
 
     for (int pass = 0; pass < 2; pass++) {
-        for (size_t index : wanted) {
+        for (size_t index : wantedThumbs) {
             if (inFlight == workerCount) {
                 return;
             }
 
-            Thumb& thumb = *thumbs[index];
+            Thumb& thumb = pages[index]->thumb;
 
             if (thumb.loading || thumb.load == Load::Failed || (pass == 0) != (thumb.load == Load::None)) {
                 continue;
             }
 
-            if (thumb.load == Load::Ready && thumb.side * 4 >= thumbSide * 3) {
+            if (thumb.load == Load::Ready && thumb.width * 4 >= thumbSide * 3) {
                 continue;
             }
 
@@ -891,37 +866,24 @@ void ReadApp::submit() {
 
             thumb.loading = true;
             TRACE(ui, StringView(StringBuilder() << StringView(u8"loading thumbnail ") << (i64)(index + 1)));
-            dispatch(owner->make<Rendered>(owner, *this, (u32)index, width, height, true, 0));
+            dispatch(owner->make<Rendered>(owner, *this, (u32)index, width, height, true));
         }
     }
 }
 
-// the page as the canvas fits it whole, in pixels, within what a texture may be
-void ReadApp::fitSize(u32 page, u32& width, u32& height) {
-    float pw = max(1.f, sizes[(size_t)page * 2]);
-    float ph = max(1.f, sizes[(size_t)page * 2 + 1]);
-    float scale = min((float)canvasW / pw, (float)canvasH / ph);
-    float limit = (float)max<u32>(1, maxSide);
-
-    scale = min(scale, min(limit / pw, limit / ph));
-    width = max<u32>(1, (u32)floorf(pw * scale + .5f));
-    height = max<u32>(1, (u32)floorf(ph * scale + .5f));
-}
-
-// the page at the panel's width, in pixels
-void ReadApp::thumbSize(u32 page, u32& width, u32& height) {
-    float pw = max(1.f, sizes[(size_t)page * 2]);
-    float ph = max(1.f, sizes[(size_t)page * 2 + 1]);
+// the page at the list's width, in pixels
+void ReadApp::thumbSize(u32 index, u32& width, u32& height) {
+    Page& page = *pages[index];
 
     width = thumbSide;
-    height = max<u32>(1, (u32)floorf((float)thumbSide * ph / pw + .5f));
+    height = max<u32>(1, (u32)floorf((float)thumbSide * page.ph / page.pw + .5f));
     height = min<u32>(height, max<u32>(1, maxSide));
 }
 
-void ReadApp::setThumb(u32 page, Rendered& result) {
-    Thumb& thumb = *thumbs[page];
+void ReadApp::setThumb(u32 index, Rendered& result) {
+    Thumb& thumb = pages[index]->thumb;
 
-    if (thumb.width && thumb.side >= result.width) {
+    if (thumb.width && thumb.width >= result.width) {
         return;
     }
 
@@ -934,68 +896,102 @@ void ReadApp::setThumb(u32 page, Rendered& result) {
     thumb.texture = texture;
     thumb.width = result.width;
     thumb.height = result.height;
-    thumb.side = result.width;
     thumb.load = Load::Ready;
-    TRACE(ui, StringView(StringBuilder() << StringView(u8"thumbnail ") << (i64)(page + 1)));
+    TRACE(ui, StringView(StringBuilder() << StringView(u8"thumbnail ") << (i64)(index + 1)));
 }
 
-void ReadApp::select(size_t index) {
-    current = index;
-    ++showRequest;
-    showPending = false;
-    scrollToCurrent = true;
-    ui->requestFrame();
-    TRACE(ui, StringView(StringBuilder() << StringView(u8"selected page ") << (i64)(index + 1)));
-}
+// One zoom for every page, the widest filling the canvas's width, as
+// evince lays a document out: the pages one under another with a gap
+// between, each centred, no page wider than a texture may be.
+void ReadApp::layout(float width) {
+    float g = ui->px(pageGap);
+    float maxW = 1.f;
+    float maxH = 1.f;
 
-void ReadApp::show(size_t index) {
-    if (index == current && (!shown || shown->error.empty())) {
-        return;
+    for (Page* page : pages) {
+        maxW = max(maxW, page->pw);
+        maxH = max(maxH, page->ph);
     }
 
-    select(index);
+    float limit = (float)max<u32>(1, maxSide);
+
+    layoutW = width;
+    zoom = min(max(1.f, width - 2.f * g) / maxW, min(limit / maxW, limit / maxH));
+
+    float y = g;
+
+    for (Page* page : pages) {
+        page->width = max<u32>(1, (u32)floorf(page->pw * zoom + .5f));
+        page->height = max<u32>(1, (u32)floorf(page->ph * zoom + .5f));
+        page->top = y;
+        y += (float)page->height + g;
+    }
+
+    totalH = y;
 }
 
-void ReadApp::replaceShown(Shown* next) {
-    Shown* previous = shown;
+// the page under a point of the content, or the one after the gap it is in
+size_t ReadApp::pageAt(float y) {
+    for (size_t i = 0; i < pages.length(); i++) {
+        if (y < pages[i]->top + (float)pages[i]->height) {
+            return i;
+        }
+    }
 
-    shown = next;
-    delete previous;
+    return pages.length() - 1;
+}
+
+void ReadApp::scrollTo(float y) {
+    scrollTarget = clampf(y, 0.f, max(0.f, totalH - viewH));
     ui->requestFrame();
 }
 
-void ReadApp::step(long delta) {
+// the page's top at the top of the view, its gap above it
+void ReadApp::goTo(size_t index) {
     if (!opened) {
         return;
     }
 
-    long last = (long)pageCount - 1;
-    long next = (long)current + delta;
-
-    next = next < 0 ? 0 : next > last ? last : next;
-
-    if ((size_t)next != current) {
-        show((size_t)next);
-    }
+    index = min(index, pages.length() - 1);
+    scrollTo(pages[index]->top - ui->px(pageGap));
 }
 
 void ReadApp::keys() {
     ImGuiIO& io = ImGui::GetIO();
+    float step = ui->px(scrollStep);
 
-    if (ImGui::IsKeyPressed(ImGuiKey_RightArrow) || ImGui::IsKeyPressed(ImGuiKey_DownArrow) || ImGui::IsKeyPressed(ImGuiKey_Space) || ImGui::IsKeyPressed(ImGuiKey_PageDown) || ImGui::IsKeyPressed(ImGuiKey_J) || ImGui::IsKeyPressed(ImGuiKey_N)) {
-        step(1);
+    size_t at = current == (size_t)-1 ? 0 : current;
+
+    if (ImGui::IsKeyPressed(ImGuiKey_RightArrow) || ImGui::IsKeyPressed(ImGuiKey_N)) {
+        goTo(at + 1);
     }
 
-    if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow) || ImGui::IsKeyPressed(ImGuiKey_UpArrow) || ImGui::IsKeyPressed(ImGuiKey_Backspace) || ImGui::IsKeyPressed(ImGuiKey_PageUp) || ImGui::IsKeyPressed(ImGuiKey_K) || ImGui::IsKeyPressed(ImGuiKey_P)) {
-        step(-1);
+    if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow) || ImGui::IsKeyPressed(ImGuiKey_P)) {
+        goTo(at > 0 ? at - 1 : 0);
+    }
+
+    if (ImGui::IsKeyPressed(ImGuiKey_DownArrow) || ImGui::IsKeyPressed(ImGuiKey_J)) {
+        scrollTo(scrollY + step);
+    }
+
+    if (ImGui::IsKeyPressed(ImGuiKey_UpArrow) || ImGui::IsKeyPressed(ImGuiKey_K)) {
+        scrollTo(scrollY - step);
+    }
+
+    if (ImGui::IsKeyPressed(ImGuiKey_Space) || ImGui::IsKeyPressed(ImGuiKey_PageDown)) {
+        scrollTo(scrollY + viewH * screenShare);
+    }
+
+    if (ImGui::IsKeyPressed(ImGuiKey_Backspace) || ImGui::IsKeyPressed(ImGuiKey_PageUp)) {
+        scrollTo(scrollY - viewH * screenShare);
     }
 
     if (ImGui::IsKeyPressed(ImGuiKey_Home) || (ImGui::IsKeyPressed(ImGuiKey_G) && !io.KeyShift)) {
-        step(-(long)pageCount);
+        scrollTo(0.f);
     }
 
     if (ImGui::IsKeyPressed(ImGuiKey_End) || (ImGui::IsKeyPressed(ImGuiKey_G) && io.KeyShift)) {
-        step((long)pageCount);
+        scrollTo(totalH);
     }
 
     if (ImGui::IsKeyPressed(ImGuiKey_F) || ImGui::IsKeyPressed(ImGuiKey_F11)) {
@@ -1008,19 +1004,15 @@ void ReadApp::keys() {
         panel = !panel;
         TRACE(ui, panel ? StringView(u8"panel on") : StringView(u8"panel off"));
     }
-
-    if (ImGui::IsKeyPressed(ImGuiKey_I)) {
-        info = !info;
-        TRACE(ui, info ? StringView(u8"info on") : StringView(u8"info off"));
-    }
 }
 
-// the pages down the panel, each a row of the panel's width and the
-// page's shape, the current one highlighted; a click selects a row
+// the pages down the list, each a row of the list's width and the page's
+// shape, the current one highlighted and kept in view; a click goes to
+// the page
 void ReadApp::drawPages() {
     float g = ui->px(gap);
     float innerW = max(1.f, ImGui::GetWindowWidth() - 2.f * g);
-    float viewH = ImGui::GetWindowHeight();
+    float listH = ImGui::GetWindowHeight();
     ImVec2 origin = ImGui::GetCursorScreenPos();
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImU32 dimColor = ImGui::GetColorU32(ImGuiCol_TextDisabled);
@@ -1040,13 +1032,10 @@ void ReadApp::drawPages() {
     }
 
     auto rowHeight = [&](size_t i) {
-        float pw = max(1.f, sizes[i * 2]);
-        float ph = max(1.f, sizes[i * 2 + 1]);
-
-        return max(1.f, floorf(innerW * (opened ? ph / pw : placeholderAspect) + .5f));
+        return max(1.f, floorf(innerW * (opened ? pages[i]->ph / pages[i]->pw : placeholderAspect) + .5f));
     };
 
-    size_t count = thumbs.length();
+    size_t count = pages.length();
     float total = g;
     float currentTop = total;
     float currentH = 0.f;
@@ -1064,30 +1053,36 @@ void ReadApp::drawPages() {
 
     ImGui::Dummy(ImVec2(innerW, total));
 
-    if (scrollToCurrent) {
-        ImGui::SetScrollY(currentTop - (viewH - currentH) / 2.f);
-        scrollToCurrent = false;
+    float listScroll = clampf(ImGui::GetScrollY(), 0.f, max(0.f, total - listH));
+
+    if (followCurrent && count) {
+        if (currentTop - g < listScroll) {
+            ImGui::SetScrollY(currentTop - g);
+        } else if (currentTop + currentH + g > listScroll + listH) {
+            ImGui::SetScrollY(currentTop + currentH + g - listH);
+        }
+
+        followCurrent = false;
     }
 
-    float scrollY = clampf(ImGui::GetScrollY(), 0.f, max(0.f, total - viewH));
     float top = g;
 
     for (size_t i = 0; i < count; i++) {
-        Thumb& thumb = *thumbs[i];
+        Thumb& thumb = pages[i]->thumb;
         float h = rowHeight(i);
         float bottom = top + h;
-        bool inView = bottom > scrollY && top < scrollY + viewH;
+        bool inView = bottom > listScroll && top < listScroll + listH;
 
         if (inView) {
             ImVec2 p0(origin.x + g, origin.y + top);
             ImVec2 p1(p0.x + innerW, p0.y + h);
 
-            wanted.pushBack(i);
+            wantedThumbs.pushBack(i);
             ImGui::SetCursorScreenPos(p0);
             ImGui::PushID((int)i);
 
             if (ImGui::InvisibleButton("##row", ImVec2(innerW, h))) {
-                show(i);
+                goTo(i);
             }
 
             ImGui::PopID();
@@ -1110,153 +1105,137 @@ void ReadApp::drawPages() {
     }
 }
 
-void ReadApp::drawInfo() {
-    auto key = [&](const char* name) {
-        ImGui::TableNextRow();
-        ImGui::TableSetColumnIndex(0);
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextDisabled("%s", name);
-        ImGui::TableSetColumnIndex(1);
-    };
-    auto row = [&](const char* name, StringView value) {
-        key(name);
-        ImGui::AlignTextToFramePadding();
-        ImGui::PushTextWrapPos(0.f);
-        ImGui::TextUnformatted((const char*)value.begin(), (const char*)value.end());
-        ImGui::PopTextWrapPos();
-    };
-    auto table = [&](const char* id) {
-        if (!ImGui::BeginTable(id, 2, ImGuiTableFlags_SizingStretchSame)) {
-            return false;
-        }
-
-        ImGui::TableSetupColumn("key", ImGuiTableColumnFlags_WidthFixed);
-        ImGui::TableSetupColumn("value", ImGuiTableColumnFlags_WidthStretch, 1.f);
-
-        return true;
-    };
-
-    if (ImGui::CollapsingHeader("Document", ImGuiTreeNodeFlags_DefaultOpen) && table("document")) {
-        row("Type", source.kind == Kind::Pdf ? StringView(u8"PDF") : StringView(u8"DjVu"));
-
-        if (!problem.empty()) {
-            row("Error", StringView(problem));
-        }
-
-        if (opened) {
-            StringBuilder text;
-
-            text << (i64)pageCount;
-            row("Pages", StringView(text));
-        }
-
-        ImGui::EndTable();
-    }
-
-    if (opened) {
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::Spacing();
-
-        if (ImGui::CollapsingHeader("Page", ImGuiTreeNodeFlags_DefaultOpen) && table("page")) {
-            StringBuilder position;
-
-            position << (i64)(current + 1) << StringView(u8" / ") << (i64)pageCount;
-            row("Position", StringView(position));
-
-            StringBuilder size;
-
-            appendPoints(size, sizes[current * 2]);
-            size << StringView(u8" \xc3\x97 ");
-            appendPoints(size, sizes[current * 2 + 1]);
-            size << StringView(u8" pt");
-            row("Size", StringView(size));
-
-            if (shown && shown->page == current) {
-                if (!shown->error.empty()) {
-                    row("Error", StringView(shown->error));
-                } else {
-                    StringBuilder text;
-
-                    text << (i64)shown->width << StringView(u8" \xc3\x97 ") << (i64)shown->height;
-                    row("Drawn", StringView(text));
-                }
-            }
-
-            ImGui::EndTable();
-        }
-    }
-
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Spacing();
-
-    if (ImGui::CollapsingHeader("File", ImGuiTreeNodeFlags_DefaultOpen) && table("file")) {
-        StringView whole = StringView(path);
-
-        row("Name", nameOf(whole));
-        row("Folder", nameAt == 0 ? StringView(u8".") : nameAt == 1 ? StringView(u8"/") : StringView(whole.begin(), whole.begin() + nameAt - 1));
-
-        if (fileBytes >= 0) {
-            StringBuilder text;
-
-            appendBytes(text, fileBytes);
-            row("Size", StringView(text));
-        }
-
-        if (!fileModified.empty()) {
-            row("Modified", StringView(fileModified));
-        }
-
-        ImGui::EndTable();
-    }
-}
-
-// the current page, fitted whole into the canvas; the wheel turns pages
+// The pages one under another, scrolled as one column: each a sheet with
+// a shadow, blank until its render arrives. The pages in view and a
+// view's worth around them are kept drawn; the rest let their textures
+// go. A change of width lays the column out again and keeps the view on
+// the same spot of the same page.
 void ReadApp::drawCanvas() {
-    ImVec2 origin = ImGui::GetCursorScreenPos();
-    ImVec2 size = ImGui::GetContentRegionAvail();
-
-    if (size.x < 1.f || size.y < 1.f) {
-        return;
-    }
-
-    canvasW = (u32)size.x;
-    canvasH = (u32)size.y;
-    ImGui::InvisibleButton("canvas", size, ImGuiButtonFlags_MouseButtonLeft);
-
-    ImGuiIO& io = ImGui::GetIO();
-
-    if (ImGui::IsItemHovered() && io.MouseWheel != 0.f) {
-        step(io.MouseWheel < 0.f ? 1 : -1);
-    }
-
+    ImVec2 win = ImGui::GetWindowPos();
+    float viewW = ImGui::GetContentRegionAvail().x;
     ImDrawList* dl = ImGui::GetWindowDrawList();
 
-    if (!opened || !shown || !shown->error.empty() || shown->page != current) {
-        const char* text = !problem.empty() ? "cannot open this document" : shown && shown->page == current ? "cannot show this page" : "rendering";
+    viewH = ImGui::GetWindowHeight();
+
+    if (!opened) {
+        const char* text = !problem.empty() ? "cannot open this document" : "opening";
         ImVec2 extent = ImGui::CalcTextSize(text);
 
-        dl->AddText(ImVec2(origin.x + (size.x - extent.x) / 2.f, origin.y + (size.y - extent.y) / 2.f), ImGui::GetColorU32(ImGuiCol_TextDisabled), text);
+        dl->AddText(ImVec2(win.x + (viewW - extent.x) / 2.f, win.y + (viewH - extent.y) / 2.f), ImGui::GetColorU32(ImGuiCol_TextDisabled), text);
 
         return;
     }
 
-    // the page as the canvas fits it now; the texture may be of another
-    // size for a moment, until the render for this size arrives
-    float pw = max(1.f, sizes[current * 2]);
-    float ph = max(1.f, sizes[current * 2 + 1]);
-    float scale = min(size.x / pw, size.y / ph);
-    float dw = floorf(pw * scale + .5f);
-    float dh = floorf(ph * scale + .5f);
-    ImVec2 p0(origin.x + floorf((size.x - dw) / 2.f), origin.y + floorf((size.y - dh) / 2.f));
-    ImVec2 p1(p0.x + dw, p0.y + dh);
+    float shadow = ui->px(shadowOffset);
+    float before = ImGui::GetScrollY();
 
-    dl->AddImage(shown->texture, p0, p1);
+    if (viewW != layoutW) {
+        // the same spot of the same page after the new layout
+        bool again = layoutW > 0.f;
+        size_t anchor = again ? pageAt(before) : 0;
+        float within = again ? (before - pages[anchor]->top) / max(1.f, (float)pages[anchor]->height) : 0.f;
+
+        layout(viewW);
+
+        if (again && scrollTarget < 0.f) {
+            scrollTarget = clampf(pages[anchor]->top + within * (float)pages[anchor]->height, 0.f, max(0.f, totalH - viewH));
+        }
+
+        // the sheets drawn for the old width stay until the new ones come
+        for (Page* page : pages) {
+            page->sheet.failedWidth = 0;
+        }
+    }
+
+    ImGui::Dummy(ImVec2(viewW, totalH));
+
+    if (scrollTarget >= 0.f) {
+        ImGui::SetScrollY(scrollTarget);
+        before = scrollTarget;
+        scrollTarget = -1.f;
+    }
+
+    scrollY = clampf(before, 0.f, max(0.f, totalH - viewH));
+
+    size_t middle = pageAt(scrollY + viewH / 2.f);
+
+    if (middle != current) {
+        current = middle;
+        followCurrent = true;
+        TRACE(ui, StringView(StringBuilder() << StringView(u8"page ") << (i64)(current + 1)));
+    }
+
+    // what is drawn: the pages in view, then the ones a view away
+    float reachTop = scrollY - viewH;
+    float reachBottom = scrollY + 2.f * viewH;
+
+    keepFirst = pages.length();
+    keepLast = 0;
+
+    for (size_t i = 0; i < pages.length(); i++) {
+        Page& page = *pages[i];
+        float top = page.top;
+        float bottom = top + (float)page.height;
+        bool inView = bottom > scrollY && top < scrollY + viewH;
+        bool inReach = bottom > reachTop && top < reachBottom;
+
+        if (inReach) {
+            keepFirst = min(keepFirst, i);
+            keepLast = max(keepLast, i);
+        } else {
+            if (page.sheet.width) {
+                ui->releaseTexture(page.sheet.texture);
+                page.sheet.width = 0;
+                page.sheet.height = 0;
+            }
+
+            page.sheet.error = Buffer();
+            page.sheet.failedWidth = 0;
+        }
+
+        if (!inView) {
+            continue;
+        }
+
+        float x = win.x + floorf((viewW - (float)page.width) / 2.f);
+        float y = win.y + top - scrollY;
+        ImVec2 p0(x, y);
+        ImVec2 p1(x + (float)page.width, y + (float)page.height);
+
+        dl->AddRectFilled(ImVec2(p0.x + 2.f * shadow, p0.y + 2.f * shadow), ImVec2(p1.x + 2.f * shadow, p1.y + 2.f * shadow), shadowFar);
+        dl->AddRectFilled(ImVec2(p0.x + shadow, p0.y + shadow), ImVec2(p1.x + shadow, p1.y + shadow), shadowNear);
+
+        if (page.sheet.width) {
+            dl->AddImage(page.sheet.texture, p0, p1);
+        } else {
+            dl->AddRectFilled(p0, p1, paperColor);
+        }
+    }
+
+    for (size_t i = 0; i < pages.length(); i++) {
+        Page& page = *pages[i];
+        float top = page.top;
+        float bottom = top + (float)page.height;
+
+        if (bottom > scrollY && top < scrollY + viewH) {
+            wantedSheets.pushBack(i);
+        }
+    }
+
+    for (size_t i = keepFirst; i <= keepLast && i < pages.length(); i++) {
+        Page& page = *pages[i];
+        float top = page.top;
+        float bottom = top + (float)page.height;
+
+        if (!(bottom > scrollY && top < scrollY + viewH)) {
+            wantedSheets.pushBack(i);
+        }
+    }
 }
 
 void ReadApp::draw() {
-    wanted.clear();
+    wantedThumbs.clear();
+    wantedSheets.clear();
     ImGuiViewport* vp = ImGui::GetMainViewport();
 
     ImGui::SetNextWindowPos(vp->Pos);
@@ -1266,10 +1245,8 @@ void ReadApp::draw() {
     ImGui::Begin("##read", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBackground);
 
     float sideW = floorf(vp->Size.x * sideShare);
-    bool left = panel && !fullscreen;
-    bool right = info && !fullscreen;
 
-    if (left) {
+    if (panel && !fullscreen) {
         ImGui::PushStyleColor(ImGuiCol_ChildBg, ImGui::GetStyleColorVec4(ImGuiCol_WindowBg));
         ImGui::BeginChild("pages", ImVec2(sideW, 0.f), 0, ImGuiWindowFlags_NoScrollbar);
         drawPages();
@@ -1278,22 +1255,15 @@ void ReadApp::draw() {
         ImGui::SameLine();
     }
 
-    ImGui::BeginChild("canvas", ImVec2(right ? -sideW : 0.f, 0.f), 0, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    // the scrollbar is always there, so the width the pages fit does not
+    // depend on whether they overflow
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, canvasBg);
+    ImGui::BeginChild("canvas", ImVec2(0.f, 0.f), 0, ImGuiWindowFlags_AlwaysVerticalScrollbar);
     drawCanvas();
     ImGui::EndChild();
+    ImGui::PopStyleColor();
 
-    if (right) {
-        ImGui::SameLine();
-        ImGui::PopStyleVar(2);
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImGui::GetStyleColorVec4(ImGuiCol_WindowBg));
-        ImGui::BeginChild("info", ImVec2(sideW, 0.f), ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoScrollbar);
-        drawInfo();
-        ImGui::EndChild();
-        ImGui::PopStyleColor();
-    } else {
-        ImGui::PopStyleVar(2);
-    }
-
+    ImGui::PopStyleVar(2);
     ImGui::End();
 }
 
