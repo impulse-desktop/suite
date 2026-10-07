@@ -144,6 +144,9 @@ namespace plt::test {
         wl_resource* dataDevice = nullptr;
         wl_resource* dataSource = nullptr;
         wl_resource* dataOffer = nullptr;
+        // the selection on offer, announced again with a fresh offer on
+        // the keyboard's enter, as a compositor does
+        const char* selectionMime = nullptr;
         wl_resource* primaryDevice = nullptr;
         wl_resource* primarySource = nullptr;
         wl_resource* primaryOffer = nullptr;
@@ -875,6 +878,7 @@ namespace plt::test {
         if (dataDevice == nullptr) {
             return false;
         }
+        selectionMime = mime;
         dataOffer = wl_resource_create(client, &wl_data_offer_interface, wl_resource_get_version(dataDevice), 0);
         wl_resource_set_implementation(dataOffer, &dataOfferImplementation, this, nullptr);
         wl_data_device_send_data_offer(dataDevice, dataOffer);
@@ -1123,6 +1127,9 @@ namespace plt::test {
                     wl_keyboard_send_modifiers(keyboard, serial++, 0, 0, 0, 0);
                     wl_array_release(&keys);
                     wl_display_flush_clients(display);
+                    if (selectionMime != nullptr) {
+                        offerSelection(selectionMime);
+                    }
                     reply.count = 1;
                 }
                 break;
