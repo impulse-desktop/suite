@@ -53,7 +53,6 @@ namespace {
     constexpr Design windowWidth = 820_d;
     constexpr Design windowHeight = 560_d;
     constexpr Design placesWidth = 160_d;
-    constexpr Design spacing = 8_d;
     constexpr Design ring = 2_d;
     constexpr Design cellWidth = 120_d;
     constexpr u32 thumbSide = 128;
@@ -1818,13 +1817,6 @@ int mainChoose(ObjPool& pool, int argc, char** argv) {
 
     Ui& ui = *Ui::create(pool, StringView(u8"choose"), UiOptions{windowWidth, windowHeight});
 
-    // a Selectable's band is the spacing taller than its text, a row of a
-    // table twice the cell padding taller: the padding follows the spacing
-    // so that the band fills the row
-    ImGuiStyle& style = ImGui::GetStyle();
-
-    style.ItemSpacing = ImVec2(ui.px(spacing), ui.px(spacing));
-    style.CellPadding.y = style.ItemSpacing.y / 2.f;
     app.ui = &ui;
     app.startWorkers(pool);
     app.setup(start.empty() ? StringView(u8".") : start);

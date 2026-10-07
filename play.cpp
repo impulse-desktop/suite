@@ -2320,9 +2320,8 @@ void Screen::draw() {
     ImGui::SetNextWindowPos(vp->Pos);
     ImGui::SetNextWindowSize(vp->Size);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.f);
     ImGui::Begin("##play", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBackground);
-    ImGui::PopStyleVar(2);
+    ImGui::PopStyleVar();
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImVec2 corner = ImGui::GetCursorScreenPos();
