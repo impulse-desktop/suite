@@ -324,7 +324,7 @@ namespace {
         void finish(bool ok);
         void keys();
         void draw();
-        void drawPlaces();
+        void drawPlaces(float height);
         void drawTable(float height);
         void drawGrid(float height);
         void drawLine();
@@ -1402,19 +1402,29 @@ void ChooseApp::keys() {
     }
 }
 
-void ChooseApp::drawPlaces() {
+// the places as the rows of a table, as the entries are, so that the two
+// blocks are padded alike: by the cell, none around
+void ChooseApp::drawPlaces(float height) {
+    if (!ImGui::BeginTable("places", 1, ImGuiTableFlags_ScrollY, ImVec2(ui->px(placesWidth), height))) {
+        return;
+    }
+
     for (size_t i = 0; i < places.length(); i++) {
         Place& place = *places[i];
         bool here = StringView(place.path) == StringView(dir);
 
+        ImGui::TableNextRow();
+        ImGui::TableSetColumnIndex(0);
         ImGui::PushID((int)i);
 
-        if (ImGui::Selectable((const char*)place.label.cStr(), here)) {
+        if (ImGui::Selectable((const char*)place.label.cStr(), here, ImGuiSelectableFlags_SpanAllColumns)) {
             go(StringView(place.path));
         }
 
         ImGui::PopID();
     }
+
+    ImGui::EndTable();
 }
 
 // the entries as rows: name, size, modified; a click selects, a double
@@ -1681,11 +1691,7 @@ void ChooseApp::draw() {
 
     float bodyH = -ImGui::GetFrameHeightWithSpacing();
 
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImGui::GetStyleColorVec4(ImGuiCol_WindowBg));
-    ImGui::BeginChild("places", ImVec2(ui->px(placesWidth), bodyH), ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoScrollbar);
-    drawPlaces();
-    ImGui::EndChild();
-    ImGui::PopStyleColor();
+    drawPlaces(bodyH);
     ImGui::SameLine();
     ImGui::BeginGroup();
 
