@@ -1402,10 +1402,6 @@ void ChooseApp::keys() {
 }
 
 void ChooseApp::drawPlaces() {
-    float g = ui->px(gap);
-
-    ImGui::Dummy(ImVec2(0.f, g));
-
     for (size_t i = 0; i < places.length(); i++) {
         Place& place = *places[i];
         bool here = StringView(place.path) == StringView(dir);
@@ -1664,13 +1660,17 @@ void ChooseApp::drawLine() {
     }
 }
 
+// the blocks are the gap from the edges and from each other; the places
+// are padded by it too, as the entries are by their cells
 void ChooseApp::draw() {
     ImGuiViewport* vp = ImGui::GetMainViewport();
+    ImVec2 spacing = ImGui::GetStyle().ItemSpacing;
     float g = ui->px(gap);
 
     ImGui::SetNextWindowPos(vp->Pos);
     ImGui::SetNextWindowSize(vp->Size);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(g, g));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(g, g));
     ImGui::Begin("##choose", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBackground);
 
     if (!title.empty()) {
@@ -1678,11 +1678,11 @@ void ChooseApp::draw() {
         ImGui::Spacing();
     }
 
-    float lineH = ImGui::GetFrameHeightWithSpacing() + g;
+    float lineH = ImGui::GetFrameHeight() + g;
     float bodyH = max(1.f, ImGui::GetContentRegionAvail().y - lineH);
 
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImGui::GetStyleColorVec4(ImGuiCol_WindowBg));
-    ImGui::BeginChild("places", ImVec2(ui->px(placesWidth), bodyH), 0, ImGuiWindowFlags_NoScrollbar);
+    ImGui::BeginChild("places", ImVec2(ui->px(placesWidth), bodyH), ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoScrollbar);
     drawPlaces();
     ImGui::EndChild();
     ImGui::PopStyleColor();
@@ -1701,8 +1701,9 @@ void ChooseApp::draw() {
     }
 
     ImGui::EndGroup();
-    ImGui::Dummy(ImVec2(0.f, g / 2.f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, spacing);
     drawLine();
+    ImGui::PopStyleVar();
 
     if (askOverwrite) {
         ImGui::OpenPopup("Replace");
@@ -1738,7 +1739,7 @@ void ChooseApp::draw() {
     }
 
     ImGui::End();
-    ImGui::PopStyleVar();
+    ImGui::PopStyleVar(2);
 }
 
 int mainChoose(ObjPool& pool, int argc, char** argv) {
