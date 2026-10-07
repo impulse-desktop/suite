@@ -24,6 +24,11 @@ build.includes += [
     "$(B)/shaders",
 ]
 
+# ImGui's codepoints 32-bit, for every unit that includes it: the text
+# editor (ext/textedit) keeps a file's characters in ImWchar, and nothing
+# beyond the Basic Multilingual Plane is lost there
+build.cppflags += ["-DIMGUI_USE_WCHAR32"]
+
 flags.allow({
     "filter": {"descr": "glob restricting which scenarios build", "default": ""},
     "shard": {"descr": "K/N: run only the K-th of N stable slices of the scenarios (0-based)", "default": ""},
@@ -150,6 +155,16 @@ imgui = library(
     deps=platform_deps,
 )
 
+# the text editor widget of im edit (ext/textedit), a Dear ImGui widget of
+# its own with imgui_internal.h behind it
+textedit = library(
+    name="textedit",
+    srcs=["$(S)/ext/textedit/TextEditor.cpp"],
+    includes=["$(S)/ext/textedit"],
+    public_cppflags=["-I$(S)/ext/textedit"],
+    deps=[imgui],
+)
+
 
 # ---- the image decoder: ImageMagick as a pure wasm module, compiled to C --
 # ext/decode/decode.wasm (ImageMagick and its coders built for wasm32-none,
@@ -269,7 +284,7 @@ if darwin:
 # the vendored libraries' own dependencies come along by name: an imported
 # graph hands over its archive, not what the archive wants linked
 im_deps = [
-    *shader_rules, codes, imgui, pdf, djvu, decode, plt, libstd,
+    *shader_rules, codes, imgui, textedit, pdf, djvu, decode, plt, libstd,
     *platform_deps, *encoders, *media, system,
 ]
 
@@ -339,7 +354,7 @@ imgui_frames_test = program(
 )
 
 
-tools = ["view", "play", "read", "ui"] if darwin else ["screenshot", "view", "play", "read", "ui"]
+tools = ["view", "play", "read", "edit", "ui"] if darwin else ["screenshot", "view", "play", "read", "edit", "ui"]
 
 links = command(
     name="links",

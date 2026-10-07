@@ -27,7 +27,7 @@ SKIPPED = 77
 SCREENSHOT = "imscreenshot"
 VIEW = "imview"
 UI = "imui"
-TOOLS = {"screenshot": SCREENSHOT, "view": VIEW, "play": "implay", "read": "imread", "ui": UI}
+TOOLS = {"screenshot": SCREENSHOT, "view": VIEW, "play": "implay", "read": "imread", "edit": "imedit", "ui": UI}
 
 # the evdev codes the scenarios press
 KEY_ESC = 1
@@ -43,6 +43,8 @@ KEY_R = 19
 KEY_ENTER = 28
 KEY_LEFTCTRL = 29
 KEY_A = 30
+KEY_S = 31
+KEY_D = 32
 KEY_F = 33
 KEY_G = 34
 KEY_J = 36
@@ -62,6 +64,37 @@ KEY_PAGEDOWN = 109
 BTN_LEFT = 272
 BTN_RIGHT = 273
 BTN_MIDDLE = 274
+
+# the keys that type each character on the us layout, for type(): the
+# code and whether Shift is held
+TYPING = {}
+for char, code in zip("1234567890-=", range(2, 14)):
+    TYPING[char] = (code, False)
+for char, code in zip("!@#$%^&*()_+", range(2, 14)):
+    TYPING[char] = (code, True)
+for char, code in zip("qwertyuiop[]", range(16, 28)):
+    TYPING[char] = (code, False)
+    TYPING[char.upper()] = (code, True)
+TYPING["{"] = (26, True)
+TYPING["}"] = (27, True)
+for char, code in zip("asdfghjkl;'", range(30, 41)):
+    TYPING[char] = (code, False)
+    TYPING[char.upper()] = (code, True)
+TYPING[":"] = (39, True)
+TYPING['"'] = (40, True)
+TYPING["`"] = (41, False)
+TYPING["~"] = (41, True)
+TYPING["\\"] = (43, False)
+TYPING["|"] = (43, True)
+for char, code in zip("zxcvbnm,./", range(44, 54)):
+    TYPING[char] = (code, False)
+    TYPING[char.upper()] = (code, True)
+TYPING["<"] = (51, True)
+TYPING[">"] = (52, True)
+TYPING["?"] = (53, True)
+TYPING[" "] = (57, False)
+TYPING["\n"] = (28, False)
+TYPING["\t"] = (15, False)
 
 
 class Skip(Exception):
@@ -333,6 +366,16 @@ class Session:
             time.sleep(hold)
         self.key(code, 0, client=client)
         time.sleep(0.05)
+
+    def type(self, text):
+        """Type the text key by key, as the us layout has it."""
+        for char in text:
+            code, shifted = TYPING[char]
+            if shifted:
+                self.key(KEY_LEFTSHIFT, 1)
+            self.tap(code)
+            if shifted:
+                self.key(KEY_LEFTSHIFT, 0)
 
     def pointer(self, x, y, app_id=None):
         """The pointer to x,y of the window."""
