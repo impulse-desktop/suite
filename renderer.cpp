@@ -1743,7 +1743,8 @@ bool MetalRenderer::endFrame(ImDrawData* draw) {
         }
         Flight* flight = smallObjects->make<Flight>(drawn);
         drawn.clear();
-        const float clear[4] = {srgbTable[25], srgbTable[25], srgbTable[25], 1.f};
+        // the base where nothing is drawn: black, the windows paint their own
+        const float clear[4] = {0.f, 0.f, 0.f, 1.f};
         tiles.compose(draw, Vector<Layer>(), (u32)drawable.texture.width, (u32)drawable.texture.height, wide, ++frames, clear);
         stamp(command);
         encode(command, drawable.texture, wide ? ShaderOutput::WideLinear : ShaderOutput::Srgb);
@@ -3384,7 +3385,8 @@ void Gpu::switchMode(bool wide) {
 void Gpu::frameRender(ImDrawData* draw) {
     Sync& sync = present.syncs.mut(present.syncIndex);
     Frame& fd = present.frames.mut(present.frameIndex);
-    const float clear[4] = {srgbTable[25], srgbTable[25], srgbTable[25], 1.f};
+    // the base where nothing is drawn: black, the windows paint their own
+    const float clear[4] = {0.f, 0.f, 0.f, 1.f};
 
     vkc(vkResetFences(device, 1, &fd.fence));
     vkc(vkResetCommandPool(device, fd.commandPool, 0));
