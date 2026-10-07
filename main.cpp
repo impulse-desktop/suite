@@ -1,4 +1,5 @@
 #include "edit.h"
+#include "choose.h"
 #include "play.h"
 #include "read.h"
 #include "view.h"
@@ -36,6 +37,7 @@ namespace {
         {"play", mainPlay},
         {"read", mainRead},
         {"edit", mainEdit},
+        {"choose", mainChoose},
         {"ui", mainUiDemo},
     };
 

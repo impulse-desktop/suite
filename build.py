@@ -358,7 +358,7 @@ imgui_frames_test = program(
 )
 
 
-tools = ["view", "play", "read", "edit", "ui"] if darwin else ["screenshot", "view", "play", "read", "edit", "ui"]
+tools = ["view", "play", "read", "edit", "choose", "ui"] if darwin else ["screenshot", "view", "play", "read", "edit", "choose", "ui"]
 
 links = command(
     name="links",
