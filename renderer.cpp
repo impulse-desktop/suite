@@ -2972,6 +2972,10 @@ void Gpu::createSwapchain(u32 width, u32 height) {
         fail(StringView(u8"vulkan cannot write this surface from compute"));
     }
 
+    if (!(caps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR)) {
+        fail(StringView(u8"vulkan cannot composite this surface with its alpha"));
+    }
+
     VkExtent2D extent = caps.currentExtent;
 
     if (extent.width == 0xffffffffu) {
@@ -2997,10 +3001,9 @@ void Gpu::createSwapchain(u32 width, u32 height) {
     ci.imageUsage = VK_IMAGE_USAGE_STORAGE_BIT;
     ci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     ci.preTransform = caps.currentTransform;
-    // the frame is premultiplied with its alpha, and the window system shows
-    // what is behind where the alpha is short; a surface that cannot takes
-    // the colour as it is and shows nothing behind
-    ci.compositeAlpha = caps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR ? VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR : caps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR ? VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR : VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+    // the frame is premultiplied with its alpha; where the alpha is short
+    // the window system shows what is behind
+    ci.compositeAlpha = VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR;
     ci.presentMode = VK_PRESENT_MODE_FIFO_KHR;
     ci.clipped = VK_TRUE;
     ci.oldSwapchain = present.swapchain;
@@ -3008,15 +3011,6 @@ void Gpu::createSwapchain(u32 width, u32 height) {
     VkSwapchainKHR swapchain = VK_NULL_HANDLE;
 
     VkResult made = vkCreateSwapchainKHR(device, &ci, alloc, &swapchain);
-
-    // the surface may lack the format with alpha in this colour space (a
-    // 10-bit one, say): then without the alpha; the old swapchain is retired
-    // by the first try whatever its result
-    if (made != VK_SUCCESS && ci.compositeAlpha != VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR) {
-        ci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-        ci.oldSwapchain = VK_NULL_HANDLE;
-        made = vkCreateSwapchainKHR(device, &ci, alloc, &swapchain);
-    }
 
     if (chaos->vulkanAt(StringView(u8"swapchain"), made) < 0) {
         if (made == VK_SUCCESS) {
