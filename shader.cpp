@@ -2295,21 +2295,37 @@ namespace {
             Node* noise = dither(k);
             Node* visible = g.lt(0., acc[3]);
 
+            // A tile the video covers whole with an alpha of 1 is opaque, and
+            // its pixel is encoded as it is. At the edge of the video, or
+            // under one with an alpha, the window system takes the pixel
+            // premultiplied in the encoded domain: the colour unweighed,
+            // encoded, weighed by the alpha again, nothing where the alpha
+            // is zero. The readback takes the colour straight beside its
+            // alpha either way.
+            bool opaque = o.tiles == ShaderTiles::Inside && layer[3]->op == Op::Const && layer[3]->value == 1.;
+            bool coded = o.output == ShaderOutput::Srgb || o.output == ShaderOutput::Pq;
+
             for (int c = 0; c < 3; c++) {
+                Node* straight = opaque ? acc[c] : g.select(visible, g.div(acc[c], acc[3]), g.f(0.));
+
                 if (o.output == ShaderOutput::Srgb) {
-                    Node* v = g.clamp(acc[c], 0., 1.);
+                    Node* v = g.clamp(straight, 0., 1.);
 
                     k.encoded[c] = g.add(g.select(g.le(v, 0.0031308), g.mul(v, 12.92), g.sub(g.mul(g.pow(v, 1. / 2.4), 1.055), 0.055)), g.mul(noise, 1. / 255.));
                 } else if (o.output == ShaderOutput::Pq) {
-                    Node* y = g.pow(g.clamp(g.mul(g.mul(acc[c], g.frame(4, Kind::Float, 100000.)), 1. / 10000.), 0., 1.), 2610. / 16384.);
+                    Node* y = g.pow(g.clamp(g.mul(g.mul(straight, g.frame(4, Kind::Float, 100000.)), 1. / 10000.), 0., 1.), 2610. / 16384.);
 
                     k.encoded[c] = g.add(g.pow(g.div(g.add(g.mul(y, 18.8515625), 0.8359375), g.add(g.mul(y, 18.6875), 1.)), 2523. / 32.), g.mul(noise, 1. / 1023.));
                 } else {
-                    k.encoded[c] = g.select(visible, g.div(acc[c], acc[3]), g.f(0.));
+                    k.encoded[c] = straight;
+                }
+
+                if (coded && !opaque) {
+                    k.encoded[c] = g.mul(k.encoded[c], acc[3]);
                 }
             }
 
-            k.encoded[3] = o.output == ShaderOutput::Srgb || o.output == ShaderOutput::Pq ? g.f(1.) : g.select(visible, acc[3], g.f(0.));
+            k.encoded[3] = coded && opaque ? g.f(1.) : g.select(visible, acc[3], g.f(0.));
         }
     };
 
