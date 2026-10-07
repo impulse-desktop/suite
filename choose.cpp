@@ -287,6 +287,9 @@ namespace {
         bool showHidden = false;
         bool grid = false;
         bool scrollToCursor = false;
+        // the spacing of the style, kept for within the blocks: between
+        // the blocks the window has the gap instead
+        ImVec2 itemSpacing;
         // the one line: the directory, then what is typed after its slash,
         // a name to look for or the name to save under
         char field[fieldBytes] = {};
@@ -1403,6 +1406,8 @@ void ChooseApp::keys() {
 }
 
 void ChooseApp::drawPlaces() {
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, itemSpacing);
+
     for (size_t i = 0; i < places.length(); i++) {
         Place& place = *places[i];
         bool here = StringView(place.path) == StringView(dir);
@@ -1415,12 +1420,26 @@ void ChooseApp::drawPlaces() {
 
         ImGui::PopID();
     }
+
+    ImGui::PopStyleVar();
 }
 
 // the entries as rows: name, size, modified; a click selects, a double
-// click enters or takes
+// click enters or takes; a black ring on the perimeter of the block, the
+// rows within it
 void ChooseApp::drawTable(float height) {
-    if (!ImGui::BeginTable("entries", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchProp, ImVec2(0.f, height))) {
+    float r = ui->px(ring);
+    ImVec2 corner = ImGui::GetCursorScreenPos();
+    float width = ImGui::GetContentRegionAvail().x;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+
+    dl->AddRect(ImVec2(corner.x + r / 2.f, corner.y + r / 2.f), ImVec2(corner.x + width - r / 2.f, corner.y + height - r / 2.f), IM_COL32(0, 0, 0, 255), 0.f, 0, r);
+    ImGui::SetCursorScreenPos(ImVec2(corner.x + r, corner.y + r));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, itemSpacing);
+
+    if (!ImGui::BeginTable("entries", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchProp, ImVec2(width - 2.f * r, height - 2.f * r))) {
+        ImGui::PopStyleVar();
+
         return;
     }
 
@@ -1480,6 +1499,9 @@ void ChooseApp::drawTable(float height) {
     }
 
     ImGui::EndTable();
+    ImGui::PopStyleVar();
+    ImGui::SetCursorScreenPos(ImVec2(corner.x, corner.y + height));
+    ImGui::Dummy(ImVec2(width, 0.f));
 }
 
 // the entries as cells: a thumbnail for an image, its type for another
@@ -1669,8 +1691,9 @@ void ChooseApp::drawLine() {
 // are padded by it too, as the entries are by their cells
 void ChooseApp::draw() {
     ImGuiViewport* vp = ImGui::GetMainViewport();
-    ImVec2 spacing = ImGui::GetStyle().ItemSpacing;
     float g = ui->px(gap);
+
+    itemSpacing = ImGui::GetStyle().ItemSpacing;
 
     ImGui::SetNextWindowPos(vp->Pos);
     ImGui::SetNextWindowSize(vp->Size);
@@ -1706,7 +1729,7 @@ void ChooseApp::draw() {
     }
 
     ImGui::EndGroup();
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, spacing);
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, itemSpacing);
     drawLine();
     ImGui::PopStyleVar();
 
