@@ -7,8 +7,11 @@
 
 #include <std/ios/sys.h>
 #include <std/sys/crt.h>
+#include <std/alg/defer.h>
+#include <std/ios/input.h>
 #include <std/sys/throw.h>
 #include <std/alg/minmax.h>
+#include <std/ios/output.h>
 #include <std/lib/vector.h>
 #include <std/str/builder.h>
 #include <std/thr/runable.h>
@@ -24,6 +27,7 @@
 #include <plt/poller.h>
 #include <plt/window.h>
 #include <plt/platform.h>
+#include <plt/clipboard.h>
 #include <plt/loop_wake.h>
 #include <imgui_internal.h>
 
@@ -342,6 +346,20 @@ namespace {
         void cancel();
     };
 
+    // The selection, read on a fiber of its own: a read parks its fiber
+    // until the owner has written it through the compositor, and the tool's
+    // fiber may not park in the middle of a frame.
+    struct ClipboardFetch final: Runable {
+        UiImpl* ui;
+
+        explicit ClipboardFetch(UiImpl* ui);
+        void run() override;
+    };
+
+    struct FiberStack {
+        alignas(16) u8 bytes[plt::lightFiberStack];
+    };
+
     struct UiImpl final: Ui, plt::InputSink, plt::FrameCallback, plt::WindowEvents, Runable {
         ObjPool* pool = nullptr;
         plt::Platform* platform_ = nullptr;
@@ -370,6 +388,17 @@ namespace {
         bool closePending = false;
         bool gone = false;
         bool parked = false;
+        // the clipboard as last read, what ImGui pastes; a paste chord is
+        // held back until a fresh read lands, then fed with its modifiers
+        Buffer clipboardCache;
+        ClipboardFetch* clipboardFetch = nullptr;
+        FiberStack* clipboardStack = nullptr;
+        bool clipboardFetching = false;
+        bool clipboardAgain = false;
+        bool pasteHeld = false;
+        ImGuiKey heldKey = ImGuiKey_None;
+        u16 heldModifiers = 0;
+        u16 modifiers = 0;
 
         using Ui::px;
         float px(Design d) override;
@@ -410,7 +439,17 @@ namespace {
 
         void tendTextures();
         void dropTextures();
+
+        void fetchClipboard();
+        void clipboardArrived(bool ok, Buffer& got);
+        void setClipboardText(const char* text);
+        const char* clipboardText();
+        void applyModifiers(u16 mask);
     };
+
+    bool pastes(const plt::KeyInput& input, ImGuiKey key) {
+        return (key == ImGuiKey_V && (input.modifiers & (plt::InputControl | plt::InputSuper)) != 0) || (key == ImGuiKey_Insert && (input.modifiers & plt::InputShift) != 0);
+    }
 }
 
 CallFrame::CallFrame(UiImpl* ui_)
@@ -426,6 +465,112 @@ void CallFrame::ready() {
     if (!ui->finished && !ui->gone) {
         ui->window->requestFrame();
     }
+}
+
+ClipboardFetch::ClipboardFetch(UiImpl* ui_)
+    : ui(ui_)
+{
+}
+
+// reads the selection whole, again when a read was asked meanwhile
+void ClipboardFetch::run() {
+    do {
+        Buffer got;
+        bool ok = true;
+
+        ui->clipboardAgain = false;
+
+        try {
+            Input* in = ui->window->secondary()->read();
+
+            STD_DEFER {
+                delete in;
+            };
+
+            in->readAll(got);
+        } catch (...) {
+            ok = false;
+            got = Buffer(Exception::current());
+        }
+
+        ui->clipboardArrived(ok, got);
+    } while (ui->clipboardAgain);
+
+    ui->clipboardFetching = false;
+}
+
+// a read on the fetch fiber, which runs on the platform's thread between
+// the loop's callbacks, never inside the tool's frame; one at a time, a
+// second request makes the running one read again
+void UiImpl::fetchClipboard() {
+    if (gone || !window) {
+        return;
+    }
+
+    if (clipboardFetching) {
+        clipboardAgain = true;
+
+        return;
+    }
+
+    clipboardFetching = true;
+    platform_->scheduler()->spawn(*clipboardFetch, clipboardStack->bytes, sizeof(clipboardStack->bytes));
+}
+
+void UiImpl::clipboardArrived(bool ok, Buffer& got) {
+    if (clipboardAgain) {
+        return;
+    }
+
+    if (ok) {
+        clipboardCache.xchg(got);
+        TRACE(this, StringView(StringBuilder() << StringView(u8"clipboard read bytes=") << (i64)clipboardCache.length()));
+    } else {
+        TRACE(this, StringView(StringBuilder() << StringView(u8"clipboard read failed: ") << StringView(got)));
+    }
+
+    if (!pasteHeld) {
+        return;
+    }
+
+    pasteHeld = false;
+
+    if (ok && !gone) {
+        ImGuiIO& io = ImGui::GetIO();
+
+        applyModifiers(heldModifiers);
+        io.AddKeyEvent(heldKey, true);
+        io.AddKeyEvent(heldKey, false);
+        applyModifiers(modifiers);
+        window->requestFrame();
+    }
+}
+
+void UiImpl::setClipboardText(const char* text) {
+    size_t length = text ? strlen(text) : 0;
+    Output* out = window->secondary()->write();
+
+    STD_DEFER {
+        delete out;
+    };
+
+    out->write(text, length);
+    out->finish();
+    clipboardCache = Buffer(StringView((const u8*)text, length));
+    TRACE(this, StringView(StringBuilder() << StringView(u8"clipboard set bytes=") << (i64)length));
+}
+
+const char* UiImpl::clipboardText() {
+    return clipboardCache.cStr();
+}
+
+void UiImpl::applyModifiers(u16 mask) {
+    ImGuiIO& io = ImGui::GetIO();
+
+    io.AddKeyEvent(ImGuiMod_Ctrl, (mask & plt::InputControl) != 0);
+    io.AddKeyEvent(ImGuiMod_Shift, (mask & plt::InputShift) != 0);
+    io.AddKeyEvent(ImGuiMod_Alt, (mask & plt::InputAlt) != 0);
+    io.AddKeyEvent(ImGuiMod_Super, (mask & plt::InputSuper) != 0);
 }
 
 void CallFrame::schedule(float seconds) {
@@ -471,8 +616,27 @@ void UiImpl::key(const plt::KeyInput& input) {
         sysE << StringView(u8"im key: ") << (i64)key << (input.action == plt::InputAction::Press ? StringView(u8" press") : StringView(u8" release")) << StringView(u8" down ") << (i64)ImGui::IsKeyDown(key) << endL;
     }
 
+    modifiers = input.modifiers;
+
     if (key != ImGuiKey_None) {
         bool press = input.action == plt::InputAction::Press;
+
+        // a paste waits for the selection to be read (clipboardArrived
+        // feeds the chord then); the key's own release goes with it
+        if (press && pastes(input, key)) {
+            heldKey = key;
+            heldModifiers = input.modifiers;
+            pasteHeld = true;
+            fetchClipboard();
+
+            return;
+        }
+
+        if (!press && key == heldKey) {
+            heldKey = ImGuiKey_None;
+
+            return;
+        }
 
         if (press && ImGui::IsKeyDown(key)) {
             io.AddKeyEvent(key, false);
@@ -536,6 +700,11 @@ void UiImpl::focus(bool focused) {
     }
 
     ImGui::GetIO().AddFocusEvent(focused);
+
+    // another client may have set the selection while the focus was away
+    if (focused) {
+        fetchClipboard();
+    }
 }
 
 void UiImpl::pointerPresence(bool present) {
@@ -608,6 +777,14 @@ void UiImpl::init(const UiOptions& options) {
     pio.Platform_CancelFrameTimerFn = [](void* timer) {
         ((CallFrame*)timer)->cancel();
     };
+    pio.Platform_GetClipboardTextFn = [](ImGuiContext* ctx) -> const char* {
+        return ((UiImpl*)ctx->IO.BackendPlatformUserData)->clipboardText();
+    };
+    pio.Platform_SetClipboardTextFn = [](ImGuiContext* ctx, const char* text) {
+        ((UiImpl*)ctx->IO.BackendPlatformUserData)->setClipboardText(text);
+    };
+    clipboardFetch = pool->make<ClipboardFetch>(this);
+    clipboardStack = pool->make<FiberStack>();
     pio.Platform_SetMouseCursorFn = [](ImGuiContext* ctx, ImGuiMouseCursor cursor) {
         UiImpl* ui = (UiImpl*)ctx->IO.BackendPlatformUserData;
         plt::PointerIcon wanted = pointerIcon(cursor);

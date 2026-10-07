@@ -1,11 +1,12 @@
 """The editor: `imedit FILE` opens the file, or starts one that is not
-there; typing changes it, Ctrl+S writes it as typed, Ctrl+Q leaves a
-clean file at once and asks over an unsaved one, where Discard throws
-the changes away and Save keeps them; a window closed from outside with
-unsaved changes leaves them next to the file under the backup name; the
+there; typing changes it, a copy and a paste go through the compositor's
+clipboard, Ctrl+S writes the file as typed, Ctrl+Q leaves a clean file
+at once and asks over an unsaved one, where Discard throws the changes
+away and Save keeps them; a window closed from outside with unsaved
+changes leaves them next to the file under the backup name; the
 language comes from the extension."""
 
-from session import KEY_D, KEY_LEFTCTRL, KEY_Q, KEY_S, Session
+from session import KEY_A, KEY_C, KEY_D, KEY_END, KEY_LEFTCTRL, KEY_Q, KEY_S, KEY_V, Session
 
 
 def chord(s, code):
@@ -30,9 +31,17 @@ with Session("edit", tool="edit") as s:
     s.said("language None")
     s.type("hello, world\nline two")
     s.said("modified")
+    # the clipboard goes through the compositor: Ctrl+A, Ctrl+C set the
+    # selection, End, Ctrl+V read it back and paste it at the end
+    chord(s, KEY_A)
+    chord(s, KEY_C)
+    s.said("clipboard set bytes=21")
+    s.tap(KEY_END)
+    chord(s, KEY_V)
+    s.said("clipboard read bytes=21")
     chord(s, KEY_S)
-    s.said("saved notes.txt bytes=21")
-    assert notes.read_text() == "hello, world\nline two", f"the file is not what was typed: {notes.read_text()!r}"
+    s.said("saved notes.txt bytes=42")
+    assert notes.read_text() == "hello, world\nline two" * 2, f"the file is not what was typed and pasted: {notes.read_text()!r}"
     chord(s, KEY_Q)
     s.said("quit")
     s.gone()
