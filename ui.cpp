@@ -258,13 +258,16 @@ namespace {
     // The style of every tool. The spacing is 8 both ways; the cell padding
     // is half of it, as a Selectable's band is the spacing taller than its
     // text and a row of a table twice the cell padding taller, so the band
-    // fills the row; a window has no border.
+    // fills the row; a window has no border, and its background is opaque:
+    // the frame goes to the window system with its alpha, and the window
+    // is not to show what is behind it.
     static ImGuiStyle scaledStyle(float scale) {
         ImGuiStyle style;
 
         style.ItemSpacing = ImVec2(8.f, 8.f);
         style.CellPadding.y = style.ItemSpacing.y / 2.f;
         style.WindowBorderSize = 0.f;
+        style.Colors[ImGuiCol_WindowBg].w = 1.f;
         style.ScaleAllSizes(scale);
         style.FontScaleMain = scale;
 
