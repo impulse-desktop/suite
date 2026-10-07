@@ -1682,7 +1682,7 @@ void ChooseApp::draw() {
     float bodyH = -ImGui::GetFrameHeightWithSpacing();
 
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImGui::GetStyleColorVec4(ImGuiCol_WindowBg));
-    ImGui::BeginChild("places", ImVec2(ui->px(placesWidth), bodyH), 0, ImGuiWindowFlags_NoScrollbar);
+    ImGui::BeginChild("places", ImVec2(ui->px(placesWidth), bodyH), ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoScrollbar);
     drawPlaces();
     ImGui::EndChild();
     ImGui::PopStyleColor();
