@@ -2333,11 +2333,9 @@ void Screen::draw() {
 
     if (panel) {
         ImGui::SetCursorScreenPos(corner);
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImGui::GetStyleColorVec4(ImGuiCol_WindowBg));
-        ImGui::BeginChild("panel", ImVec2(side, room.y - bar), ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoScrollbar);
+        ImGui::BeginChild("panel", ImVec2(side, room.y - bar), 0, ImGuiWindowFlags_NoScrollbar);
         drawPanel();
         ImGui::EndChild();
-        ImGui::PopStyleColor();
     }
 
     if (shown && width >= 1.f && height >= 1.f) {
