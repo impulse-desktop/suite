@@ -702,8 +702,11 @@ void ChooseApp::setup(StringView start) {
     go(start);
 }
 
-// the home, the user's directories of ~/.config/user-dirs.dirs that are
-// there, and the root
+// The places GNOME and macOS put first: the home, then Desktop,
+// Documents, Downloads, Music, Pictures and Videos (Movies on a Mac), each
+// where ~/.config/user-dirs.dirs says or under the home by that name, each
+// if it is there; the applications on a Mac; then the volumes mounted for
+// the user, and the root.
 void ChooseApp::readPlaces() {
     const char* home = getenv("HOME");
     Buffer homePath = normalize(StringView(home ? home : "/"));
@@ -728,6 +731,23 @@ void ChooseApp::readPlaces() {
 
     add(StringView(u8"Home"), StringView(homePath));
 
+    // the user's directories as user-dirs.dirs names them, keyed by XDG_<KEY>_DIR
+    struct Named {
+        StringView key;
+        StringView name;
+        StringView macName;
+        Buffer path;
+    };
+
+    Named standard[] = {
+        {StringView(u8"DESKTOP"), StringView(u8"Desktop"), StringView(u8"Desktop"), Buffer()},
+        {StringView(u8"DOCUMENTS"), StringView(u8"Documents"), StringView(u8"Documents"), Buffer()},
+        {StringView(u8"DOWNLOAD"), StringView(u8"Downloads"), StringView(u8"Downloads"), Buffer()},
+        {StringView(u8"MUSIC"), StringView(u8"Music"), StringView(u8"Music"), Buffer()},
+        {StringView(u8"PICTURES"), StringView(u8"Pictures"), StringView(u8"Pictures"), Buffer()},
+        {StringView(u8"VIDEOS"), StringView(u8"Videos"), StringView(u8"Movies"), Buffer()},
+    };
+
     if (home) {
         Buffer config = joinPath(StringView(homePath), StringView(u8".config/user-dirs.dirs"));
         Buffer text;
@@ -749,7 +769,7 @@ void ChooseApp::readPlaces() {
 
             from = i + 1;
 
-            if (!line.startsWith(StringView(u8"XDG_")) || line.length() < 8) {
+            if (!line.startsWith(StringView(u8"XDG_"))) {
                 continue;
             }
 
@@ -759,10 +779,11 @@ void ChooseApp::readPlaces() {
                 eq++;
             }
 
-            if (eq + 2 >= line.length() || line[eq + 1] != '"' || line[line.length() - 1] != '"') {
+            if (eq + 2 >= line.length() || line[eq + 1] != '"' || line[line.length() - 1] != '"' || eq < 9) {
                 continue;
             }
 
+            StringView key(line.begin() + 4, line.begin() + eq - 4);
             StringView value(line.begin() + eq + 2, line.end() - 1);
             StringBuilder path;
 
@@ -772,9 +793,58 @@ void ChooseApp::readPlaces() {
                 path << value;
             }
 
-            Buffer plain = normalize(StringView(path));
+            for (Named& named : standard) {
+                if (named.key == key) {
+                    named.path = normalize(StringView(path));
+                }
+            }
+        }
+    }
 
-            add(nameOf(StringView(plain)), StringView(plain));
+    for (Named& named : standard) {
+        if (named.path.empty()) {
+            named.path = joinPath(StringView(homePath), named.name);
+        }
+
+        if (!isDir(StringView(named.path))) {
+            named.path = joinPath(StringView(homePath), named.macName);
+        }
+
+        add(nameOf(StringView(named.path)), StringView(named.path));
+    }
+
+#if defined(__APPLE__)
+    add(StringView(u8"Applications"), StringView(u8"/Applications"));
+#endif
+
+    // the volumes mounted for the user, where the desktops put them
+    const char* user = getenv("USER");
+    StringView roots[] = {
+        StringView(u8"/run/media/"),
+        StringView(u8"/media/"),
+        StringView(u8"/Volumes"),
+    };
+
+    for (StringView root : roots) {
+        Buffer base(root);
+
+        if (root.endsWith(StringView(u8"/")) && user) {
+            base = joinPath(root, StringView(user));
+        }
+
+        if (!isDir(StringView(base))) {
+            continue;
+        }
+
+        try {
+            listDir(StringView(base), [&](const TPathInfo& info) {
+                if (info.isDir && !info.item.empty() && info.item[0] != '.') {
+                    Buffer path = joinPath(StringView(base), info.item);
+
+                    add(info.item, StringView(path));
+                }
+            });
+        } catch (...) {
         }
     }
 
