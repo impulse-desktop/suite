@@ -232,9 +232,11 @@ bool TextEditor::render(const char* title, const ImVec2& size, ImGuiChildFlags c
 		}
 	}
 
+	// [suite] the spacing goes back before EndChild lays the child out, so
+	// that the editor leaves the style's spacing after itself, as any item
+	ImGui::PopStyleVar();
 	ImGui::EndChild();
 	ImGui::PopStyleColor();
-	ImGui::PopStyleVar();
 
 	// handle change tracking if there is a callback in place
 	if (delayedChangeCallback && delayedChangeDetected) {

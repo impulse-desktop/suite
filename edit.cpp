@@ -217,7 +217,7 @@ void EditApp::draw() {
     ImGui::SetNextWindowSize(vp->Size);
     ImGui::Begin("##edit", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoSavedSettings);
 
-    float statusH = ImGui::GetFrameHeightWithSpacing();
+    float statusH = ImGui::GetTextLineHeightWithSpacing();
 
     if (editor.Render("##editor", ImVec2(0.f, -statusH))) {
         ui->requestFrame();
@@ -247,10 +247,8 @@ void EditApp::draw() {
     StringView rightText(right);
     ImVec2 rightSize = ImGui::CalcTextSize((const char*)rightText.begin(), (const char*)rightText.end());
 
-    ImGui::SetCursorPosX(style.FramePadding.x);
-    ImGui::AlignTextToFramePadding();
     ImGui::TextUnformatted((const char*)leftText.begin(), (const char*)leftText.end());
-    ImGui::SameLine(vp->Size.x - rightSize.x - style.FramePadding.x);
+    ImGui::SameLine(vp->Size.x - style.WindowPadding.x - rightSize.x);
     ImGui::TextUnformatted((const char*)rightText.begin(), (const char*)rightText.end());
 
     if (asking) {
