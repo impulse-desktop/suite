@@ -3,8 +3,8 @@ error; a path that is not there, a directory without images or one that
 cannot be read leaves the list empty, the path's trouble written at its
 top; a file no coder takes or a truncated one stays in the list with its
 error in place of its thumbnail and in the properties panel, its
-neighbours showing all the same; a Vulkan that fails ends the tool with
-the error."""
+neighbours showing all the same; a file that is no image by its bytes is
+not in the list; a Vulkan that fails ends the tool with the error."""
 
 import os
 
@@ -39,10 +39,12 @@ with Session("view_errors", tool="view") as s:
 
     pics = s.artifacts / "pics"
     pics.mkdir()
-    (pics / "bad.png").write_bytes(os.urandom(4096))
+    # a PNG by its first bytes, which is what makes the list, and garbage after
+    (pics / "bad.png").write_bytes(b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR" + os.urandom(4096))
     write_png(pics / "good.png", 64, 48, (255, 0, 0))
     whole = png(64, 48, bytes((0, 255, 0)) * (64 * 48))
     (pics / "trunc.png").write_bytes(whole[: len(whole) * 2 // 3])
+    (pics / "notes.png").write_bytes(b"not an image at all\n")
     s.launch(str(pics))
     s.focus()
     s.said("listed 3")

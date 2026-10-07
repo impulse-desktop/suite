@@ -255,10 +255,14 @@ def wasm_library(name, module, shards, runtime):
 
 # the image decoder with the runtime, then the page engines: PDFium
 # (ext/pdf) and DjVuLibre (ext/djvu), the reader's, with the same
-# exports under their own prefix (see their READMEs)
+# exports under their own prefix (see their READMEs), and the MIME
+# engine
 decode = wasm_library("decode", "$(S)/ext/decode/decode.wasm", 16, True)
 pdf = wasm_library("pdf", "$(S)/ext/pdf/pdf.wasm", 8, False)
 djvu = wasm_library("djvu", "$(S)/ext/djvu/djvu.wasm", 4, False)
+# libmagic (ext/magic), the viewer's MIME type of a file; under the name
+# mime, as the realm may carry libmagic's own magic.h
+mime = wasm_library("mime", "$(S)/ext/magic/magic.wasm", 4, False)
 
 
 # Linux builds every tool over Vulkan; macOS the runtime's tools over Metal.
@@ -284,7 +288,7 @@ if darwin:
 # the vendored libraries' own dependencies come along by name: an imported
 # graph hands over its archive, not what the archive wants linked
 im_deps = [
-    *shader_rules, codes, imgui, textedit, pdf, djvu, decode, plt, libstd,
+    *shader_rules, codes, imgui, textedit, pdf, djvu, mime, decode, plt, libstd,
     *platform_deps, *encoders, *media, system,
 ]
 

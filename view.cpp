@@ -6,6 +6,7 @@
 #include "timing.h"
 #include "decoder.h"
 
+#include <std/sys/fd.h>
 #include <std/sys/fs.h>
 #include <std/ios/sys.h>
 #include <std/sys/crt.h>
@@ -24,9 +25,27 @@
 #include <math.h>
 #include <time.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <imgui.h>
 #include <string.h>
 #include <sys/stat.h>
+
+// libmagic, as wasm2c turned its wasm module into C (ext/magic, under the
+// name mime): the MIME type of a file's first bytes, so a listing takes
+// every file that is an image of any kind, whatever the decoder then
+// makes of it. A trap throws out of the module through the handler
+// decoder.cpp defines.
+#define WASM_RT_CORE_TYPES_DEFINED
+typedef int8_t s8;
+typedef int16_t s16;
+typedef int32_t s32;
+typedef int64_t s64;
+typedef float f32;
+typedef double f64;
+
+extern "C" {
+#include <mime.h>
+}
 
 using namespace stl;
 
@@ -113,62 +132,111 @@ namespace {
         return image;
     }
 
-    bool imageName(StringView name) {
-        static const char* const extensions[] = {
-            "png",
-            "jpg",
-            "jpeg",
-            "jpe",
-            "webp",
-            "tif",
-            "tiff",
-            "jp2",
-            "j2k",
-            "jxl",
-            "gif",
-            "bmp",
-            "pnm",
-            "ppm",
-            "pgm",
-            "pbm",
-            "pam",
-            "tga",
-            "pcx",
-            "sgi",
-            "miff",
-        };
-        size_t dot = name.length();
+    // the first bytes of a file the MIME engine looks at; every format
+    // names itself well within them
+    constexpr size_t mimeHeadBytes = 64 * 1024;
+    constexpr size_t mimeTypeLimit = 256;
 
-        while (dot > 0 && name[dot - 1] != '.') {
-            dot--;
+    // the MIME engine: an instance of libmagic, made on its first question;
+    // one that traps is dropped, and the next question makes another
+    struct Mime {
+        w2c_mime wasm;
+        bool up = false;
+        Buffer head;
+
+        Mime()
+            : head(mimeHeadBytes)
+        {
+            head.zero(mimeHeadBytes);
         }
 
-        if (dot == 0) {
-            return false;
+        ~Mime() noexcept {
+            if (up) {
+                wasm2c_mime_free(&wasm);
+            }
         }
 
-        StringView ext(name.begin() + dot, name.end());
-
-        for (const char* candidate : extensions) {
-            StringView want(candidate);
-
-            if (want.length() != ext.length()) {
-                continue;
+        // the type of the bytes; false when the engine has no word
+        bool type(StringView bytes, Buffer& out) {
+            if (bytes.length() > 0xffffffffu) {
+                return false;
             }
 
-            bool same = true;
+            try {
+                if (!up) {
+                    wasm2c_mime_instantiate(&wasm);
+                    up = true;
+                }
 
-            for (size_t i = 0; i < ext.length() && same; i++) {
-                same = ((u8)ext[i] | 0x20) == (u8)want[i];
-            }
+                u32 length = (u32)bytes.length();
+                u32 data = w2c_mime_malloc(&wasm, length ? length : 1);
+                wasm_rt_memory_t* memory = w2c_mime_memory(&wasm);
 
-            if (same) {
+                if (!data || (u64)data + length > memory->size) {
+                    return false;
+                }
+
+                memcpy(memory->data + data, bytes.data(), length);
+
+                u32 text = w2c_mime_magic_mime(&wasm, data, length);
+
+                w2c_mime_free(&wasm, data);
+                memory = w2c_mime_memory(&wasm);
+
+                if (!text || text >= memory->size) {
+                    return false;
+                }
+
+                const u8* begin = (const u8*)memory->data + text;
+                const u8* limit = (const u8*)memory->data + min<u64>(memory->size, (u64)text + mimeTypeLimit);
+                const u8* end = begin;
+
+                while (end < limit && *end) {
+                    end++;
+                }
+
+                out = Buffer(StringView(begin, end));
+
                 return true;
+            } catch (...) {
+                if (up) {
+                    wasm2c_mime_free(&wasm);
+                    up = false;
+                }
+
+                return false;
             }
         }
 
-        return false;
-    }
+        // whether the file's first bytes are an image of any kind
+        bool image(StringView path) {
+            Buffer file(path);
+            Buffer kind;
+            size_t got = 0;
+
+            try {
+                ScopedFD fd(::open(file.cStr(), O_RDONLY | O_CLOEXEC));
+
+                if (fd.get() < 0) {
+                    return false;
+                }
+
+                while (got < mimeHeadBytes) {
+                    size_t n = fd.read((u8*)head.mutData() + got, mimeHeadBytes - got);
+
+                    if (!n) {
+                        break;
+                    }
+
+                    got += n;
+                }
+            } catch (...) {
+                return false;
+            }
+
+            return type(StringView((const u8*)head.mutData(), got), kind) && StringView(kind).startsWith(StringView(u8"image/"));
+        }
+    };
 
     Entry* makeEntry(ObjPool& pool, StringView path) {
         Entry* entry = pool.make<Entry>();
@@ -525,8 +593,10 @@ void Listed::run() {
         folder = directory ? Buffer(whole) : Buffer(slash == 0 ? StringView(u8".") : slash == 1 ? StringView(u8"/") : StringView(whole.begin(), whole.begin() + slash - 1));
 
         try {
+            Mime mime;
+
             listDir(StringView(folder), [&](const TPathInfo& info) {
-                if (!info.isDir && imageName(info.item)) {
+                if (!info.isDir && mime.image(StringView(StringBuilder() << StringView(folder) << StringView(u8"/") << info.item))) {
                     u8* copy = (u8*)owner->allocate(info.item.length());
 
                     memcpy(copy, info.item.data(), info.item.length());
@@ -577,7 +647,9 @@ void ViewApp::open(u32 count, char** given) {
     paths = given;
     pathCount = count;
 
-    if (imageName(StringView(given[0]))) {
+    Mime mime;
+
+    if (mime.image(StringView(given[0]))) {
         entries.pushBack(makeEntry(*pool, StringView(given[0])));
         select(0);
     }
