@@ -54,9 +54,6 @@ namespace {
     constexpr Design windowHeight = 560_d;
     constexpr Design placesWidth = 160_d;
     constexpr Design gap = 4_d;
-
-    // the places panel, lighter than the entries as the desktops have it
-    constexpr ImU32 placesBg = IM_COL32(46, 46, 52, 255);
     constexpr Design cellWidth = 120_d;
     constexpr u32 thumbSide = 128;
     constexpr size_t workerCount = 4;
@@ -1405,6 +1402,10 @@ void ChooseApp::keys() {
 }
 
 void ChooseApp::drawPlaces() {
+    float g = ui->px(gap);
+
+    ImGui::Dummy(ImVec2(0.f, g));
+
     for (size_t i = 0; i < places.length(); i++) {
         Place& place = *places[i];
         bool here = StringView(place.path) == StringView(dir);
@@ -1616,7 +1617,7 @@ void ChooseApp::drawLine() {
         filterW += 2.f * style.FramePadding.x + ImGui::GetFrameHeight() + style.ItemSpacing.x;
     }
 
-    ImGui::SetNextItemWidth(max(80.f, ImGui::GetContentRegionAvail().x - ui->px(gap) - buttons - filterW));
+    ImGui::SetNextItemWidth(max(80.f, ImGui::GetContentRegionAvail().x - buttons - filterW));
 
     if (fieldFocus) {
         ImGui::SetKeyboardFocusHere();
@@ -1663,60 +1664,45 @@ void ChooseApp::drawLine() {
     }
 }
 
-// The places are a panel the height of the window on the left, as the
-// desktops have it; the rest is the entries with the line under them, the
-// gap around the line. Nothing between the two: the colours part them.
 void ChooseApp::draw() {
     ImGuiViewport* vp = ImGui::GetMainViewport();
-    ImVec2 spacing = ImGui::GetStyle().ItemSpacing;
     float g = ui->px(gap);
 
     ImGui::SetNextWindowPos(vp->Pos);
     ImGui::SetNextWindowSize(vp->Size);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.f, 0.f));
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0.f, 0.f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(g, g));
     ImGui::Begin("##choose", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBackground);
 
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, placesBg);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(g, g));
-    ImGui::BeginChild("places", ImVec2(ui->px(placesWidth), 0.f), ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoScrollbar);
-    drawPlaces();
-    ImGui::EndChild();
-    ImGui::PopStyleVar();
-    ImGui::PopStyleColor();
-    ImGui::SameLine();
-
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImGui::GetStyleColorVec4(ImGuiCol_WindowBg));
-    ImGui::BeginChild("body", ImVec2(0.f, 0.f), 0, ImGuiWindowFlags_NoScrollbar);
-    ImGui::PopStyleColor();
-
     if (!title.empty()) {
-        ImGui::SetCursorPos(ImVec2(g, g));
         ImGui::TextUnformatted((const char*)title.data(), (const char*)title.data() + title.length());
-        ImGui::Dummy(ImVec2(0.f, g));
+        ImGui::Spacing();
     }
 
-    float lineH = ImGui::GetFrameHeight() + 2.f * g;
+    float lineH = ImGui::GetFrameHeightWithSpacing() + g;
     float bodyH = max(1.f, ImGui::GetContentRegionAvail().y - lineH);
 
-    if (!problem.empty()) {
-        float top = ImGui::GetCursorPosY();
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImGui::GetStyleColorVec4(ImGuiCol_WindowBg));
+    ImGui::BeginChild("places", ImVec2(ui->px(placesWidth), bodyH), 0, ImGuiWindowFlags_NoScrollbar);
+    drawPlaces();
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
+    ImGui::SameLine();
+    ImGui::BeginGroup();
 
-        ImGui::SetCursorPosX(g);
-        ImGui::PushTextWrapPos(ImGui::GetContentRegionAvail().x - g);
+    if (!problem.empty()) {
+        ImGui::PushTextWrapPos(0.f);
         ImGui::TextUnformatted((const char*)problem.data(), (const char*)problem.data() + problem.length());
         ImGui::PopTextWrapPos();
-        ImGui::SetCursorPosY(top + bodyH);
+        ImGui::Dummy(ImVec2(0.f, max(0.f, bodyH - ImGui::GetTextLineHeightWithSpacing() * 2.f)));
     } else if (grid) {
         drawGrid(bodyH);
     } else {
         drawTable(bodyH);
     }
 
-    ImGui::SetCursorPos(ImVec2(g, ImGui::GetCursorPosY() + g));
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, spacing);
+    ImGui::EndGroup();
+    ImGui::Dummy(ImVec2(0.f, g / 2.f));
     drawLine();
-    ImGui::PopStyleVar();
 
     if (askOverwrite) {
         ImGui::OpenPopup("Replace");
@@ -1751,9 +1737,8 @@ void ChooseApp::draw() {
         ImGui::EndPopup();
     }
 
-    ImGui::EndChild();
     ImGui::End();
-    ImGui::PopStyleVar(2);
+    ImGui::PopStyleVar();
 }
 
 int mainChoose(ObjPool& pool, int argc, char** argv) {
