@@ -2331,8 +2331,6 @@ void Screen::draw() {
     float height = hi.y - lo.y;
     ImU32 black = IM_COL32(0, 0, 0, 255);
 
-    dl->AddRectFilled(ImVec2(corner.x, hi.y), ImVec2(hi.x, corner.y + room.y), ImGui::GetColorU32(ImGuiCol_WindowBg));
-
     if (panel) {
         ImGui::SetCursorScreenPos(corner);
         ImGui::PushStyleColor(ImGuiCol_ChildBg, ImGui::GetStyleColorVec4(ImGuiCol_WindowBg));
