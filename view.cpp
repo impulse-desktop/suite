@@ -132,9 +132,10 @@ namespace {
         return image;
     }
 
-    // the first bytes of a file the MIME engine looks at; every format
-    // names itself well within them
-    constexpr size_t mimeHeadBytes = 64 * 1024;
+    // the first bytes of a file the MIME engine looks at: an image names
+    // itself at the start, and the matcher takes an offset past what it
+    // was given as no match
+    constexpr size_t mimeHeadBytes = 4096;
     constexpr size_t mimeTypeLimit = 256;
 
     // the MIME engine: an instance of libmagic, made on its first question;
