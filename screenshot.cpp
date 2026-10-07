@@ -593,8 +593,10 @@ namespace {
     void initialWindowSize(Ui& ui, const Image& img, int& w, int& h) {
         float zoom = (float)kInitialZoom / 100.f;
 
-        w = (int)ceilf(ui.px(200_d) + ImGui::GetStyle().ItemSpacing.x + img.w * zoom);
-        h = (int)ceilf(img.h * zoom);
+        ImGuiStyle& style = ImGui::GetStyle();
+
+        w = (int)ceilf(2.f * style.WindowPadding.x + ui.px(200_d) + style.ItemSpacing.x + img.w * zoom);
+        h = (int)ceilf(2.f * style.WindowPadding.y + img.h * zoom);
 
         int minH = (int)ui.px(220_d);
 
@@ -767,8 +769,6 @@ namespace {
         int result = 0;
         bool reset = false;
 
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-
         ImGui::Begin("##shot", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoSavedSettings);
         const float panelW = ui.px(200_d);
 
@@ -797,7 +797,6 @@ namespace {
         ImGui::EndChild();
 
         ImGui::End();
-        ImGui::PopStyleVar();
 
         if (reset) {
             int w, h;

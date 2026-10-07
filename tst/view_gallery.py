@@ -30,7 +30,7 @@ with Session("view_gallery", tool="view") as s:
     for i in range(1, 3):
         assert s.client_log().count(f"im view: loading thumbnail f{i:02}.png") == 1, "cached thumbnail decoded again"
     assert s.client_log().count("im view: thumbnail f00.png") == 1, "cached thumbnail uploaded again"
-    # the third row spans 396..588 px
+    # the third row spans 404..596 px, the list 8 px down for the padding
     s.click(100, 470)
     s.said("selected f02.png")
     s.said("showing f02.png 8x8")

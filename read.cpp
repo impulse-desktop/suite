@@ -1240,8 +1240,6 @@ void ReadApp::draw() {
 
     ImGui::SetNextWindowPos(vp->Pos);
     ImGui::SetNextWindowSize(vp->Size);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0, 0));
     ImGui::Begin("##read", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBackground);
 
     float sideW = floorf(vp->Size.x * sideShare);
@@ -1263,7 +1261,6 @@ void ReadApp::draw() {
     ImGui::EndChild();
     ImGui::PopStyleColor();
 
-    ImGui::PopStyleVar(2);
     ImGui::End();
 }
 

@@ -1448,8 +1448,6 @@ void ViewApp::draw() {
 
     ImGui::SetNextWindowPos(vp->Pos);
     ImGui::SetNextWindowSize(vp->Size);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0, 0));
     ImGui::Begin("##view", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBackground);
 
     float sideW = floorf(vp->Size.x * sideShare);
@@ -1471,14 +1469,11 @@ void ViewApp::draw() {
 
     if (right) {
         ImGui::SameLine();
-        ImGui::PopStyleVar(2);
         ImGui::PushStyleColor(ImGuiCol_ChildBg, ImGui::GetStyleColorVec4(ImGuiCol_WindowBg));
         ImGui::BeginChild("info", ImVec2(sideW, 0.f), ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoScrollbar);
         drawInfo();
         ImGui::EndChild();
         ImGui::PopStyleColor();
-    } else {
-        ImGui::PopStyleVar(2);
     }
 
     ImGui::End();

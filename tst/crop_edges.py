@@ -8,14 +8,16 @@ from session import KEY_ENTER, Session, png_size
 with Session("crop_edges") as s:
     shot = s.capture_file("frame.shot", 1280, 800)
     shots = s.artifacts / "shots"
-    # the canvas starts past the 200px panel and 8px of spacing, at 50%
-    canvas_x = 208
+    # the canvas starts past the window's 8px padding, the 200px panel and
+    # 8px of spacing, 8px down, at 50%
+    canvas_x = 216
+    canvas_y = 8
 
     def capture(name, dx0, dy0, dx1, dy1):
         s.launch(str(shot), IM_SHOT_DIR=str(shots), IM_SHOT_NAME=name, IM_SHOT_FORMAT="png")
         s.focus()
         s.settled("opened-" + name)
-        s.drag(canvas_x + dx0, dy0, canvas_x + dx1, dy1)
+        s.drag(canvas_x + dx0, canvas_y + dy0, canvas_x + dx1, canvas_y + dy1)
         s.close(KEY_ENTER)
         saved = shots / f"{name}.png"
         assert saved.is_file() and saved.stat().st_size, f"{name}: Enter did not save"

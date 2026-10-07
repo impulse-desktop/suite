@@ -91,11 +91,12 @@ with Session("read", tool="read") as s:
     s.said("page 1", 2)
     shows(red, 300000, "home")
     # the pages down the list, each as wide as the list and shaped as the
-    # page: the first row 288 px tall, the second 128, the third 288
+    # page: the first row 288 px tall, the second 128, the third 288, the
+    # list 8 px down for the window's padding
     s.said("thumbnail 1")
     s.said("thumbnail 2")
     s.said("thumbnail 3")
-    s.click(side // 2, 4 + 288 + 4 + 128 + 4 + 100)
+    s.click(side // 2, 8 + 4 + 288 + 4 + 128 + 4 + 100)
     s.said("page 3", 2)
     shows(blue, 300000, "clicked")
     s.tap(KEY_TAB)

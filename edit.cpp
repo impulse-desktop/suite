@@ -215,7 +215,6 @@ void EditApp::draw() {
 
     ImGui::SetNextWindowPos(vp->Pos);
     ImGui::SetNextWindowSize(vp->Size);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
     ImGui::Begin("##edit", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBackground);
 
     float statusH = ImGui::GetFrameHeightWithSpacing();
@@ -290,7 +289,6 @@ void EditApp::draw() {
     }
 
     ImGui::End();
-    ImGui::PopStyleVar();
 }
 
 int mainEdit(ObjPool& pool, int argc, char** argv) {
