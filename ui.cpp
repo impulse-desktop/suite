@@ -236,6 +236,9 @@ namespace {
     }
 
     constexpr Design mouseThreshold = 6_d;
+    // imway's default neutral seed, the grey its theme grows from; it keeps
+    // the setting in memory and tells no client
+    constexpr float imwayNeutral = .14f;
 
     static float scaleFromEnv() {
         if (const char* s = getenv("IM_SCALE")) {
@@ -247,6 +250,17 @@ namespace {
         }
 
         return 2.f;
+    }
+
+    // imway's neutral tone i (0..5) of a grey seed, as its theme makes it: a
+    // grey has no chroma in OKLab, its lightness is the cube root of its
+    // linear value, and the tone scales that lightness towards black
+    static float neutralTone(float seed, int i) {
+        float linear = seed <= .04045f ? seed / 12.92f : powf((seed + .055f) / 1.055f, 2.4f);
+        float l = cbrtf(linear) * (float)i / 5.f;
+        float out = l * l * l;
+
+        return out <= .0031308f ? 12.92f * out : 1.055f * powf(out, 1.f / 2.4f) - .055f;
     }
 
     static float scaledPx(Design d, float scale) {
@@ -261,11 +275,11 @@ namespace {
     // its edges. The cell padding is half of the spacing, as a
     // Selectable's band is the spacing taller than its text and a row of a
     // table twice the cell padding taller, so the band fills the row; a
-    // window has no border, and its background is #212121, the grey of the
-    // band imway draws between a window's content and its frame, opaque:
-    // the frame goes to the window system with its alpha, and the window is
-    // not to show what is behind it. A child, every panel and canvas, is
-    // ImGui's dark grey on it.
+    // window has no border, and its background is imway's neutral tone 3,
+    // the grey of the band it draws between a window's content and its
+    // frame, opaque: the frame goes to the window system with its alpha, and
+    // the window is not to show what is behind it. A child, every panel and
+    // canvas, is the tone below it.
     static ImGuiStyle scaledStyle(float scale) {
         ImGuiStyle style;
 
@@ -277,8 +291,11 @@ namespace {
 #endif
         style.CellPadding.y = style.ItemSpacing.y / 2.f;
         style.WindowBorderSize = 0.f;
-        style.Colors[ImGuiCol_WindowBg] = ImVec4(33.f / 255.f, 33.f / 255.f, 33.f / 255.f, 1.f);
-        style.Colors[ImGuiCol_ChildBg] = ImVec4(.06f, .06f, .06f, 1.f);
+        float window = neutralTone(imwayNeutral, 3);
+        float child = neutralTone(imwayNeutral, 2);
+
+        style.Colors[ImGuiCol_WindowBg] = ImVec4(window, window, window, 1.f);
+        style.Colors[ImGuiCol_ChildBg] = ImVec4(child, child, child, 1.f);
         style.ScaleAllSizes(scale);
         style.FontScaleMain = scale;
 
