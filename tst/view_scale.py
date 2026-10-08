@@ -20,8 +20,8 @@ with Session("view_scale", tool="view") as s:
     assert s.size() == (w, h), f"the window was not held to 90% of the output ({s.size()})"
     s.said("showing a.png 64x48")
     s.settled("scaled")
-    # the list is 230 px wide, its rows 214x161 with 8 px gaps: the second
-    # row, b.png, spans 183..344 px, the list 6 px down for the padding
+    # the list is 230 px wide, its rows 230x173 with 6 px gaps: the second
+    # row, b.png, spans 185..358 px, the list 6 px down for the padding
     s.click(120, 312)
     s.said("selected b.png")
     s.close()

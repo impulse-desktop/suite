@@ -57,7 +57,8 @@ namespace {
     constexpr Design windowWidth = 1000_d;
     constexpr Design windowHeight = 700_d;
     constexpr float sideShare = .2f;
-    constexpr Design gap = 4_d;
+    // the mark of the current row: a frame inside its thumbnail's edge
+    constexpr Design mark = 4_d;
     constexpr float bulge = .2f;
     constexpr Design bulgeReach = 240_d;
     constexpr float pi = 3.14159265f;
@@ -1039,10 +1040,15 @@ void ViewApp::keys() {
     }
 }
 
+// the rows down the list, the list's width each and the image's shape,
+// the style's spacing between them, the current one framed inside its
+// edge in the colour of a selected item; the thumbnails bulge towards
+// the pointer, over their rows
 void ViewApp::drawGallery() {
-    float g = ui->px(gap);
-    float innerW = max(1.f, ImGui::GetWindowWidth() - 2.f * g);
-    thumbSide = thumbSideFor((innerW + 2.f * g) * (1.f + bulge));
+    float g = ImGui::GetStyle().ItemSpacing.y;
+    float frame = ui->px(mark);
+    float innerW = max(1.f, ImGui::GetWindowWidth());
+    thumbSide = thumbSideFor(innerW * (1.f + bulge));
     float viewH = ImGui::GetWindowHeight();
     size_t count = entries.length();
     ImVec2 origin = ImGui::GetCursorScreenPos();
@@ -1057,7 +1063,7 @@ void ViewApp::drawGallery() {
     float fontSize = ImGui::GetFontSize();
     StringView problem(problems);
     float head = problem.empty() ? 0.f : font->CalcTextSizeA(fontSize, FLT_MAX, innerW, (const char*)problem.begin(), (const char*)problem.end()).y + g;
-    float total = g + head;
+    float total = head;
     float currentTop = total;
     float currentH = 0.f;
 
@@ -1072,6 +1078,7 @@ void ViewApp::drawGallery() {
         total += h + g;
     }
 
+    total = max(0.f, total - g);
     ImGui::Dummy(ImVec2(innerW, total));
 
     if (scrollToCurrent) {
@@ -1094,10 +1101,10 @@ void ViewApp::drawGallery() {
     float lastBottom = 0.f;
     size_t nearest = count;
     float nearestD = 0.f;
-    float top = g + head;
+    float top = head;
 
     if (head > 0.f) {
-        dl->AddText(font, fontSize, ImVec2(origin.x + g, origin.y + g), ImGui::GetColorU32(ImGuiCol_Text), (const char*)problem.begin(), (const char*)problem.end(), innerW);
+        dl->AddText(font, fontSize, origin, ImGui::GetColorU32(ImGuiCol_Text), (const char*)problem.begin(), (const char*)problem.end(), innerW);
     }
 
     for (size_t i = 0; i < count; i++) {
@@ -1121,7 +1128,7 @@ void ViewApp::drawGallery() {
         }
 
         if (inView) {
-            ImVec2 p0(origin.x + g, origin.y + top);
+            ImVec2 p0(origin.x, origin.y + top);
             ImVec2 p1(p0.x + innerW, p0.y + h);
 
             ImGui::SetCursorScreenPos(p0);
@@ -1132,10 +1139,6 @@ void ViewApp::drawGallery() {
             }
 
             ImGui::PopID();
-
-            if (i == current) {
-                dl->AddRectFilled(ImVec2(p0.x - g, p0.y - g), ImVec2(p1.x + g, p1.y + g), ImGui::GetColorU32(ImGuiCol_Header));
-            }
 
             if (pointed) {
                 float d = distance(mouse, ImVec2((p0.x + p1.x) / 2.f, (p0.y + p1.y) / 2.f));
@@ -1152,27 +1155,40 @@ void ViewApp::drawGallery() {
 
     ImDrawList* fg = ImGui::GetForegroundDrawList();
 
+    // the frame of the current row, inside the edge of what it is drawn on
+    auto framed = [&](ImDrawList* list, ImVec2 a, ImVec2 b) {
+        list->AddRect(ImVec2(a.x + frame / 2.f, a.y + frame / 2.f), ImVec2(b.x - frame / 2.f, b.y - frame / 2.f), ImGui::GetColorU32(ImGuiCol_Header), 0.f, 0, frame);
+    };
+
     auto draw = [&](size_t i, float rowTop, float h) {
         Entry& entry = *entries[i];
-        ImVec2 p0(origin.x + g, origin.y + rowTop);
+        ImVec2 p0(origin.x, origin.y + rowTop);
         ImVec2 p1(p0.x + innerW, p0.y + h);
 
         if (!entry.thumbW && !entry.error.empty()) {
             StringView error(entry.error);
-            float pad = g * 2.f;
+            float pad = g;
 
             dl->PushClipRect(p0, p1, true);
             dl->AddText(font, fontSize, ImVec2(p0.x + pad, p0.y + pad), ImGui::GetColorU32(ImGuiCol_Text), (const char*)error.begin(), (const char*)error.end(), max(1.f, innerW - 2.f * pad));
             dl->PopClipRect();
 
+            if (i == current) {
+                framed(dl, p0, p1);
+            }
+
             return;
         }
 
         if (!entry.thumbW) {
-            const char* mark = entry.thumb == Load::Failed ? "?" : "\xe2\x80\xa6";
-            ImVec2 extent = ImGui::CalcTextSize(mark);
+            const char* text = entry.thumb == Load::Failed ? "?" : "\xe2\x80\xa6";
+            ImVec2 extent = ImGui::CalcTextSize(text);
 
-            dl->AddText(ImVec2(p0.x + (innerW - extent.x) / 2.f, p0.y + (h - extent.y) / 2.f), dimColor, mark);
+            dl->AddText(ImVec2(p0.x + (innerW - extent.x) / 2.f, p0.y + (h - extent.y) / 2.f), dimColor, text);
+
+            if (i == current) {
+                framed(dl, p0, p1);
+            }
 
             return;
         }
@@ -1190,7 +1206,14 @@ void ViewApp::drawGallery() {
         ImVec2 centre((p0.x + p1.x) / 2.f, (p0.y + p1.y) / 2.f);
         ImVec2 half((p1.x - p0.x) / 2.f * scale, (p1.y - p0.y) / 2.f * scale);
 
-        fg->AddImage(entry.thumbTex, ImVec2(centre.x - half.x, centre.y - half.y), ImVec2(centre.x + half.x, centre.y + half.y));
+        ImVec2 a(centre.x - half.x, centre.y - half.y);
+        ImVec2 b(centre.x + half.x, centre.y + half.y);
+
+        fg->AddImage(entry.thumbTex, a, b);
+
+        if (i == current) {
+            framed(fg, a, b);
+        }
     };
 
     ImVec2 viewportEnd(vp->Pos.x + vp->Size.x, windowPos.y + viewH);
