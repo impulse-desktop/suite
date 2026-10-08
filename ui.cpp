@@ -269,7 +269,7 @@ namespace {
         return d.value > 0.f && v < 1.f ? 1.f : v;
     }
 
-    // The style of every tool. The spacing is 6 both ways, and so is the
+    // The style of every tool. The spacing is 4 both ways, and so is the
     // window's padding on macOS, where a window has the system's frame;
     // on Linux the compositor draws none, and the window's content goes to
     // its edges. The cell padding is half of the spacing, as a
@@ -283,9 +283,9 @@ namespace {
     static ImGuiStyle scaledStyle(float scale) {
         ImGuiStyle style;
 
-        style.ItemSpacing = ImVec2(6.f, 6.f);
+        style.ItemSpacing = ImVec2(4.f, 4.f);
 #if defined(__APPLE__)
-        style.WindowPadding = ImVec2(6.f, 6.f);
+        style.WindowPadding = ImVec2(4.f, 4.f);
 #else
         style.WindowPadding = ImVec2(0.f, 0.f);
 #endif
