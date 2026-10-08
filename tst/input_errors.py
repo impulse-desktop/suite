@@ -56,9 +56,9 @@ with Session("input_errors") as s:
     image("colour without a volume", good, IM_SHOT_COLOR="0:203")
     image("colour without a transfer", good, IM_SHOT_COLOR="garbage")
     # a ui scale below zero falls back to the default 2: the 64x48 capture
-    # at 50% beside the 400px panel and 16px of spacing, as tall as the
+    # at 50% beside the 400px panel and 8px of spacing, as tall as the
     # panel's minimum
-    assert opened("a negative ui scale", good, IM_SCALE="-2") == (448, 440), f"a negative ui scale: {s.size()}"
+    assert opened("a negative ui scale", good, IM_SCALE="-2") == (440, 440), f"a negative ui scale: {s.size()}"
     s.close()
 
     code, log = s.run(str(good), IM_SHOT_DMABUF=f"64:48:44:0:256:0:12288:{uuid}")

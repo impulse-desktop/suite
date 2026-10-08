@@ -8,9 +8,9 @@ from session import KEY_ENTER, Session, png_size
 with Session("crop_edges") as s:
     shot = s.capture_file("frame.shot", 1280, 800)
     shots = s.artifacts / "shots"
-    # the canvas starts past the 200px panel and 6px of spacing, at the
+    # the canvas starts past the 200px panel and 4px of spacing, at the
     # window's top, at 50%
-    canvas_x = 206
+    canvas_x = 204
     canvas_y = 0
 
     def capture(name, dx0, dy0, dx1, dy1):

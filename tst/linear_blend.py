@@ -14,9 +14,9 @@ from session import Session, pq_decode, pq_encode
 NITS = [0, 4, 8, 16, 32, 64, 128, 203, 256, 512, 1000]
 JUDGED = [32, 64, 128, 203, 256, 512]
 ALPHA = 140 / 255
-# the canvas begins past the 200px panel and 8px of spacing; the frame is
+# the canvas begins past the 200px panel and 4px of spacing; the frame is
 # shown at 50%
-CANVAS_X = 208
+CANVAS_X = 204
 
 
 def response(capture, y):
