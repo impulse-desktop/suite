@@ -422,6 +422,7 @@ namespace {
         void requestFrame() override;
         void requestFullscreen(bool on) override;
         bool fullscreen() override;
+        void requestTitle(StringView title) override;
         void requestResize(u32 width, u32 height) override;
         RenderImage* uploadImage(ObjPool& pool, u32 width, u32 height, const void* rgba, bool hdr) override;
         RenderImage* importImage(ObjPool& pool, SharedImage& source, bool hdr) override;
@@ -821,6 +822,10 @@ void UiImpl::requestFullscreen(bool on) {
 
 bool UiImpl::fullscreen() {
     return fullscreenNow;
+}
+
+void UiImpl::requestTitle(StringView title) {
+    window->requestTitle(title);
 }
 
 void UiImpl::requestResize(u32 width, u32 height) {

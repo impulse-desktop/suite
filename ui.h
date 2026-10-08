@@ -56,6 +56,7 @@ struct Ui {
     virtual void requestFullscreen(bool on) = 0;
     // whether the window is fullscreen, as the window system has it
     virtual bool fullscreen() = 0;
+    virtual void requestTitle(stl::StringView title) = 0;
     virtual void requestResize(u32 width, u32 height) = 0;
 
     virtual RenderImage* uploadImage(stl::ObjPool& pool, u32 width, u32 height, const void* rgba, bool hdr) = 0;

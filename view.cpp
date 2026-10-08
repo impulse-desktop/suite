@@ -851,6 +851,7 @@ void ViewApp::select(size_t index) {
     current = index;
     ++showRequest;
     showPending = true;
+    ui->requestTitle(entries[index]->name());
     ui->requestFrame();
     TRACE(ui, StringView(StringBuilder() << StringView(u8"selected ") << entries[index]->name()));
 }
