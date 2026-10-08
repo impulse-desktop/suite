@@ -238,9 +238,15 @@ namespace {
             size_t got = 0;
 
             try {
-                ScopedFD fd(::open(file.cStr(), O_RDONLY | O_CLOEXEC));
+                ScopedFD fd(::open(file.cStr(), O_RDONLY | O_NONBLOCK | O_CLOEXEC));
 
                 if (fd.get() < 0) {
+                    return false;
+                }
+
+                struct stat st;
+
+                if (fstat(fd.get(), &st) != 0 || !S_ISREG(st.st_mode)) {
                     return false;
                 }
 

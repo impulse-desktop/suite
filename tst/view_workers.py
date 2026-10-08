@@ -11,7 +11,7 @@ with Session("view_four_workers", tool="view") as s:
     pics.mkdir()
     for i in range(20):
         os.mkfifo(pics / f"f{i:02}.png")
-    s.launch(str(pics), IM_TRACE_FRAMES="1")
+    s.launch(*(str(fifo) for fifo in sorted(pics.iterdir())), IM_TRACE_FRAMES="1")
     s.focus()
     s.said("presenting")
     s.wait(lambda: s.client_log().count("im view: loading ") == 4, "four dispatched loads")
