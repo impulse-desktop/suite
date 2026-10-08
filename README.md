@@ -58,7 +58,12 @@ libswresample) and OpenAL.
 ```
 ./build          # .build/im and the im<tool> links
 ./build -j 8 im  # the binary alone, on 8 jobs
+dev/install.sh /usr/local
 ```
+
+`dev/install.sh PREFIX`, run where the build left its `im` link,
+installs the binary, its `im<tool>` links, the desktop entries and the
+icons under PREFIX.
 
 The decoders are WebAssembly modules vendored under `ext/`.
 `-Ddecode_wasm=PATH`, `-Dpdf_wasm=PATH`, `-Ddjvu_wasm=PATH` and

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=ImChoose
+GenericName=File Chooser
+Comment=Choose a file
+Exec=imchoose
+Icon=ImChoose
+Terminal=false
+NoDisplay=true
+StartupWMClass=ImChoose
+Categories=Utility;

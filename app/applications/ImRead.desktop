@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=ImRead
+GenericName=Document Viewer
+Comment=Read PDF and DjVu documents
+Exec=imread %f
+Icon=ImRead
+Terminal=false
+StartupWMClass=ImRead
+Categories=Office;Viewer;
+MimeType=application/pdf;image/vnd.djvu;image/vnd.djvu+multipage;

@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1b1e26"/>
+      <stop offset="0.55" stop-color="#111318"/>
+      <stop offset="1" stop-color="#0a0b0e"/>
+    </linearGradient>
+    <linearGradient id="edge" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.22"/>
+      <stop offset="0.18" stop-color="#ffffff" stop-opacity="0.05"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="glyph" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffcf9e"/>
+      <stop offset="1" stop-color="#f97316"/>
+    </linearGradient>
+    <filter id="halo" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="52"/>
+    </filter>
+    <filter id="core" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="16"/>
+    </filter>
+    <filter id="drop" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="10"/>
+    </filter>
+  </defs>
+
+  <rect x="112" y="124" width="800" height="800" rx="182" fill="#000000" opacity="0.35" filter="url(#drop)"/>
+  <rect x="100" y="100" width="824" height="824" rx="186" fill="url(#tile)"/>
+  <rect x="102.5" y="102.5" width="819" height="819" rx="184" fill="none" stroke="url(#edge)" stroke-width="5"/>
+
+  <g filter="url(#halo)" opacity="0.55">
+    <path fill="#f97316" d="M 276 288 H 418 Q 446 288 466 308 L 496 338 H 748 Q 788 338 788 378 V 696 Q 788 736 748 736 H 276 Q 236 736 236 696 V 328 Q 236 288 276 288 Z"/>
+  </g>
+  <g filter="url(#core)" opacity="0.5">
+    <path fill="#f97316" d="M 276 288 H 418 Q 446 288 466 308 L 496 338 H 748 Q 788 338 788 378 V 696 Q 788 736 748 736 H 276 Q 236 736 236 696 V 328 Q 236 288 276 288 Z"/>
+  </g>
+  <g>
+    <path fill="url(#glyph)" d="M 276 288 H 418 Q 446 288 466 308 L 496 338 H 748 Q 788 338 788 378 V 696 Q 788 736 748 736 H 276 Q 236 736 236 696 V 328 Q 236 288 276 288 Z"/>
+  </g>
+  <g>
+    <rect fill="#0a0b0e" opacity="0.45" x="236" y="392" width="552" height="20"/>
+    <path fill="none" stroke="#0a0b0e" stroke-width="46" stroke-linecap="round" stroke-linejoin="round" d="M 418 562 L 488 632 L 618 498"/>
+  </g>
+</svg>

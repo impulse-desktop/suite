@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=ImScreenshot
+GenericName=Screenshot Editor
+Comment=Crop and save a screenshot
+Exec=imscreenshot %f
+Icon=ImScreenshot
+Terminal=false
+NoDisplay=true
+StartupWMClass=ImScreenshot
+Categories=Graphics;

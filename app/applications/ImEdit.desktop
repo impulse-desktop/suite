@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=ImEdit
+GenericName=Text Editor
+Comment=Edit text files
+Exec=imedit %f
+Icon=ImEdit
+Terminal=false
+StartupWMClass=ImEdit
+Categories=Utility;TextEditor;
+MimeType=text/plain;text/markdown;text/x-c;text/x-c++;text/x-python;text/x-shellscript;application/json;application/xml;

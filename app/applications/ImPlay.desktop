@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=ImPlay
+GenericName=Video Player
+Comment=Play videos
+Exec=implay %f
+Icon=ImPlay
+Terminal=false
+StartupWMClass=ImPlay
+Categories=AudioVideo;Video;Player;
+MimeType=video/mp4;video/webm;video/x-matroska;video/quicktime;video/x-msvideo;video/mpeg;video/ogg;video/x-flv;video/3gpp;video/mp2t;
