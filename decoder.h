@@ -21,7 +21,7 @@ Image* decode(stl::ObjPool& pool, stl::StringView file, stl::StringView name);
 // pixels it covers; the image itself when it fits.
 Image* shrink(stl::ObjPool& pool, Image* image, u32 side);
 
-// The image as a thumbnail: cut to the box of its pixels with any alpha,
-// the transparent margins off, then shrunk to fit the side; the image
-// itself when there is nothing to cut and it fits.
+// The image as a thumbnail: cut to the box of its pixels at least half
+// opaque, the transparent margins and a soft shadow off, then shrunk to
+// fit the side; the image itself when there is nothing to cut and it fits.
 Image* thumbnail(stl::ObjPool& pool, Image* image, u32 side);

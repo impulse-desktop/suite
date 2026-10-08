@@ -144,12 +144,13 @@ Image* thumbnail(ObjPool& pool, Image* image, u32 side) {
     u32 x1 = 0;
     u32 y1 = 0;
 
-    // the box of the pixels with any alpha
+    // the box of the pixels at least half opaque: a soft shadow around a
+    // window, and the like, is margin for all its alpha
     for (u32 y = 0; y < sh; y++) {
         const unsigned char* row = src + (size_t)y * sw * 4 + 3;
 
         for (u32 x = 0; x < sw; x++, row += 4) {
-            if (*row) {
+            if (*row >= 128) {
                 x0 = min(x0, x);
                 x1 = max(x1, x + 1);
                 y0 = min(y0, y);
