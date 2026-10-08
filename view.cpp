@@ -91,27 +91,6 @@ namespace {
         StringView name() const;
     };
 
-    struct ScaledImage final: Image {
-        Buffer rgba;
-        u32 width_;
-        u32 height_;
-
-        ScaledImage(const Image& image, u32 side);
-
-        const void* data() const override;
-        size_t length() const override;
-        u32 width() const override;
-        u32 height() const override;
-    };
-
-    static Image* shrinkToSide(ObjPool& pool, Image* image, u32 side) {
-        if (image->width() <= side && image->height() <= side) {
-            return image;
-        }
-
-        return pool.make<ScaledImage>(*image, side);
-    }
-
     static Image* decodeFile(ObjPool& pool, Buffer& path, size_t nameAt, u32 side, Buffer& timing) {
         u64 began = monotonicNowUs();
         Buffer file;
@@ -123,7 +102,7 @@ namespace {
 
         u64 decoded = monotonicNowUs();
 
-        image = shrinkToSide(pool, image, side);
+        image = shrink(pool, image, side);
 
         StringBuilder text;
 
@@ -457,65 +436,6 @@ namespace {
     };
 }
 
-ScaledImage::ScaledImage(const Image& image, u32 side) {
-    u32 sw = image.width();
-    u32 sh = image.height();
-
-    width_ = sw >= sh ? side : (u32)max<u64>(1, (u64)side * sw / sh);
-    height_ = sh >= sw ? side : (u32)max<u64>(1, (u64)side * sh / sw);
-    rgba.zero((size_t)width_ * height_ * 4);
-
-    const unsigned char* src = (const unsigned char*)image.data();
-    unsigned char* dst = (unsigned char*)rgba.mutData();
-
-    for (u32 dy = 0; dy < height_; dy++) {
-        u32 y0 = (u32)((u64)dy * sh / height_);
-        u32 y1 = (u32)max<u64>(y0 + 1, (u64)(dy + 1) * sh / height_);
-
-        for (u32 dx = 0; dx < width_; dx++) {
-            u32 x0 = (u32)((u64)dx * sw / width_);
-            u32 x1 = (u32)max<u64>(x0 + 1, (u64)(dx + 1) * sw / width_);
-            u64 sum[4] = {};
-
-            for (u32 y = y0; y < y1; y++) {
-                const unsigned char* row = src + ((size_t)y * sw + x0) * 4;
-
-                for (u32 x = x0; x < x1; x++) {
-                    sum[0] += row[0];
-                    sum[1] += row[1];
-                    sum[2] += row[2];
-                    sum[3] += row[3];
-                    row += 4;
-                }
-            }
-
-            u64 count = (u64)(x1 - x0) * (y1 - y0);
-            unsigned char* px = dst + ((size_t)dy * width_ + dx) * 4;
-
-            px[0] = (unsigned char)((sum[0] + count / 2) / count);
-            px[1] = (unsigned char)((sum[1] + count / 2) / count);
-            px[2] = (unsigned char)((sum[2] + count / 2) / count);
-            px[3] = (unsigned char)((sum[3] + count / 2) / count);
-        }
-    }
-}
-
-const void* ScaledImage::data() const {
-    return rgba.data();
-}
-
-size_t ScaledImage::length() const {
-    return rgba.length();
-}
-
-u32 ScaledImage::width() const {
-    return width_;
-}
-
-u32 ScaledImage::height() const {
-    return height_;
-}
-
 StringView Entry::name() const {
     StringView whole = StringView(path);
 
@@ -599,7 +519,7 @@ void Decoded::run() {
     try {
         image = decodeFile(*owner, path, nameAt, side, timing);
         if (thumbSide) {
-            thumb = shrinkToSide(*owner, image, thumbSide);
+            thumb = thumbnail(*owner, image, thumbSide);
         }
     } catch (...) {
         error = Buffer(Exception::current());
