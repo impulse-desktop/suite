@@ -262,9 +262,9 @@ namespace {
     // Selectable's band is the spacing taller than its text and a row of a
     // table twice the cell padding taller, so the band fills the row; a
     // window has no border, and its background is a 0.4 grey, opaque: the
-    // frame goes to the window system
-    // with its alpha, and the window is not to show what is behind it. A
-    // child, every panel and canvas, is ImGui's dark grey on it.
+    // frame goes to the window system with its alpha, and the window is not
+    // to show what is behind it. A child, every panel and canvas, is
+    // ImGui's dark grey on it.
     static ImGuiStyle scaledStyle(float scale) {
         ImGuiStyle style;
 
