@@ -36,7 +36,7 @@ with Session("choose", tool="choose") as s:
     s.said("selected deep")
     s.tap(KEY_DOWN)
     s.said("selected a.png")
-    s.tap(KEY_ENTER)
+    s.tap(KEY_ENTER, client=False)
     s.said("chosen 1")
     s.gone()
     assert s.finished() == 0, "the chooser did not exit 0 after a choice"
@@ -48,7 +48,7 @@ with Session("choose", tool="choose") as s:
     s.said("showing 3")
     s.type("b")
     s.said("showing 1")
-    s.tap(KEY_ENTER)
+    s.tap(KEY_ENTER, client=False)
     s.said("chosen 1")
     s.gone()
     assert s.finished() == 0
@@ -64,7 +64,7 @@ with Session("choose", tool="choose") as s:
     s.type("pics/")
     s.said(f"going {root / 'pics'}", 2)
     s.said("listed 5", 2)
-    s.tap(KEY_ESC)
+    s.tap(KEY_ESC, client=False)
     s.said("cancelled")
     s.gone()
     assert s.finished() == 1, "Escape did not exit 1"
@@ -74,7 +74,7 @@ with Session("choose", tool="choose") as s:
     s.launch("--save", "--name", "out.png", str(root / "pics"))
     s.focus()
     s.said("listed 5")
-    s.tap(KEY_ENTER)
+    s.tap(KEY_ENTER, client=False)
     s.said("chosen 1")
     s.gone()
     assert s.finished() == 0
@@ -85,7 +85,7 @@ with Session("choose", tool="choose") as s:
     s.said("listed 5")
     s.tap(KEY_ENTER)
     s.said("asking to replace")
-    s.tap(KEY_ENTER)
+    s.tap(KEY_ENTER, client=False)
     s.said("chosen 1")
     s.gone()
     assert s.finished() == 0
@@ -96,7 +96,7 @@ with Session("choose", tool="choose") as s:
     s.focus()
     s.said("listed 5")
     s.said("showing 1")
-    s.tap(KEY_ENTER)
+    s.tap(KEY_ENTER, client=False)
     s.said("chosen 1")
     s.gone()
     assert s.finished() == 0
@@ -113,7 +113,7 @@ with Session("choose", tool="choose") as s:
     s.said("thumbnail a.png")
     s.said("thumbnail b.png")
     s.tap(KEY_END)
-    s.tap(KEY_ESC)
+    s.tap(KEY_ESC, client=False)
     s.gone()
     assert s.finished() == 1
     print("OK: the chooser lists, narrows, walks, saves, picks a directory and draws thumbnails")

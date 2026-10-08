@@ -1,19 +1,19 @@
 """The editor: `imedit FILE` opens the file, or starts one that is not
 there; typing changes it, a copy and a paste go through the compositor's
-clipboard, Ctrl+S writes the file as typed, Ctrl+Q leaves a clean file
-at once and asks over an unsaved one, where Discard throws the changes
-away and Save keeps them; a window closed from outside with unsaved
-changes leaves them next to the file under the backup name; the
-language comes from the extension."""
+clipboard, Ctrl+S writes the file as typed and ends it with a newline,
+Ctrl+Q leaves a clean file at once and asks over an unsaved one, where
+Discard throws the changes away and Save keeps them; a window closed from
+outside with unsaved changes leaves them next to the file under the
+backup name; the language comes from the extension."""
 
 from session import KEY_A, KEY_C, KEY_D, KEY_END, KEY_LEFTCTRL, KEY_Q, KEY_S, KEY_V, Session
 
 
-def chord(s, code):
+def chord(s, code, client=True):
     """Ctrl with a key."""
     s.key(KEY_LEFTCTRL, 1)
-    s.tap(code)
-    s.key(KEY_LEFTCTRL, 0)
+    s.tap(code, client=client)
+    s.key(KEY_LEFTCTRL, 0, client=client)
 
 
 with Session("edit", tool="edit") as s:
@@ -41,9 +41,9 @@ with Session("edit", tool="edit") as s:
     s.tap(KEY_END)
     chord(s, KEY_V)
     chord(s, KEY_S)
-    s.said("saved notes.txt bytes=42")
-    assert notes.read_text() == "hello, world\nline two" * 2, f"the file is not what was typed and pasted: {notes.read_text()!r}"
-    chord(s, KEY_Q)
+    s.said("saved notes.txt bytes=43")
+    assert notes.read_text() == "hello, world\nline two" * 2 + "\n", f"the file is not what was typed and pasted: {notes.read_text()!r}"
+    chord(s, KEY_Q, client=False)
     s.said("quit")
     s.gone()
     assert s.finished() == 0, "the editor did not exit cleanly"
@@ -60,7 +60,7 @@ with Session("edit", tool="edit") as s:
     s.said("modified")
     chord(s, KEY_Q)
     s.said("asking")
-    s.tap(KEY_D)
+    s.tap(KEY_D, client=False)
     s.said("discarded")
     s.said("quit")
     s.gone()
@@ -75,7 +75,7 @@ with Session("edit", tool="edit") as s:
     s.said("modified")
     chord(s, KEY_Q)
     s.said("asking")
-    s.tap(KEY_S)
+    s.tap(KEY_S, client=False)
     s.said("saved main.cpp bytes=34")
     s.said("quit")
     s.gone()

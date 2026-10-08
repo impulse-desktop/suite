@@ -40,6 +40,7 @@ KEY_TAB = 15
 KEY_Q = 16
 KEY_W = 17
 KEY_R = 19
+KEY_I = 23
 KEY_ENTER = 28
 KEY_LEFTCTRL = 29
 KEY_A = 30
@@ -76,12 +77,14 @@ for char, code in zip("!@#$%^&*()_+", range(2, 14)):
     TYPING[char] = (code, True)
 for char, code in zip("qwertyuiop[]", range(16, 28)):
     TYPING[char] = (code, False)
-    TYPING[char.upper()] = (code, True)
+    if char.isalpha():
+        TYPING[char.upper()] = (code, True)
 TYPING["{"] = (26, True)
 TYPING["}"] = (27, True)
 for char, code in zip("asdfghjkl;'", range(30, 41)):
     TYPING[char] = (code, False)
-    TYPING[char.upper()] = (code, True)
+    if char.isalpha():
+        TYPING[char.upper()] = (code, True)
 TYPING[":"] = (39, True)
 TYPING['"'] = (40, True)
 TYPING["`"] = (41, False)
@@ -90,7 +93,8 @@ TYPING["\\"] = (43, False)
 TYPING["|"] = (43, True)
 for char, code in zip("zxcvbnm,./", range(44, 54)):
     TYPING[char] = (code, False)
-    TYPING[char.upper()] = (code, True)
+    if char.isalpha():
+        TYPING[char.upper()] = (code, True)
 TYPING["<"] = (51, True)
 TYPING[">"] = (52, True)
 TYPING["?"] = (53, True)
@@ -294,13 +298,13 @@ class Session:
     def wait(self, predicate, description, timeout=12, client=True):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
+            result = predicate()
+            if result:
+                return result
             if self.compositor.poll() is not None:
                 raise RuntimeError(f"compositor exited: {self.compositor.returncode}")
             if client and self.client is not None and self.client.poll() is not None:
                 raise RuntimeError(f"client exited: {self.client.returncode}; waiting for {description}")
-            result = predicate()
-            if result:
-                return result
             time.sleep(0.04)
         raise AssertionError(f"timed out waiting for {description}")
 
