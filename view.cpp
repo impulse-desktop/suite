@@ -1154,9 +1154,16 @@ void ViewApp::drawGallery() {
 
     ImDrawList* fg = ImGui::GetForegroundDrawList();
 
-    // the frame of the current row, inside the edge of what it is drawn on
+    // the frame of the current row, inside the edge of what it is drawn on:
+    // four filled bands flush with the edge, as a stroked rectangle keeps
+    // half a pixel and its anti-aliasing inside it
     auto framed = [&](ImDrawList* list, ImVec2 a, ImVec2 b) {
-        list->AddRect(ImVec2(a.x + frame / 2.f, a.y + frame / 2.f), ImVec2(b.x - frame / 2.f, b.y - frame / 2.f), ImGui::GetColorU32(ImGuiCol_HeaderActive), 0.f, 0, frame);
+        ImU32 color = ImGui::GetColorU32(ImGuiCol_HeaderActive);
+
+        list->AddRectFilled(a, ImVec2(b.x, a.y + frame), color);
+        list->AddRectFilled(ImVec2(a.x, b.y - frame), b, color);
+        list->AddRectFilled(a, ImVec2(a.x + frame, b.y), color);
+        list->AddRectFilled(ImVec2(b.x - frame, a.y), b, color);
     };
 
     auto draw = [&](size_t i, float rowTop, float h) {
