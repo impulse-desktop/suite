@@ -2313,8 +2313,11 @@ void Screen::draw() {
     Ui& ui = *player->ui;
     ImGuiViewport* vp = ImGui::GetMainViewport();
     // the bar is a line of controls under the video, the style's spacing
-    // between them; the window's padding keeps it from the edges
-    float bar = ImGui::GetFrameHeightWithSpacing();
+    // between them; the window's padding keeps it from the edges. In
+    // fullscreen, however the window got there, there is no bar and no
+    // panel: the video alone.
+    bool chrome = !ui.fullscreen();
+    float bar = chrome ? ImGui::GetFrameHeightWithSpacing() : 0.f;
     double at = position(monotonicNowUs());
 
     ImGui::SetNextWindowPos(vp->Pos);
@@ -2323,10 +2326,10 @@ void Screen::draw() {
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImVec2 room = ImGui::GetContentRegionAvail();
-    float side = panel ? floorf(room.x * sideShare) : 0.f;
+    float side = panel && chrome ? floorf(room.x * sideShare) : 0.f;
     ImU32 black = IM_COL32(0, 0, 0, 255);
 
-    if (panel) {
+    if (panel && chrome) {
         ImGui::BeginChild("panel", ImVec2(side, room.y - bar), 0, ImGuiWindowFlags_NoScrollbar);
         drawPanel();
         ImGui::EndChild();
@@ -2382,6 +2385,12 @@ void Screen::draw() {
         } else {
             ui.requestFrame();
         }
+    }
+
+    if (!chrome) {
+        ImGui::End();
+
+        return;
     }
 
     float square = ImGui::GetFrameHeight();

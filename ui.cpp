@@ -394,6 +394,7 @@ namespace {
         plt::PointerIcon icon = plt::PointerIcon::Text;
         bool shown = false;
         u32 presentedWidth = 0;
+        bool fullscreenNow = false;
         u32 presentedHeight = 0;
         u64 frameBegan = 0;
         u64 frameCount = 0;
@@ -420,6 +421,7 @@ namespace {
         plt::Platform* platform() override;
         void requestFrame() override;
         void requestFullscreen(bool on) override;
+        bool fullscreen() override;
         void requestResize(u32 width, u32 height) override;
         RenderImage* uploadImage(ObjPool& pool, u32 width, u32 height, const void* rgba, bool hdr) override;
         RenderImage* importImage(ObjPool& pool, SharedImage& source, bool hdr) override;
@@ -817,6 +819,10 @@ void UiImpl::requestFullscreen(bool on) {
     window->requestFullscreen(on);
 }
 
+bool UiImpl::fullscreen() {
+    return fullscreenNow;
+}
+
 void UiImpl::requestResize(u32 width, u32 height) {
     if (!window || !width || !height || width > 0x7fffffffu || height > 0x7fffffffu) {
         fail(StringView(u8"invalid window resize"));
@@ -925,6 +931,7 @@ bool UiImpl::frame(const plt::WindowInfo& info) {
 
     // in fullscreen the window has no padding: the screen's edges are the
     // window's, however it got there
+    fullscreenNow = info.fullscreen;
     ImGui::GetStyle().WindowPadding = info.fullscreen ? ImVec2(0.f, 0.f) : windowPadding;
     beginInputFrame();
     ImGui::NewFrame();

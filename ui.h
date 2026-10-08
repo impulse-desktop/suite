@@ -54,6 +54,8 @@ struct Ui {
     // May be called from a worker after create(); delivery is on the UI thread.
     virtual void requestFrame() = 0;
     virtual void requestFullscreen(bool on) = 0;
+    // whether the window is fullscreen, as the window system has it
+    virtual bool fullscreen() = 0;
     virtual void requestResize(u32 width, u32 height) = 0;
 
     virtual RenderImage* uploadImage(stl::ObjPool& pool, u32 width, u32 height, const void* rgba, bool hdr) = 0;
