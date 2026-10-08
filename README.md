@@ -1,4 +1,4 @@
-# impulse suite
+# ImSuite
 
 [![CI](https://github.com/impulse-desktop/suite/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/impulse-desktop/suite/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/impulse-desktop/suite/branch/main/graph/badge.svg)](https://app.codecov.io/gh/impulse-desktop/suite/tree/main)
