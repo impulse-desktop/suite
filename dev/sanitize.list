@@ -1,7 +1,11 @@
-# The image decoder is generated: wasm2c's C from ext/decode/decode.wasm,
-# and the runtime that came with it. Its memory accesses are checked by
-# its own code, and its indirect calls go through the function type wasm
-# gave them, not C's, which UBSan's function check would flag on every
-# call_indirect; instrumenting it would also take the sanitizer builds
-# fifteen minutes.
+# The wasm modules are generated: wasm2c's C from ext/decode/decode.wasm,
+# ext/pdf/pdf.wasm, ext/djvu/djvu.wasm and ext/magic/magic.wasm (built as
+# mime), and the runtime that came with the decoder. Their memory accesses
+# are checked by their own code, and their indirect calls go through the
+# function type wasm gave them, not C's, which UBSan's function check would
+# flag on every call_indirect; instrumenting them would also take the
+# sanitizer builds fifteen minutes.
 src:*/decode/*
+src:*/pdf/*
+src:*/djvu/*
+src:*/mime/*
