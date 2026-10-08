@@ -1280,10 +1280,17 @@ void WindowImpl::requestMaximized(bool value) {
 }
 
 void WindowImpl::requestFullscreen(bool value) {
-    const bool current = (window.styleMask & NSWindowStyleMaskFullScreen) != 0;
-    if (current != value) {
-        [window toggleFullScreen:nil];
-    }
+    NSWindow* const target = window;
+    // [suite] Asynchronous, like every request*. -toggleFullScreen: resizes
+    // the window synchronously, and the layer's displayLayer: then renders a
+    // frame inside the frame that asked, which takes the outer frame's
+    // drawable with it. Defer it, and decide by the state at that moment.
+    dispatch_async(dispatch_get_main_queue(), ^{
+        const bool current = (target.styleMask & NSWindowStyleMaskFullScreen) != 0;
+        if (current != value) {
+            [target toggleFullScreen:nil];
+        }
+    });
 }
 
 void WindowImpl::requestResize(u32 width, u32 height) {

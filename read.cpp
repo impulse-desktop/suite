@@ -989,13 +989,13 @@ void ReadApp::keys() {
         scrollTo(totalH);
     }
 
-    if (ImGui::IsKeyPressed(ImGuiKey_F) || ImGui::IsKeyPressed(ImGuiKey_F11)) {
+    if (ImGui::IsKeyPressed(ImGuiKey_F, false) || ImGui::IsKeyPressed(ImGuiKey_F11, false)) {
         fullscreen = !fullscreen;
         ui->requestFullscreen(fullscreen);
         TRACE(ui, fullscreen ? StringView(u8"fullscreen on") : StringView(u8"fullscreen off"));
     }
 
-    if (ImGui::IsKeyPressed(ImGuiKey_Tab)) {
+    if (ImGui::IsKeyPressed(ImGuiKey_Tab, false)) {
         panel = !panel;
         TRACE(ui, panel ? StringView(u8"panel on") : StringView(u8"panel off"));
     }

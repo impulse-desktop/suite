@@ -200,7 +200,7 @@ void EditApp::keys() {
         askQuit();
     }
 
-    if (ImGui::IsKeyPressed(ImGuiKey_F11)) {
+    if (ImGui::IsKeyPressed(ImGuiKey_F11, false)) {
         fullscreen = !fullscreen;
         ui->requestFullscreen(fullscreen);
         TRACE(ui, fullscreen ? StringView(u8"fullscreen on") : StringView(u8"fullscreen off"));
@@ -260,11 +260,11 @@ void EditApp::draw() {
         ImGui::Text("%.*s has unsaved changes.", (int)name.length(), (const char*)name.begin());
         ImGui::Spacing();
 
-        bool doSave = ImGui::Button("Save") || ImGui::IsKeyPressed(ImGuiKey_S);
+        bool doSave = ImGui::Button("Save") || ImGui::IsKeyPressed(ImGuiKey_S, false);
 
         ImGui::SameLine();
 
-        bool doDiscard = ImGui::Button("Discard") || ImGui::IsKeyPressed(ImGuiKey_D);
+        bool doDiscard = ImGui::Button("Discard") || ImGui::IsKeyPressed(ImGuiKey_D, false);
 
         ImGui::SameLine();
 
