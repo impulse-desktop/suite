@@ -261,7 +261,7 @@ namespace {
     // fills the row; a window has no border, and its background is twice
     // as light as ImGui's dark one and opaque: the frame goes to the window
     // system with its alpha, and the window is not to show what is behind
-    // it.
+    // it. A child, every panel and canvas, is ImGui's dark grey on it.
     static ImGuiStyle scaledStyle(float scale) {
         ImGuiStyle style;
 
@@ -269,6 +269,7 @@ namespace {
         style.CellPadding.y = style.ItemSpacing.y / 2.f;
         style.WindowBorderSize = 0.f;
         style.Colors[ImGuiCol_WindowBg] = ImVec4(.12f, .12f, .12f, 1.f);
+        style.Colors[ImGuiCol_ChildBg] = ImVec4(.06f, .06f, .06f, 1.f);
         style.ScaleAllSizes(scale);
         style.FontScaleMain = scale;
 
