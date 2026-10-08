@@ -4,7 +4,7 @@ ImageMagick and its coders (PNG, JPEG, WebP, TIFF, JPEG 2000, JPEG XL,
 AVIF, GIF, BMP, PNM/PAM, TGA, PCX, SGI, MIFF) as one pure WebAssembly
 module, from [pg83/decode](https://github.com/pg83/decode), built through
 its `build.sh decode` (sha256 of the module
-b0f20b72902e18c8fa879b2ab1ebe38ae50114a587a040e68b989e4d9bbdc456). The
+819a7f4ab00b7e9b03958e7e11d45f22869de1ea1fa9f5115384753faa00d30b). The
 build behind it proves the module imports nothing and decodes every
 format against the host ImageMagick. AVIF comes through libheif with
 libaom's decoder alone, single-threaded; HEIC is not in.
