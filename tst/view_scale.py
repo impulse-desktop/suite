@@ -21,8 +21,8 @@ with Session("view_scale", tool="view") as s:
     s.said("showing a.png 64x48")
     s.settled("scaled")
     # the list is 230 px wide, its rows 230x173 one against the next: the
-    # second row, b.png, spans 204..377 px, the list 31 px down for the
-    # padding, the toolbar and the spacing
+    # second row, b.png, spans 198..371 px, the list 25 px down for the
+    # toolbar and the spacing
     s.click(120, 312)
     s.said("selected b.png")
     s.close()

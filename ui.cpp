@@ -256,7 +256,9 @@ namespace {
     }
 
     // The style of every tool. The spacing is 6 both ways, and so is the
-    // window's padding; the cell padding is half of the spacing, as a
+    // window's padding on macOS, where a window has the system's frame;
+    // on Linux the compositor draws none, and the window's content goes to
+    // its edges. The cell padding is half of the spacing, as a
     // Selectable's band is the spacing taller than its text and a row of a
     // table twice the cell padding taller, so the band fills the row; a
     // window has no border, and its background is twice as light as
@@ -267,7 +269,11 @@ namespace {
         ImGuiStyle style;
 
         style.ItemSpacing = ImVec2(6.f, 6.f);
+#if defined(__APPLE__)
         style.WindowPadding = ImVec2(6.f, 6.f);
+#else
+        style.WindowPadding = ImVec2(0.f, 0.f);
+#endif
         style.CellPadding.y = style.ItemSpacing.y / 2.f;
         style.WindowBorderSize = 0.f;
         style.Colors[ImGuiCol_WindowBg] = ImVec4(.12f, .12f, .12f, 1.f);
