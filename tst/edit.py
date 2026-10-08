@@ -76,7 +76,7 @@ with Session("edit", tool="edit") as s:
     chord(s, KEY_Q)
     s.said("asking")
     s.tap(KEY_S, client=False)
-    s.said("saved main.cpp bytes=34")
+    s.said("saved main.cpp bytes=32")
     s.said("quit")
     s.gone()
     assert s.finished() == 0, "the editor did not exit cleanly"
