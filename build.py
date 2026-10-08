@@ -230,7 +230,7 @@ decode_defines = [
 # names no inputs: naming the headers too repeats the producer among a
 # shard's dependencies, and the runner then keeps a second copy of every
 # shard for the scenarios, whose dependency on im_test lists it once
-def wasm_library(name, module, shards, runtime):
+def wasm_library(name, module, shards, runtime, cflags=()):
     out_dir = f"$(B)/{name}"
     sources = [f"{out_dir}/{name}_{i}.c" for i in range(shards)]
     headers = [f"{out_dir}/{name}.h", f"{out_dir}/{name}-impl.h"]
@@ -250,7 +250,7 @@ def wasm_library(name, module, shards, runtime):
     return library(
         name=name,
         srcs=[*sources, *[path for path in runtime_files if runtime and path.endswith(".c")]],
-        cflags=["-g0", "-w", "-fexceptions"],
+        cflags=["-g0", "-w", "-fexceptions", *cflags],
         cppflags=decode_defines,
         includes=[out_dir],
         public_cppflags=[f"-I{out_dir}", *decode_defines],
@@ -269,7 +269,7 @@ pdf = wasm_library("pdf", wasm_module(flags.pdf_wasm, "$(S)/ext/pdf/pdf.wasm"), 
 djvu = wasm_library("djvu", wasm_module(flags.djvu_wasm, "$(S)/ext/djvu/djvu.wasm"), 4, False)
 # libmagic (ext/magic), the viewer's MIME type of a file; under the name
 # mime, as the realm may carry libmagic's own magic.h
-mime = wasm_library("mime", wasm_module(flags.magic_wasm, "$(S)/ext/magic/magic.wasm"), 4, False)
+mime = wasm_library("mime", wasm_module(flags.magic_wasm, "$(S)/ext/magic/magic.wasm"), 4, False, ["-O1"])
 
 
 # Linux builds every tool over Vulkan; macOS the runtime's tools over Metal.
