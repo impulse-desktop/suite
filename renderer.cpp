@@ -2138,7 +2138,7 @@ namespace {
         void writeTexture(Texture& tex, const u8* pixels, size_t pitch, u32 x, u32 y, u32 w, u32 h, bool fresh);
         void readTexture(VkImage image, VkImageLayout held, int x, int y, u32 w, u32 h, PixelLayout layout, ImagePixels& out);
         void destroyTexture(Texture& tex);
-        void reserve(Buffer& buffer, VkDeviceSize size);
+        bool reserve(Buffer& buffer, VkDeviceSize size);
         void releaseBuffer(Buffer& buffer);
         bool importHost(HostBuffer& host, size_t size, VkBufferUsageFlags usage);
         void allocateHost(HostBuffer& host, const void* source, size_t size, size_t bytes, VkBufferUsageFlags usage);
@@ -3168,11 +3168,14 @@ void Gpu::releaseBuffer(Buffer& buffer) {
     buffer = Buffer();
 }
 
-void Gpu::reserve(Buffer& buffer, VkDeviceSize size) {
+// grows the buffer to hold size bytes; true when it is a new buffer, whose
+// descriptors are to be written again: the handle may be the old one's, as
+// the driver gives a freed buffer's address to the next it makes
+bool Gpu::reserve(Buffer& buffer, VkDeviceSize size) {
     size = size < 256 ? 256 : size;
 
     if (buffer.size >= size) {
-        return;
+        return false;
     }
 
     releaseBuffer(buffer);
@@ -3201,6 +3204,8 @@ void Gpu::reserve(Buffer& buffer, VkDeviceSize size) {
     vkc(vkBindBufferMemory(device, buffer.buffer, buffer.memory, 0));
     vkc(vkMapMemory(device, buffer.memory, 0, VK_WHOLE_SIZE, 0, &buffer.map));
     buffer.size = capacity;
+
+    return true;
 }
 
 void Gpu::bindCompose(VkDescriptorSet set, Buffer (&buffers)[composeBuffers], VkImageView target, bool content) {
@@ -3212,15 +3217,13 @@ void Gpu::bindCompose(VkDescriptorSet set, Buffer (&buffers)[composeBuffers], Vk
     u32 written = 0;
 
     for (u32 i = 0; i < composeBuffers; i++) {
-        VkBuffer before = buffers[i].buffer;
-
-        reserve(buffers[i], content ? sizes[i] : 0);
+        bool made = reserve(buffers[i], content ? sizes[i] : 0);
 
         if (content && sizes[i]) {
             memcpy(buffers[i].map, sources[i], sizes[i]);
         }
 
-        if (buffers[i].buffer != before) {
+        if (made) {
             infos[i] = {buffers[i].buffer, 0, VK_WHOLE_SIZE};
             writes[written] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
             writes[written].dstSet = set;
