@@ -1,8 +1,10 @@
 # ImSuite
 
 [![CI](https://github.com/impulse-desktop/suite/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/impulse-desktop/suite/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/impulse-desktop/suite/branch/main/graph/badge.svg)](https://app.codecov.io/gh/impulse-desktop/suite/tree/main)
 [![release](https://img.shields.io/github/v/release/impulse-desktop/suite?label=release&color=blue)](https://github.com/impulse-desktop/suite/releases/latest)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![C++23](https://img.shields.io/badge/C%2B%2B-23-informational)](STYLE.md)
 
 The desktop tools of the impulse desktop in one binary, `im`: a
 screenshot editor, an image viewer, a video player, a PDF and DjVu reader,
