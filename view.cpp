@@ -1041,9 +1041,9 @@ void ViewApp::keys() {
 }
 
 // the rows down the list, the list's width each and the image's shape,
-// the style's spacing between them, the current one framed inside its
-// edge in the colour of a selected item; the thumbnails bulge towards
-// the pointer, over their rows
+// one against the next, the current one framed inside its edge in the
+// colour of an active item; the thumbnails bulge towards the pointer,
+// over their rows
 void ViewApp::drawGallery() {
     float g = ImGui::GetStyle().ItemSpacing.y;
     float frame = ui->px(mark);
@@ -1075,10 +1075,9 @@ void ViewApp::drawGallery() {
             currentH = h;
         }
 
-        total += h + g;
+        total += h;
     }
 
-    total = max(0.f, total - g);
     ImGui::Dummy(ImVec2(innerW, total));
 
     if (scrollToCurrent) {
@@ -1150,14 +1149,14 @@ void ViewApp::drawGallery() {
             }
         }
 
-        top = bottom + g;
+        top = bottom;
     }
 
     ImDrawList* fg = ImGui::GetForegroundDrawList();
 
     // the frame of the current row, inside the edge of what it is drawn on
     auto framed = [&](ImDrawList* list, ImVec2 a, ImVec2 b) {
-        list->AddRect(ImVec2(a.x + frame / 2.f, a.y + frame / 2.f), ImVec2(b.x - frame / 2.f, b.y - frame / 2.f), ImGui::GetColorU32(ImGuiCol_Header), 0.f, 0, frame);
+        list->AddRect(ImVec2(a.x + frame / 2.f, a.y + frame / 2.f), ImVec2(b.x - frame / 2.f, b.y - frame / 2.f), ImGui::GetColorU32(ImGuiCol_HeaderActive), 0.f, 0, frame);
     };
 
     auto draw = [&](size_t i, float rowTop, float h) {
@@ -1228,7 +1227,7 @@ void ViewApp::drawGallery() {
             float h = rowHeightFor(*entries[i], innerW);
 
             draw(i, y, h);
-            y += h + g;
+            y += h;
         }
 
         if (nearest != count) {
@@ -1238,7 +1237,7 @@ void ViewApp::drawGallery() {
                 float h = rowHeightFor(*entries[i], innerW);
 
                 draw(i, bottom - h, h);
-                bottom -= h + g;
+                bottom -= h;
             }
 
             draw(nearest, bottom - rowHeightFor(*entries[nearest], innerW), rowHeightFor(*entries[nearest], innerW));
