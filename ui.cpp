@@ -384,6 +384,8 @@ namespace {
         Buffer error;
         bool finished = false;
         float scale = 1.f;
+        // the style's padding of the window, kept while fullscreen takes it
+        ImVec2 windowPadding;
         bool traceFrames = false;
         plt::Window* window = nullptr;
         plt::LoopWake* wake = nullptr;
@@ -717,6 +719,7 @@ void UiImpl::init(const UiOptions& options) {
         dropTextures();
     });
     setupImGuiContext(*pool, scale);
+    windowPadding = ImGui::GetStyle().WindowPadding;
     renderer = Renderer::create(*pool, *platform_, shown, options.renderer);
 
     window = &shown;
@@ -920,6 +923,9 @@ bool UiImpl::frame(const plt::WindowInfo& info) {
 
     u64 begun = monotonicNowUs();
 
+    // in fullscreen the window has no padding: the screen's edges are the
+    // window's, however it got there
+    ImGui::GetStyle().WindowPadding = info.fullscreen ? ImVec2(0.f, 0.f) : windowPadding;
     beginInputFrame();
     ImGui::NewFrame();
 
