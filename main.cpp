@@ -1,8 +1,8 @@
 #include "edit.h"
-#include "choose.h"
 #include "play.h"
 #include "read.h"
 #include "view.h"
+#include "choose.h"
 #include "ui_demo.h"
 
 #if !defined(__APPLE__)
