@@ -114,7 +114,12 @@ the tree.
 Images are decoded by ImageMagick, vendored as one pure WebAssembly module
 (`ext/decode/decode.wasm`, from [pg83/decode](https://github.com/pg83/decode))
 that wasm2c turns into C at build time: a sandboxed library of the binary,
-every memory access checked, with no interpreter or JIT behind it.
+every memory access checked, with no interpreter or JIT behind it. The
+page engines (`ext/pdf`, `ext/djvu`) and the MIME engine (`ext/magic`)
+come the same way. `-Ddecode_wasm=PATH`, `-Dpdf_wasm=PATH`,
+`-Ddjvu_wasm=PATH` and `-Dmagic_wasm=PATH` compile the module at PATH in
+place of the vendored one, as the ix package does with the modules ix
+builds itself.
 
 ## macOS
 

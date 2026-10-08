@@ -34,6 +34,10 @@ flags.allow({
     "shard": {"descr": "K/N: run only the K-th of N stable slices of the scenarios (0-based)", "default": ""},
     "runtime": {"descr": "a short dir for the scenarios' runtime dirs (Wayland sockets)", "default": ""},
     "evidence": {"descr": "a dir that keeps a failed scenario's captures and logs, under its name", "default": ""},
+    "decode_wasm": {"descr": "the image decoder module, in place of ext/decode/decode.wasm", "default": ""},
+    "pdf_wasm": {"descr": "the PDF module, in place of ext/pdf/pdf.wasm", "default": ""},
+    "djvu_wasm": {"descr": "the DjVu module, in place of ext/djvu/djvu.wasm", "default": ""},
+    "magic_wasm": {"descr": "the MIME module, in place of ext/magic/magic.wasm", "default": ""},
 })
 
 
@@ -253,16 +257,19 @@ def wasm_library(name, module, shards, runtime):
         deps=[generated],
     )
 
+def wasm_module(flag, vendored):
+    return os.path.abspath(flag) if flag else vendored
+
 # the image decoder with the runtime, then the page engines: PDFium
 # (ext/pdf) and DjVuLibre (ext/djvu), the reader's, with the same
 # exports under their own prefix (see their READMEs), and the MIME
 # engine
-decode = wasm_library("decode", "$(S)/ext/decode/decode.wasm", 16, True)
-pdf = wasm_library("pdf", "$(S)/ext/pdf/pdf.wasm", 8, False)
-djvu = wasm_library("djvu", "$(S)/ext/djvu/djvu.wasm", 4, False)
+decode = wasm_library("decode", wasm_module(flags.decode_wasm, "$(S)/ext/decode/decode.wasm"), 16, True)
+pdf = wasm_library("pdf", wasm_module(flags.pdf_wasm, "$(S)/ext/pdf/pdf.wasm"), 8, False)
+djvu = wasm_library("djvu", wasm_module(flags.djvu_wasm, "$(S)/ext/djvu/djvu.wasm"), 4, False)
 # libmagic (ext/magic), the viewer's MIME type of a file; under the name
 # mime, as the realm may carry libmagic's own magic.h
-mime = wasm_library("mime", "$(S)/ext/magic/magic.wasm", 4, False)
+mime = wasm_library("mime", wasm_module(flags.magic_wasm, "$(S)/ext/magic/magic.wasm"), 4, False)
 
 
 # Linux builds every tool over Vulkan; macOS the runtime's tools over Metal.
