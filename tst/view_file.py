@@ -1,7 +1,7 @@
 """`imview FILE` opens the file among its directory's images, selected:
 an image starts loading before its directory is listed, the listing goes
 on in the background; a file whose name says nothing about its format is
-listed all the same, first, and decoded by its bytes; several files make
+listed all the same by its bytes, and decoded by them; several files make
 the list themselves, in the given order; q leaves the viewer."""
 
 from session import KEY_LEFT, KEY_Q, Session, near, write_png
@@ -22,10 +22,10 @@ with Session("view_file", tool="view") as s:
     s.launch(str(pics / "b.png"))
     s.focus()
     r = s.window()["rect"]
-    s.said("listed 3")
+    s.said("listed 4")
     s.said("selected b.png")
     log = s.client_log()
-    assert log.index("im view: selected b.png") < log.index("im view: listed 3"), "the image waited for its directory's listing"
+    assert log.index("im view: selected b.png") < log.index("im view: listed 4"), "the image waited for its directory's listing"
     assert log.count("im view: selected ") == 1, "the listing selected the image again"
     s.said("showing b.png 80x60")
     shows((0, 255, 0), 4500, "b")

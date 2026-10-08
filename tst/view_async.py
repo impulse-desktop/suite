@@ -5,7 +5,7 @@ import errno
 import os
 from pathlib import Path
 
-from session import KEY_HOME, KEY_LEFT, KEY_RIGHT, Session, near, png, write_png
+from session import KEY_HOME, KEY_I, KEY_LEFT, KEY_RIGHT, Session, near, png, write_png
 
 
 with Session("view_async", tool="view") as s:
@@ -18,6 +18,8 @@ with Session("view_async", tool="view") as s:
     s.said("showing a.png")
     for name in ("a", "b", "c"):
         s.said(f"thumbnail {name}.png")
+    s.tap(KEY_I)
+    s.said("info on")
     r = s.window()["rect"]
     canvas = (220, 0, r["width"] - 420, r["height"])
     panel = (r["width"] - 200, 0, 200, r["height"])
