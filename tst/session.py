@@ -298,12 +298,13 @@ class Session:
     def wait(self, predicate, description, timeout=12, client=True):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
+            exited = client and self.client is not None and self.client.poll() is not None
             result = predicate()
             if result:
                 return result
             if self.compositor.poll() is not None:
                 raise RuntimeError(f"compositor exited: {self.compositor.returncode}")
-            if client and self.client is not None and self.client.poll() is not None:
+            if exited:
                 raise RuntimeError(f"client exited: {self.client.returncode}; waiting for {description}")
             time.sleep(0.04)
         raise AssertionError(f"timed out waiting for {description}")

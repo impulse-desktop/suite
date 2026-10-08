@@ -10,8 +10,8 @@ from session import KEY_BACKSPACE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC, KEY_G,
 
 
 def answer(s):
-    """The tool's stdout lines that are not its own trace."""
-    return [line for line in s.client_log().splitlines() if line and not line.startswith("im choose:")]
+    """The tool's stdout lines that are not the test build's trace."""
+    return [line for line in s.client_log().splitlines() if line and not line.startswith("im ")]
 
 
 with Session("choose", tool="choose") as s:
