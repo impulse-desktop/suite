@@ -1296,10 +1296,6 @@ void ViewApp::drawInfo() {
         ImGui::EndTable();
     }
 
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Spacing();
-
     if (ImGui::CollapsingHeader("File", ImGuiTreeNodeFlags_DefaultOpen) && table("file")) {
         StringView whole = StringView(entry.path);
 
