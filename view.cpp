@@ -404,7 +404,7 @@ namespace {
         int rotation = 0;
         bool fullscreen = false;
         bool panel = true;
-        bool info = true;
+        bool info = false;
         bool scrollToCurrent = true;
         float tracedScrollY = 0.f;
 
@@ -425,6 +425,7 @@ namespace {
         void fitView();
         void keys();
         void draw();
+        void drawTools();
         void drawGallery();
         void drawCanvas();
         void drawInfo();
@@ -1388,6 +1389,53 @@ void ViewApp::drawCanvas() {
     dl->AddImageQuad(shown->texture, p0, ImVec2(p1.x, p0.y), p1, ImVec2(p0.x, p1.y), uv[(4 - r) & 3], uv[(5 - r) & 3], uv[(6 - r) & 3], uv[(7 - r) & 3]);
 }
 
+// the toolbar over the list: the info panel's switch, zoom in and out by
+// the wheel's step, and the zoom as a list of steps with the fit first
+void ViewApp::drawTools() {
+    static const i64 steps[] = {25, 50, 75, 100, 150, 200, 300, 400};
+    i64 percent = (i64)(zoom * 100.f + .5f);
+    StringBuilder current;
+
+    current << percent << StringView(u8"%");
+
+    if (ImGui::Checkbox("I", &info)) {
+        TRACE(ui, info ? StringView(u8"info on") : StringView(u8"info off"));
+    }
+
+    ImGui::SameLine();
+
+    if (ImGui::Button("+")) {
+        setZoom(zoom * zoomStep);
+    }
+
+    ImGui::SameLine();
+
+    if (ImGui::Button("-")) {
+        setZoom(zoom / zoomStep);
+    }
+
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(-FLT_MIN);
+
+    if (ImGui::BeginCombo("##zoom", fit ? "Fit" : (const char*)current.cStr())) {
+        if (ImGui::Selectable("Fit", fit)) {
+            fitView();
+        }
+
+        for (i64 step : steps) {
+            StringBuilder label;
+
+            label << step << StringView(u8"%");
+
+            if (ImGui::Selectable((const char*)label.cStr(), !fit && percent == step)) {
+                setZoom((float)step / 100.f);
+            }
+        }
+
+        ImGui::EndCombo();
+    }
+}
+
 void ViewApp::draw() {
     wantedThumbs.clear();
     ImGuiViewport* vp = ImGui::GetMainViewport();
@@ -1400,10 +1448,17 @@ void ViewApp::draw() {
     bool left = panel && !fullscreen;
     bool right = info && !fullscreen;
 
+    // the toolbar and the list are one column, a group, so that the canvas
+    // stands beside both
     if (left) {
+        ImGui::BeginGroup();
+        ImGui::BeginChild("tools", ImVec2(sideW, ImGui::GetFrameHeight()), 0, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        drawTools();
+        ImGui::EndChild();
         ImGui::BeginChild("gallery", ImVec2(sideW, 0.f), 0, ImGuiWindowFlags_NoScrollbar);
         drawGallery();
         ImGui::EndChild();
+        ImGui::EndGroup();
         ImGui::SameLine();
     }
 

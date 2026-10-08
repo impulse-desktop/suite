@@ -19,9 +19,9 @@ with Session("view_open", tool="view") as s:
     s.said("showing a.png 64x48")
     for name in ("a.png", "b.png", "c.png"):
         s.said(f"thumbnail {name}")
-    # the canvas sits between the list and the properties panel, a fifth
-    # of the width (200 px) each; a thumbnail bulging towards the pointer
-    # reaches 215 px, so the region starts past that
+    # the canvas sits right of the list, a fifth of the width (200 px); a
+    # thumbnail bulging towards the pointer reaches 215 px, so the region
+    # starts past that, and stops where the info panel would be
     r = s.window()["rect"]
     canvas = (220, 0, r["width"] - 420, r["height"])
 
@@ -50,8 +50,8 @@ with Session("view_open", tool="view") as s:
     s.tap(KEY_LEFT)  # already first: stays
     # the list's rows are as wide as the list (200 px) and as tall as the
     # image's proportion, one against the next: a.png and b.png 150 px,
-    # c.png 200 px; the third row starts 306 px down, the list 6 px down
-    # for the padding
+    # c.png 200 px; the third row starts 331 px down, the list 31 px down
+    # for the padding, the toolbar and the spacing
     s.click(100, 400)
     s.said("selected c.png", 2)
     shows((0, 0, 255), 900, "c-clicked")
