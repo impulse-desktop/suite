@@ -91,7 +91,9 @@ namespace {
         StringView name() const;
     };
 
-    static Image* decodeFile(ObjPool& pool, Buffer& path, size_t nameAt, u32 side, Buffer& timing) {
+    // the file decoded and fitted to a side: as a thumbnail, its transparent
+    // margins cut before it is scaled; as the image to show, whole
+    static Image* decodeFile(ObjPool& pool, Buffer& path, size_t nameAt, u32 side, bool asThumbnail, Buffer& timing) {
         u64 began = monotonicNowUs();
         Buffer file;
 
@@ -102,7 +104,7 @@ namespace {
 
         u64 decoded = monotonicNowUs();
 
-        image = shrink(pool, image, side);
+        image = asThumbnail ? thumbnail(pool, image, side) : shrink(pool, image, side);
 
         StringBuilder text;
 
@@ -517,7 +519,7 @@ void Decoded::run() {
     }
 
     try {
-        image = decodeFile(*owner, path, nameAt, side, timing);
+        image = decodeFile(*owner, path, nameAt, side, request == 0, timing);
         if (thumbSide) {
             thumb = thumbnail(*owner, image, thumbSide);
         }
