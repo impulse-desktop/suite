@@ -261,8 +261,8 @@ namespace {
     // its edges. The cell padding is half of the spacing, as a
     // Selectable's band is the spacing taller than its text and a row of a
     // table twice the cell padding taller, so the band fills the row; a
-    // window has no border, and its background is twice as light as
-    // ImGui's dark one and opaque: the frame goes to the window system
+    // window has no border, and its background is a 0.4 grey, opaque: the
+    // frame goes to the window system
     // with its alpha, and the window is not to show what is behind it. A
     // child, every panel and canvas, is ImGui's dark grey on it.
     static ImGuiStyle scaledStyle(float scale) {
@@ -276,7 +276,7 @@ namespace {
 #endif
         style.CellPadding.y = style.ItemSpacing.y / 2.f;
         style.WindowBorderSize = 0.f;
-        style.Colors[ImGuiCol_WindowBg] = ImVec4(.12f, .12f, .12f, 1.f);
+        style.Colors[ImGuiCol_WindowBg] = ImVec4(.4f, .4f, .4f, 1.f);
         style.Colors[ImGuiCol_ChildBg] = ImVec4(.06f, .06f, .06f, 1.f);
         style.ScaleAllSizes(scale);
         style.FontScaleMain = scale;
