@@ -172,8 +172,8 @@ class Session:
                 'default_border none\n'
                 'default_floating_border none\n'
                 'focus_follows_mouse no\n'
-                'for_window [app_id="^im-"] floating enable\n'
-                'for_window [app_id="^im-"] move position 40 50\n'
+                'for_window [app_id="^Im"] floating enable\n'
+                'for_window [app_id="^Im"] move position 40 50\n'
                 'input * xkb_layout us\n'
             )
             # the Vulkan validation layer is the tool's, not the compositor's;
@@ -324,7 +324,7 @@ class Session:
         found = []
 
         def visit(node):
-            if (node.get("app_id") or "").startswith("im-"):
+            if (node.get("app_id") or "").startswith("Im"):
                 found.append(node)
             for child in node.get("nodes", []) + node.get("floating_nodes", []):
                 visit(child)

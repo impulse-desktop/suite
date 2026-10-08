@@ -720,7 +720,14 @@ void UiImpl::init(const UiOptions& options) {
     int width = (int)px(options.width);
     int height = (int)px(options.height);
 
-    appId << StringView(u8"im-") << name;
+    appId << StringView(u8"Im");
+
+    if (!name.empty()) {
+        u8 first = name[0] >= 'a' && name[0] <= 'z' ? (u8)(name[0] - 'a' + 'A') : name[0];
+
+        appId << StringView(&first, 1) << StringView(name.begin() + 1, name.end());
+    }
+
     title << StringView(u8"im ") << name;
 
     plt::WindowOptions made;
