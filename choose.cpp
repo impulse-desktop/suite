@@ -61,12 +61,6 @@ namespace {
     constexpr size_t mimeTypeLimit = 256;
     constexpr size_t fieldBytes = 4096;
 
-    enum class Mode : u8 {
-        Open,
-        Save,
-        Directory
-    };
-
     enum class Load : u8 {
         None,
         Ready,
@@ -83,6 +77,36 @@ namespace {
         Buffer label;
         Vector<Pattern*> patterns;
     };
+
+    Filter* parseFilter(ObjPool& pool, StringView value) {
+        Filter* f = pool.make<Filter>();
+        size_t from = 0;
+
+        for (size_t k = 0; k <= value.length(); k++) {
+            if (k == value.length() || value[k] == '|') {
+                StringView part(value.begin() + from, value.begin() + k);
+
+                from = k + 1;
+
+                if (f->label.empty() && f->patterns.empty()) {
+                    f->label = Buffer(part);
+                } else if (!part.empty()) {
+                    Pattern* p = pool.make<Pattern>();
+
+                    p->text = Buffer(part);
+                    p->type = false;
+
+                    for (size_t c = 0; c < part.length(); c++) {
+                        p->type = p->type || part[c] == '/';
+                    }
+
+                    f->patterns.pushBack(p);
+                }
+            }
+        }
+
+        return f->patterns.empty() ? nullptr : f;
+    }
 
     // one entry of the directory shown
     struct Item {
@@ -210,16 +234,16 @@ namespace {
         }
     };
 
-    struct ChooseApp;
+    struct ChooserImpl;
 
     // what a worker does, and brings back to the screen
     struct Job: Runable {
         ObjPool* owner;
-        ChooseApp* app;
+        ChooserImpl* app;
         bool listing;
         Buffer error;
 
-        Job(ObjPool* owner, ChooseApp& app, bool listing);
+        Job(ObjPool* owner, ChooserImpl& app, bool listing);
         void post();
     };
 
@@ -229,7 +253,7 @@ namespace {
         u64 generation;
         Vector<Item*> items;
 
-        Listed(ObjPool* owner, ChooseApp& app, StringView dir, u64 generation);
+        Listed(ObjPool* owner, ChooserImpl& app, StringView dir, u64 generation);
         void run() override;
     };
 
@@ -240,7 +264,7 @@ namespace {
         size_t index;
         Image* image = nullptr;
 
-        Decoded(ObjPool* owner, ChooseApp& app, StringView path, u64 generation, size_t index);
+        Decoded(ObjPool* owner, ChooserImpl& app, StringView path, u64 generation, size_t index);
         void run() override;
     };
 
@@ -251,10 +275,10 @@ namespace {
         void run() override;
     };
 
-    struct ChooseApp {
+    struct ChooserImpl final: public Chooser {
         Ui* ui = nullptr;
         ObjPool* pool = nullptr;
-        Mode mode = Mode::Open;
+        ChooseMode mode = ChooseMode::Open;
         bool multiple = false;
         Buffer title;
         Vector<Filter*> filters;
@@ -313,7 +337,8 @@ namespace {
         void complete();
         void finish(bool ok);
         void keys();
-        void draw();
+        bool draw(VisitChosen& visitor) override;
+        void drawBody();
         void drawPlaces(float height);
         void drawTable(float height);
         void drawGrid(float height);
@@ -504,7 +529,7 @@ namespace {
     }
 }
 
-Job::Job(ObjPool* owner_, ChooseApp& app_, bool listing_)
+Job::Job(ObjPool* owner_, ChooserImpl& app_, bool listing_)
     : owner(owner_)
     , app(&app_)
     , listing(listing_)
@@ -518,7 +543,7 @@ void Job::post() {
     notify->requestFrame();
 }
 
-Listed::Listed(ObjPool* owner, ChooseApp& app, StringView dir_, u64 generation_)
+Listed::Listed(ObjPool* owner, ChooserImpl& app, StringView dir_, u64 generation_)
     : Job(owner, app, true)
     , dir(dir_)
     , generation(generation_)
@@ -559,7 +584,7 @@ void Listed::run() {
     post();
 }
 
-Decoded::Decoded(ObjPool* owner, ChooseApp& app, StringView path_, u64 generation_, size_t index_)
+Decoded::Decoded(ObjPool* owner, ChooserImpl& app, StringView path_, u64 generation_, size_t index_)
     : Job(owner, app, false)
     , path(path_)
     , generation(generation_)
@@ -596,7 +621,7 @@ void Worker::run() {
     }
 }
 
-void ChooseApp::startWorkers(ObjPool& pool) {
+void ChooserImpl::startWorkers(ObjPool& pool) {
     jobs = Channel::create(&pool, workerCount);
     results = Channel::create(&pool, workerCount);
 
@@ -609,7 +634,7 @@ void ChooseApp::startWorkers(ObjPool& pool) {
     });
 }
 
-void ChooseApp::stopWorkers() {
+void ChooserImpl::stopWorkers() {
     void* item;
 
     jobs->close();
@@ -629,7 +654,7 @@ void ChooseApp::stopWorkers() {
     }
 }
 
-void ChooseApp::setup(StringView start) {
+void ChooserImpl::setup(StringView start) {
     readPlaces();
     go(start);
 }
@@ -639,7 +664,7 @@ void ChooseApp::setup(StringView start) {
 // where ~/.config/user-dirs.dirs says or under the home by that name, each
 // if it is there; the applications on a Mac; then the volumes mounted for
 // the user, and the root.
-void ChooseApp::readPlaces() {
+void ChooserImpl::readPlaces() {
     const char* home = getenv("HOME");
     Buffer homePath = normalize(StringView(home ? home : "/"));
 
@@ -784,7 +809,7 @@ void ChooseApp::readPlaces() {
 }
 
 // the directory shown, listed anew by a worker; the line follows it
-void ChooseApp::go(StringView to) {
+void ChooserImpl::go(StringView to) {
     Buffer plain = normalize(to);
 
     if (!isDir(StringView(plain))) {
@@ -818,7 +843,7 @@ void ChooseApp::go(StringView to) {
     ui->requestFrame();
 }
 
-void ChooseApp::accept() {
+void ChooserImpl::accept() {
     void* item;
 
     while (results->tryDequeue(&item)) {
@@ -837,7 +862,7 @@ void ChooseApp::accept() {
     }
 }
 
-void ChooseApp::take(Listed& listed) {
+void ChooserImpl::take(Listed& listed) {
     if (listed.generation != generation) {
         return;
     }
@@ -877,7 +902,7 @@ void ChooseApp::take(Listed& listed) {
     ui->requestFrame();
 }
 
-void ChooseApp::take(Decoded& decoded) {
+void ChooserImpl::take(Decoded& decoded) {
     if (decoded.generation != generation || decoded.index >= items.length()) {
         return;
     }
@@ -901,13 +926,13 @@ void ChooseApp::take(Decoded& decoded) {
     ui->requestFrame();
 }
 
-void ChooseApp::dispatch(Job* job) {
+void ChooserImpl::dispatch(Job* job) {
     ++inFlight;
     jobs->enqueue(job);
 }
 
 // the thumbnails the grid wants, in its order
-void ChooseApp::submit() {
+void ChooserImpl::submit() {
     if (!grid) {
         return;
     }
@@ -933,7 +958,7 @@ void ChooseApp::submit() {
 // whether the entry is shown: hidden ones on request, directories always
 // but in the directory mode nothing else, files through the filter and
 // through what is typed after the slash
-bool ChooseApp::passes(const Item& item) {
+bool ChooserImpl::passes(const Item& item) {
     if (item.hidden && !showHidden) {
         return false;
     }
@@ -945,7 +970,7 @@ bool ChooseApp::passes(const Item& item) {
         return containsFolded(name, typed);
     }
 
-    if (mode == Mode::Directory) {
+    if (mode == ChooseMode::Directory) {
         return false;
     }
 
@@ -964,7 +989,7 @@ bool ChooseApp::passes(const Item& item) {
     return containsFolded(name, typed);
 }
 
-void ChooseApp::refilter() {
+void ChooserImpl::refilter() {
     size_t was = cursor < items.length() ? cursor : (size_t)-1;
 
     shown.clear();
@@ -995,7 +1020,7 @@ void ChooseApp::refilter() {
 }
 
 // the line holds the directory with a slash, then the name typed
-void ChooseApp::setFieldDir(StringView to) {
+void ChooserImpl::setFieldDir(StringView to) {
     StringView name = fieldName();
     StringBuilder text;
     Buffer kept(name);
@@ -1016,7 +1041,7 @@ void ChooseApp::setFieldDir(StringView to) {
     fieldDirty = true;
 }
 
-void ChooseApp::setFieldName(StringView name) {
+void ChooserImpl::setFieldName(StringView name) {
     StringBuilder text;
 
     text << StringView(fieldDir) << name;
@@ -1028,7 +1053,7 @@ void ChooseApp::setFieldName(StringView name) {
     fieldDirty = true;
 }
 
-StringView ChooseApp::fieldName() {
+StringView ChooserImpl::fieldName() {
     StringView whole(field);
     size_t slash = whole.length();
 
@@ -1042,7 +1067,7 @@ StringView ChooseApp::fieldName() {
 // what the line says now: the directory's slash taken away is the
 // directory above; a directory part that exists and differs from the one
 // shown moves there; the name part filters the entries
-void ChooseApp::syncField() {
+void ChooserImpl::syncField() {
     StringView whole(field);
     StringView was(fieldDir);
 
@@ -1074,7 +1099,7 @@ void ChooseApp::syncField() {
     refilter();
 }
 
-void ChooseApp::select(size_t index, bool extend, bool toggle) {
+void ChooserImpl::select(size_t index, bool extend, bool toggle) {
     if (index >= items.length()) {
         return;
     }
@@ -1084,7 +1109,7 @@ void ChooseApp::select(size_t index, bool extend, bool toggle) {
             item->selected = false;
         }
 
-        items[index]->selected = mode != Mode::Save || !items[index]->dir;
+        items[index]->selected = mode != ChooseMode::Save || !items[index]->dir;
         anchor = index;
     } else if (toggle) {
         items[index]->selected = !items[index]->selected;
@@ -1105,7 +1130,7 @@ void ChooseApp::select(size_t index, bool extend, bool toggle) {
 
     cursor = index;
 
-    if (mode == Mode::Save && !items[index]->dir) {
+    if (mode == ChooseMode::Save && !items[index]->dir) {
         setFieldName(StringView(items[index]->name));
     }
 
@@ -1116,7 +1141,7 @@ void ChooseApp::select(size_t index, bool extend, bool toggle) {
 }
 
 // a directory entered, a file chosen
-void ChooseApp::activate(size_t index) {
+void ChooserImpl::activate(size_t index) {
     if (index >= items.length()) {
         return;
     }
@@ -1129,7 +1154,7 @@ void ChooseApp::activate(size_t index) {
         return;
     }
 
-    if (mode == Mode::Directory) {
+    if (mode == ChooseMode::Directory) {
         return;
     }
 
@@ -1140,11 +1165,11 @@ void ChooseApp::activate(size_t index) {
 // Enter on the line: a directory typed goes there, a name of an entry
 // takes it, a name to save under is the answer; nothing typed is the
 // entry under the cursor, or in the directory mode the directory itself
-void ChooseApp::enter() {
+void ChooserImpl::enter() {
     StringView name = fieldName();
 
     if (name.empty()) {
-        if (mode == Mode::Directory && !(cursor < items.length() && items[cursor]->selected)) {
+        if (mode == ChooseMode::Directory && !(cursor < items.length() && items[cursor]->selected)) {
             finish(true);
         } else if (cursor < items.length()) {
             activate(cursor);
@@ -1161,7 +1186,7 @@ void ChooseApp::enter() {
         return;
     }
 
-    if (mode == Mode::Save) {
+    if (mode == ChooseMode::Save) {
         finish(true);
 
         return;
@@ -1181,7 +1206,7 @@ void ChooseApp::enter() {
 }
 
 // Tab on the line: the name grows to the longest start the shown entries share
-void ChooseApp::complete() {
+void ChooserImpl::complete() {
     StringView typed = fieldName();
     StringView common;
     bool first = true;
@@ -1214,7 +1239,7 @@ void ChooseApp::complete() {
 }
 
 // the answer: the paths chosen, one a line, or nothing
-void ChooseApp::finish(bool ok) {
+void ChooserImpl::finish(bool ok) {
     if (!ok) {
         code = 1;
         done = true;
@@ -1225,7 +1250,7 @@ void ChooseApp::finish(bool ok) {
 
     chosen.clear();
 
-    if (mode == Mode::Save) {
+    if (mode == ChooseMode::Save) {
         StringView name = fieldName();
 
         if (name.empty() || !isDir(StringView(fieldDir))) {
@@ -1243,7 +1268,7 @@ void ChooseApp::finish(bool ok) {
 
         overwriteOk = false;
         chosen.pushBack(pool->make<Buffer>(StringView(target)));
-    } else if (mode == Mode::Directory) {
+    } else if (mode == ChooseMode::Directory) {
         bool any = false;
 
         for (Item* item : items) {
@@ -1273,7 +1298,7 @@ void ChooseApp::finish(bool ok) {
     TRACE(ui, StringView(StringBuilder() << StringView(u8"chosen ") << (i64)chosen.length()));
 }
 
-void ChooseApp::keys() {
+void ChooserImpl::keys() {
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_H)) {
         showHidden = !showHidden;
         TRACE(ui, showHidden ? StringView(u8"hidden on") : StringView(u8"hidden off"));
@@ -1329,7 +1354,7 @@ void ChooseApp::keys() {
 
 // the places as the rows of a table, as the entries are, so that the two
 // blocks are padded alike: by the cell, none around
-void ChooseApp::drawPlaces(float height) {
+void ChooserImpl::drawPlaces(float height) {
     if (!ImGui::BeginTable("places", 1, ImGuiTableFlags_ScrollY, ImVec2(ui->px(placesWidth), height))) {
         return;
     }
@@ -1354,7 +1379,7 @@ void ChooseApp::drawPlaces(float height) {
 
 // the entries as rows: name, size, modified; a click selects, a double
 // click enters or takes
-void ChooseApp::drawTable(float height) {
+void ChooserImpl::drawTable(float height) {
     if (!ImGui::BeginTable("entries", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchProp, ImVec2(0.f, height))) {
         return;
     }
@@ -1421,7 +1446,7 @@ void ChooseApp::drawTable(float height) {
 // file, a folder for a directory, the name under each
 // The cells are the style's spacing apart; the chosen one is ringed
 // within its cell.
-void ChooseApp::drawGrid(float height) {
+void ChooserImpl::drawGrid(float height) {
     float g = ImGui::GetStyle().ItemSpacing.y;
     float r = ui->px(ring);
     float cell = ui->px(cellWidth);
@@ -1514,7 +1539,7 @@ void ChooseApp::drawGrid(float height) {
 // on every edit, and what the app set (a directory entered, a name taken,
 // a completion) goes back through the callback, never behind its back.
 int fieldCallback(ImGuiInputTextCallbackData* data) {
-    ChooseApp* app = (ChooseApp*)data->UserData;
+    ChooserImpl* app = (ChooserImpl*)data->UserData;
 
     if (data->EventFlag == ImGuiInputTextFlags_CallbackEdit) {
         size_t n = min<size_t>((size_t)data->BufTextLen, fieldBytes - 1);
@@ -1539,9 +1564,9 @@ int fieldCallback(ImGuiInputTextCallbackData* data) {
 }
 
 // the line: the path, then the filter and the buttons
-void ChooseApp::drawLine() {
+void ChooserImpl::drawLine() {
     ImGuiStyle& style = ImGui::GetStyle();
-    const char* action = mode == Mode::Save ? "Save" : mode == Mode::Directory ? "Choose" : "Open";
+    const char* action = mode == ChooseMode::Save ? "Save" : mode == ChooseMode::Directory ? "Choose" : "Open";
     float buttons = ImGui::CalcTextSize(action).x + ImGui::CalcTextSize("Cancel").x + 4.f * style.FramePadding.x + 2.f * style.ItemSpacing.x;
     float filterW = 0.f;
 
@@ -1600,12 +1625,29 @@ void ChooseApp::drawLine() {
 // ImGui lays the blocks out as it lays anything out: the style's padding
 // from the edges, its spacing between them; the line's room is left at
 // the bottom by the body's negative height
-void ChooseApp::draw() {
-    ImGuiViewport* vp = ImGui::GetMainViewport();
+bool ChooserImpl::draw(VisitChosen& visitor) {
+    accept();
+    ImGui::PushID("choose");
+    drawBody();
+    ImGui::PopID();
+    submit();
 
-    ImGui::SetNextWindowPos(vp->Pos);
-    ImGui::SetNextWindowSize(vp->Size);
-    ImGui::Begin("##choose", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoSavedSettings);
+    if (!done) {
+        return false;
+    }
+
+    done = false;
+
+    if (code == 0) {
+        for (Buffer* path : chosen) {
+            visitor.visit(StringView(*path));
+        }
+    }
+
+    return true;
+}
+
+void ChooserImpl::drawBody() {
     keys();
 
     if (!title.empty()) {
@@ -1664,69 +1706,92 @@ void ChooseApp::draw() {
 
         ImGui::EndPopup();
     }
+}
 
-    ImGui::End();
+Chooser* Chooser::create(ObjPool& pool, Ui& ui, const ChooseOptions& options) {
+    ChooserImpl* chooser = pool.make<ChooserImpl>();
+
+    chooser->pool = &pool;
+    chooser->ui = &ui;
+    chooser->mode = options.mode;
+    chooser->multiple = options.multiple;
+    chooser->title = Buffer(options.title);
+
+    for (StringView spec : options.filters) {
+        Filter* filter = parseFilter(pool, spec);
+
+        if (!filter) {
+            raiseError(StringView(StringBuilder() << StringView(u8"a filter with no pattern: ") << spec));
+        }
+
+        chooser->filters.pushBack(filter);
+    }
+
+    if (!options.name.empty()) {
+        chooser->setFieldName(options.name);
+    }
+
+    chooser->startWorkers(pool);
+    chooser->setup(options.start.empty() ? StringView(u8".") : options.start);
+
+    return chooser;
+}
+
+bool chooseInWindow(Ui& ui, const ChooseOptions& options, VisitChosen& chosen) {
+    ObjPool::Ref scope = ObjPool::fromMemory();
+    Chooser& chooser = *Chooser::create(*scope, ui, options);
+    UiEvent event;
+
+    while (ui.next(event)) {
+        if (event.kind == UiEvent::Kind::Close) {
+            return false;
+        }
+
+        ImGuiViewport* vp = ImGui::GetMainViewport();
+
+        ImGui::SetNextWindowPos(vp->Pos);
+        ImGui::SetNextWindowSize(vp->Size);
+        ImGui::Begin("##choose", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoSavedSettings);
+
+        bool decided = chooser.draw(chosen);
+
+        ImGui::End();
+
+        if (decided) {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 int mainChoose(ObjPool& pool, int argc, char** argv) {
-    ChooseApp& app = *pool.make<ChooseApp>();
-    StringView start;
+    ChooseOptions options;
     bool usage = false;
-
-    app.pool = &pool;
 
     for (int i = 1; i < argc && !usage; i++) {
         StringView arg(argv[i]);
 
         if (arg == StringView(u8"--save")) {
-            app.mode = Mode::Save;
+            options.mode = ChooseMode::Save;
         } else if (arg == StringView(u8"--directory")) {
-            app.mode = Mode::Directory;
+            options.mode = ChooseMode::Directory;
         } else if (arg == StringView(u8"--multiple")) {
-            app.multiple = true;
+            options.multiple = true;
         } else if ((arg == StringView(u8"--title") || arg == StringView(u8"--name") || arg == StringView(u8"--filter")) && i + 1 < argc) {
             StringView value(argv[++i]);
 
             if (arg == StringView(u8"--title")) {
-                app.title = Buffer(value);
+                options.title = value;
             } else if (arg == StringView(u8"--name")) {
-                app.setFieldName(value);
+                options.name = value;
+            } else if (parseFilter(pool, value)) {
+                options.filters.pushBack(value);
             } else {
-                // Label|*.png|*.jpg|image/*: a pattern with a slash is a type
-                Filter* f = pool.make<Filter>();
-                size_t from = 0;
-
-                for (size_t k = 0; k <= value.length(); k++) {
-                    if (k == value.length() || value[k] == '|') {
-                        StringView part(value.begin() + from, value.begin() + k);
-
-                        from = k + 1;
-
-                        if (f->label.empty() && f->patterns.empty()) {
-                            f->label = Buffer(part);
-                        } else if (!part.empty()) {
-                            Pattern* p = pool.make<Pattern>();
-
-                            p->text = Buffer(part);
-                            p->type = false;
-
-                            for (size_t c = 0; c < part.length(); c++) {
-                                p->type = p->type || part[c] == '/';
-                            }
-
-                            f->patterns.pushBack(p);
-                        }
-                    }
-                }
-
-                if (f->patterns.empty()) {
-                    usage = true;
-                } else {
-                    app.filters.pushBack(f);
-                }
+                usage = true;
             }
-        } else if (!arg.startsWith(StringView(u8"-")) && start.empty()) {
-            start = arg;
+        } else if (!arg.startsWith(StringView(u8"-")) && options.start.empty()) {
+            options.start = arg;
         } else {
             usage = true;
         }
@@ -1739,38 +1804,21 @@ int mainChoose(ObjPool& pool, int argc, char** argv) {
     }
 
     Ui& ui = *Ui::create(pool, StringView(u8"choose"), UiOptions{windowWidth, windowHeight});
-
-    app.ui = &ui;
-    app.startWorkers(pool);
-    app.setup(start.empty() ? StringView(u8".") : start);
-
+    Vector<StringView> paths;
     auto body = makeRunable([&] {
-        UiEvent event;
-
-        while (ui.next(event)) {
-            if (event.kind == UiEvent::Kind::Close) {
-                return;
-            }
-
-            app.accept();
-            app.draw();
-            app.submit();
-
-            if (app.done) {
-                return;
-            }
-        }
+        chooseInWindow(ui, options, [&](StringView path) {
+            paths.pushBack(pool.intern(path));
+        });
     });
-
     int result = ui.run(body);
 
     if (result != 0) {
         return result;
     }
 
-    for (Buffer* path : app.chosen) {
-        sysO << StringView(*path) << endL;
+    for (StringView path : paths) {
+        sysO << path << endL;
     }
 
-    return app.code;
+    return paths.empty() ? 1 : 0;
 }

@@ -8,7 +8,7 @@ refused, and a PDF that does not open says so."""
 import os
 from pathlib import Path
 
-from session import KEY_END, KEY_HOME, KEY_N, KEY_Q, Session, near
+from session import KEY_END, KEY_ENTER, KEY_HOME, KEY_N, KEY_Q, Session, near
 
 
 def pdf(pages):
@@ -47,8 +47,8 @@ def saturated(capture):
 
 
 with Session("read", tool="read") as s:
-    code, log = s.run()
-    assert code == 2 and "usage: im read" in log, f"no arguments did not give the usage (rc={code}):\n{log}"
+    code, log = s.run("one.pdf", "two.pdf")
+    assert code == 2 and "usage: im read [file]" in log, f"two files did not give the usage (rc={code}):\n{log}"
 
     docs = s.artifacts / "docs"
     docs.mkdir()
@@ -56,6 +56,16 @@ with Session("read", tool="read") as s:
     # the second page is the widest: it sets the zoom, the others stand
     # narrower, centred
     (docs / "three.pdf").write_bytes(pdf([(200, 300, red), (300, 200, green), (200, 300, blue)]))
+    (docs / "notes.txt").write_text("not a document\n")
+
+    s.launch(cwd=str(docs))
+    s.focus()
+    s.said(f"going {docs}")
+    s.said("showing 1")
+    s.tap(KEY_ENTER)
+    s.said("chosen 1")
+    s.said("opened pages=3")
+    s.close()
 
     s.launch(str(docs / "three.pdf"))
     s.focus()

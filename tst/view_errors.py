@@ -11,11 +11,21 @@ import os
 import shutil
 from pathlib import Path
 
-from session import KEY_RIGHT, Session, png, write_png
+from session import KEY_ENTER, KEY_RIGHT, Session, png, write_png
 
 with Session("view_errors", tool="view") as s:
-    code, log = s.run()
-    assert code == 2 and "usage: im view" in log, f"no arguments did not give the usage (rc={code}):\n{log}"
+    pictures = s.artifacts / "pictures"
+    pictures.mkdir()
+    write_png(pictures / "only.png", 40, 30, (255, 0, 0))
+    (pictures / "notes.txt").write_text("not a picture\n")
+    s.launch(cwd=str(pictures))
+    s.focus()
+    s.said(f"going {pictures}")
+    s.said("showing 1")
+    s.tap(KEY_ENTER)
+    s.said("chosen 1")
+    s.said("showing only.png 40x30")
+    s.close()
 
     nowhere = s.artifacts / "nowhere"
     s.launch(str(nowhere))

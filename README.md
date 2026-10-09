@@ -28,13 +28,16 @@ Each tool runs as `im <tool> ...`, or by its link `im<tool>`:
 
 | Command | What it does |
 |---|---|
-| `im view FILE\|DIR...` | shows images: a directory's, or the files named |
-| `im play FILE` | plays a video |
-| `im read FILE` | reads a PDF or DjVu document |
+| `im view [FILE\|DIR...]` | shows images: a directory's, or the files named |
+| `im play [FILE]` | plays a video |
+| `im read [FILE]` | reads a PDF or DjVu document |
 | `im edit FILE` | edits a text file, or starts a new one |
 | `im choose [DIR]` | lets the user pick a file and prints its path |
 | `im screenshot FILE` | crops and saves a screenshot the shell hands over |
 | `im ui` | the widget demo |
+
+Given no file, `im view`, `im play` and `im read` open the chooser in
+their window first, and go on with what is chosen.
 
 `im choose` takes `--save`, `--directory`, `--multiple`, `--title T`,
 `--name N` and `--filter 'Label|*.ext|type/*'`; it prints the chosen

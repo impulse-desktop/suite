@@ -3,6 +3,7 @@
 #include "ui.h"
 #include "codes.h"
 #include "error.h"
+#include "choose.h"
 #include "pooled.h"
 #include "shader.h"
 
@@ -2751,24 +2752,42 @@ void Player::post(Message* message) {
 }
 
 int mainPlay(ObjPool& pool, int argc, char** argv) {
-    if (argc != 2) {
-        sysE << StringView(u8"usage: im play <file>") << endL;
+    if (argc > 2) {
+        sysE << StringView(u8"usage: im play [file]") << endL;
 
         return 2;
     }
 
     Ui& ui = *Ui::create(pool, StringView(u8"play"), {windowWidth, windowHeight});
-    Player& player = *pool.make<Player>(pool, ui, argv[1]);
+    const char* path = argc == 2 ? argv[1] : nullptr;
+    Player* player = nullptr;
     auto body = makeRunable([&] {
         UiEvent event;
 
+        if (!path) {
+            ChooseOptions options;
+
+            options.filters.pushBack(StringView(u8"Media|video/*|audio/*"));
+            options.filters.pushBack(StringView(u8"All|*"));
+
+            bool chosen = chooseInWindow(ui, options, [&](StringView given) {
+                path = pool.make<Buffer>(given)->cStr();
+            });
+
+            if (!chosen || !path) {
+                return;
+            }
+        }
+
+        player = pool.make<Player>(pool, ui, path);
+
         while (ui.next(event)) {
-            if (event.kind == UiEvent::Kind::Close || !player.screen->frame()) {
+            if (event.kind == UiEvent::Kind::Close || !player->screen->frame()) {
                 return;
             }
         }
     });
     int result = ui.run(body);
 
-    return player.screen->failed ? 1 : result;
+    return player && player->screen->failed ? 1 : result;
 }

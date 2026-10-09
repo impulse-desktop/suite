@@ -2,6 +2,7 @@
 
 #include "ui.h"
 #include "error.h"
+#include "choose.h"
 #include "pooled.h"
 #include "timing.h"
 #include "decoder.h"
@@ -397,8 +398,7 @@ namespace {
         bool showPending = false;
         Vector<size_t> wantedThumbs;
         u32 thumbSide = thumbTexelsMin;
-        char** paths = nullptr;
-        u32 pathCount = 0;
+        Vector<StringView> paths;
         u32 listedNext = 0;
         Buffer problems;
         Vector<Entry*> entries;
@@ -420,7 +420,7 @@ namespace {
 
         void startWorkers(ObjPool& pool);
         void stopWorkers();
-        void open(u32 count, char** given);
+        void open();
         void accept();
         void take(Decoded& decoded);
         void adopt(Listed& listed);
@@ -620,14 +620,11 @@ void ViewApp::stopWorkers() {
     }
 }
 
-void ViewApp::open(u32 count, char** given) {
-    paths = given;
-    pathCount = count;
-
+void ViewApp::open() {
     Mime mime;
 
-    if (mime.image(StringView(given[0]))) {
-        entries.pushBack(makeEntry(*pool, StringView(given[0])));
+    if (mime.image(paths[0])) {
+        entries.pushBack(makeEntry(*pool, paths[0]));
         select(0);
     }
 }
@@ -813,10 +810,10 @@ void ViewApp::submit() {
         dispatch(owner->make<Decoded>(owner, *this, entry, maxSide, thumbs, showRequest));
     }
 
-    while (listedNext < pathCount && inFlight < workerCount) {
+    while (listedNext < paths.length() && inFlight < workerCount) {
         ObjPool* owner = ObjPool::fromMemoryRaw();
 
-        dispatch(owner->make<Listed>(owner, *this, listedNext, StringView(paths[listedNext]), pathCount == 1));
+        dispatch(owner->make<Listed>(owner, *this, listedNext, paths[listedNext], paths.length() == 1));
         listedNext++;
     }
 
@@ -1646,12 +1643,6 @@ void ViewApp::draw() {
 }
 
 int mainView(ObjPool& pool, int argc, char** argv) {
-    if (argc < 2) {
-        sysE << StringView(u8"usage: im view <file|dir>...") << endL;
-
-        return 2;
-    }
-
     ViewApp& app = *pool.make<ViewApp>();
     Ui& ui = *Ui::create(pool, StringView(u8"view"), UiOptions{windowWidth, windowHeight});
 
@@ -1659,10 +1650,31 @@ int mainView(ObjPool& pool, int argc, char** argv) {
     app.pool = &pool;
     app.maxSide = ui.maxTextureSide();
     app.startWorkers(pool);
-    app.open((u32)(argc - 1), argv + 1);
+
+    for (int i = 1; i < argc; i++) {
+        app.paths.pushBack(StringView(argv[i]));
+    }
 
     auto body = makeRunable([&] {
         UiEvent event;
+
+        if (app.paths.empty()) {
+            ChooseOptions options;
+
+            options.multiple = true;
+            options.filters.pushBack(StringView(u8"Images|image/*"));
+            options.filters.pushBack(StringView(u8"All|*"));
+
+            bool chosen = chooseInWindow(ui, options, [&](StringView path) {
+                app.paths.pushBack(pool.intern(path));
+            });
+
+            if (!chosen || app.paths.empty()) {
+                return;
+            }
+        }
+
+        app.open();
 
         while (ui.next(event)) {
             if (event.kind == UiEvent::Kind::Close) {

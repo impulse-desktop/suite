@@ -1,7 +1,7 @@
 """EOF, replay, audio-only seek and CLI failures."""
 import time
 import wave
-from session import KEY_HOME, KEY_RIGHT, KEY_SPACE, Session, write_video
+from session import KEY_ENTER, KEY_HOME, KEY_RIGHT, KEY_SPACE, Session, write_video
 
 for mode in ("av", "video", "audio"):
     with Session("play_end_" + mode, tool="play") as s:
@@ -42,8 +42,20 @@ for mode in ("av", "video", "audio"):
         s.close()
 
 with Session("play_cli", tool="play") as s:
-    code, log = s.run()
-    assert code == 2 and "usage: im play <file>" in log, (code, log)
+    code, log = s.run("one.avi", "two.avi")
+    assert code == 2 and "usage: im play [file]" in log, (code, log)
+    movies = s.artifacts / "movies"
+    movies.mkdir()
+    write_video(movies / "movie.avi", seconds=2, audio=False)
+    (movies / "notes.txt").write_text("not a movie\n")
+    s.launch(cwd=str(movies), ALSOFT_DRIVERS="null")
+    s.focus()
+    s.said(f"going {movies}")
+    s.said("showing 1")
+    s.tap(KEY_ENTER)
+    s.said("chosen 1")
+    s.said("opened")
+    s.close()
     code, log = s.run(str(s.artifacts / "missing.avi"), ALSOFT_DRIVERS="null")
     assert code == 1 and "im play: " in log and "No such file or directory" in log, (code, log)
 

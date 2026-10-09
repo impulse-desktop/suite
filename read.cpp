@@ -2,6 +2,7 @@
 
 #include "ui.h"
 #include "error.h"
+#include "choose.h"
 #include "pooled.h"
 #include "timing.h"
 
@@ -1294,8 +1295,8 @@ void ReadApp::draw() {
 }
 
 int mainRead(ObjPool& pool, int argc, char** argv) {
-    if (argc != 2) {
-        sysE << StringView(u8"usage: im read <file>") << endL;
+    if (argc > 2) {
+        sysE << StringView(u8"usage: im read [file]") << endL;
 
         return 2;
     }
@@ -1303,7 +1304,10 @@ int mainRead(ObjPool& pool, int argc, char** argv) {
     ReadApp& app = *pool.make<ReadApp>();
 
     app.pool = &pool;
-    app.open(StringView(argv[1]));
+
+    if (argc == 2) {
+        app.open(StringView(argv[1]));
+    }
 
     Ui& ui = *Ui::create(pool, StringView(u8"read"), UiOptions{windowWidth, windowHeight});
 
@@ -1313,6 +1317,24 @@ int mainRead(ObjPool& pool, int argc, char** argv) {
 
     auto body = makeRunable([&] {
         UiEvent event;
+
+        if (argc < 2) {
+            ChooseOptions options;
+            Buffer path;
+
+            options.filters.pushBack(StringView(u8"Documents|*.pdf|*.djvu|*.djv|application/pdf|image/vnd.djvu"));
+            options.filters.pushBack(StringView(u8"All|*"));
+
+            bool chosen = chooseInWindow(ui, options, [&](StringView given) {
+                path = Buffer(given);
+            });
+
+            if (!chosen || path.empty()) {
+                return;
+            }
+
+            app.open(StringView(path));
+        }
 
         while (ui.next(event)) {
             if (event.kind == UiEvent::Kind::Close) {
