@@ -1,7 +1,7 @@
+#include <thread>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <thread>
 
 static int* volatile nowhere = nullptr;
 
