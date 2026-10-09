@@ -29,6 +29,7 @@
 #include <imgui.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <imgui_internal.h>
 
 // libmagic, as wasm2c turned its wasm module into C (ext/magic, under the
 // name mime): the MIME type of a file's first bytes, so a listing takes
@@ -414,6 +415,7 @@ namespace {
         bool leaving = false;
         bool scrollToCurrent = true;
         float tracedScrollY = 0.f;
+        float galleryScroll = 0.f;
 
         void startWorkers(ObjPool& pool);
         void stopWorkers();
@@ -433,7 +435,8 @@ namespace {
         void step(long delta);
         void draw();
         void drawTools();
-        void drawGallery();
+        void drawGallery(ImVec2 size);
+        void galleryKeys(ImGuiID id);
         void drawCanvas();
         void drawInfo();
     };
@@ -881,6 +884,48 @@ void ViewApp::replaceShown(const ShownImage* next) {
     ui->requestFrame();
 }
 
+void ViewApp::galleryKeys(ImGuiID id) {
+    bool next = ImGui::Shortcut(ImGuiKey_RightArrow, ImGuiInputFlags_Repeat, id);
+
+    next |= ImGui::Shortcut(ImGuiKey_DownArrow, ImGuiInputFlags_Repeat, id);
+    next |= ImGui::Shortcut(ImGuiKey_Space, ImGuiInputFlags_Repeat, id);
+    next |= ImGui::Shortcut(ImGuiKey_PageDown, ImGuiInputFlags_Repeat, id);
+    next |= ImGui::Shortcut(ImGuiKey_J, ImGuiInputFlags_Repeat, id);
+    next |= ImGui::Shortcut(ImGuiKey_N, ImGuiInputFlags_Repeat, id);
+
+    if (next) {
+        step(1);
+    }
+
+    bool previous = ImGui::Shortcut(ImGuiKey_LeftArrow, ImGuiInputFlags_Repeat, id);
+
+    previous |= ImGui::Shortcut(ImGuiKey_UpArrow, ImGuiInputFlags_Repeat, id);
+    previous |= ImGui::Shortcut(ImGuiKey_Backspace, ImGuiInputFlags_Repeat, id);
+    previous |= ImGui::Shortcut(ImGuiKey_PageUp, ImGuiInputFlags_Repeat, id);
+    previous |= ImGui::Shortcut(ImGuiKey_K, ImGuiInputFlags_Repeat, id);
+    previous |= ImGui::Shortcut(ImGuiKey_P, ImGuiInputFlags_Repeat, id);
+
+    if (previous) {
+        step(-1);
+    }
+
+    bool first = ImGui::Shortcut(ImGuiKey_Home, ImGuiInputFlags_None, id);
+
+    first |= ImGui::Shortcut(ImGuiKey_G, ImGuiInputFlags_None, id);
+
+    if (first) {
+        step(-(long)entries.length());
+    }
+
+    bool last = ImGui::Shortcut(ImGuiKey_End, ImGuiInputFlags_None, id);
+
+    last |= ImGui::Shortcut(ImGuiMod_Shift | ImGuiKey_G, ImGuiInputFlags_None, id);
+
+    if (last) {
+        step((long)entries.length());
+    }
+}
+
 void ViewApp::step(long delta) {
     if (entries.empty()) {
         return;
@@ -974,68 +1019,50 @@ void ViewApp::keys() {
         info = !info;
         TRACE(ui, info ? StringView(u8"info on") : StringView(u8"info off"));
     }
-
-    if (ImGui::GetIO().NavVisible) {
-        return;
-    }
-
-    bool next = ImGui::Shortcut(ImGuiKey_RightArrow, ImGuiInputFlags_Repeat);
-
-    next |= ImGui::Shortcut(ImGuiKey_DownArrow, ImGuiInputFlags_Repeat);
-    next |= ImGui::Shortcut(ImGuiKey_Space, ImGuiInputFlags_Repeat);
-    next |= ImGui::Shortcut(ImGuiKey_PageDown, ImGuiInputFlags_Repeat);
-    next |= ImGui::Shortcut(ImGuiKey_J, ImGuiInputFlags_Repeat);
-    next |= ImGui::Shortcut(ImGuiKey_N, ImGuiInputFlags_Repeat);
-
-    if (next) {
-        step(1);
-    }
-
-    bool previous = ImGui::Shortcut(ImGuiKey_LeftArrow, ImGuiInputFlags_Repeat);
-
-    previous |= ImGui::Shortcut(ImGuiKey_UpArrow, ImGuiInputFlags_Repeat);
-    previous |= ImGui::Shortcut(ImGuiKey_Backspace, ImGuiInputFlags_Repeat);
-    previous |= ImGui::Shortcut(ImGuiKey_PageUp, ImGuiInputFlags_Repeat);
-    previous |= ImGui::Shortcut(ImGuiKey_K, ImGuiInputFlags_Repeat);
-    previous |= ImGui::Shortcut(ImGuiKey_P, ImGuiInputFlags_Repeat);
-
-    if (previous) {
-        step(-1);
-    }
-
-    bool first = ImGui::Shortcut(ImGuiKey_Home);
-
-    first |= ImGui::Shortcut(ImGuiKey_G);
-
-    if (first) {
-        step(-(long)entries.length());
-    }
-
-    bool last = ImGui::Shortcut(ImGuiKey_End);
-
-    last |= ImGui::Shortcut(ImGuiMod_Shift | ImGuiKey_G);
-
-    if (last) {
-        step((long)entries.length());
-    }
 }
 
 // the rows down the list, the list's width each and the image's shape,
 // one against the next, the current one framed inside its edge in the
 // colour of an active item; the thumbnails bulge towards the pointer,
 // over their rows
-void ViewApp::drawGallery() {
+void ViewApp::drawGallery(ImVec2 size) {
+    ImGuiWindow* window = ImGui::GetCurrentWindow();
+    ImGuiID id = window->GetID("##gallery");
+    ImVec2 origin = ImGui::GetCursorScreenPos();
+    ImRect bb(origin, ImVec2(origin.x + size.x, origin.y + size.y));
+
+    ImGui::ItemSize(size);
+
+    if (!ImGui::ItemAdd(bb, id)) {
+        return;
+    }
+
+    ImGui::SetItemDefaultFocus();
+
+    bool hovered = false;
+    bool held = false;
+    bool pressed = ImGui::ButtonBehavior(bb, id, &hovered, &held);
+
+    if (hovered) {
+        ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelY);
+    }
+
+    if (ImGui::IsItemFocused()) {
+        galleryKeys(id);
+    }
+
+    ImGui::RenderNavCursor(bb, id);
+
     float g = ImGui::GetStyle().ItemSpacing.y;
     float frame = ui->px(mark);
-    float innerW = max(1.f, ImGui::GetWindowWidth());
+    float innerW = max(1.f, size.x);
     thumbSide = thumbSideFor(innerW * (1.f + bulge));
-    float viewH = ImGui::GetWindowHeight();
+    float viewH = max(1.f, size.y);
     size_t count = entries.length();
-    ImVec2 origin = ImGui::GetCursorScreenPos();
-    ImVec2 windowPos = ImGui::GetWindowPos();
-    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImDrawList* dl = window->DrawList;
     ImU32 dimColor = ImGui::GetColorU32(ImGuiCol_TextDisabled);
-    ImVec2 mouse = ImGui::GetIO().MousePos;
+    ImGuiIO& io = ImGui::GetIO();
+    ImVec2 mouse = io.MousePos;
     ImGuiViewport* vp = ImGui::GetMainViewport();
     bool pointed = mouse.x >= vp->Pos.x && mouse.x < vp->Pos.x + vp->Size.x && mouse.y >= vp->Pos.y && mouse.y < vp->Pos.y + vp->Size.y;
     float reach = ui->px(bulgeReach);
@@ -1058,19 +1085,25 @@ void ViewApp::drawGallery() {
         total += h;
     }
 
-    ImGui::Dummy(ImVec2(innerW, total));
-
     if (scrollToCurrent) {
-        ImGui::SetScrollY(currentTop - (viewH - currentH) / 2.f);
+        galleryScroll = currentTop - (viewH - currentH) / 2.f;
         scrollToCurrent = false;
     }
 
-    float scrollY = clampf(ImGui::GetScrollY(), 0.f, max(0.f, total - viewH));
+    if (hovered && io.MouseWheel != 0.f) {
+        galleryScroll -= io.MouseWheel * min(5.f * fontSize, viewH * .67f);
+    }
+
+    galleryScroll = clampf(galleryScroll, 0.f, max(0.f, total - viewH));
+
+    float scrollY = galleryScroll;
+    ImVec2 content(origin.x, origin.y - scrollY);
+    bool clicked = pressed && ImGui::IsMouseReleased(ImGuiMouseButton_Left);
 
     if (scrollY != tracedScrollY) {
         StringBuilder text;
 
-        text << StringView(u8"im scroll: y ") << (i64)scrollY << StringView(u8" dy ") << (i64)(scrollY - tracedScrollY) << StringView(u8" wheel/100 ") << (i64)(ImGui::GetIO().MouseWheel * 100.f);
+        text << StringView(u8"im scroll: y ") << (i64)scrollY << StringView(u8" dy ") << (i64)(scrollY - tracedScrollY) << StringView(u8" wheel/100 ") << (i64)(io.MouseWheel * 100.f);
         ui->timing(StringView(text));
         tracedScrollY = scrollY;
     }
@@ -1082,8 +1115,10 @@ void ViewApp::drawGallery() {
     float nearestD = 0.f;
     float top = head;
 
+    dl->PushClipRect(bb.Min, bb.Max, true);
+
     if (head > 0.f) {
-        dl->AddText(font, fontSize, origin, ImGui::GetColorU32(ImGuiCol_Text), (const char*)problem.begin(), (const char*)problem.end(), innerW);
+        dl->AddText(font, fontSize, content, ImGui::GetColorU32(ImGuiCol_Text), (const char*)problem.begin(), (const char*)problem.end(), innerW);
     }
 
     for (size_t i = 0; i < count; i++) {
@@ -1107,17 +1142,13 @@ void ViewApp::drawGallery() {
         }
 
         if (inView) {
-            ImVec2 p0(origin.x, origin.y + top);
+            ImVec2 p0(content.x, content.y + top);
             ImVec2 p1(p0.x + innerW, p0.y + h);
 
-            ImGui::SetCursorScreenPos(p0);
-            ImGui::PushID((int)i);
-
-            if (ImGui::InvisibleButton("##row", ImVec2(innerW, h))) {
+            if (clicked && mouse.y >= p0.y && mouse.y < p1.y) {
+                clicked = false;
                 show(i);
             }
-
-            ImGui::PopID();
 
             if (pointed) {
                 float d = distance(mouse, ImVec2((p0.x + p1.x) / 2.f, (p0.y + p1.y) / 2.f));
@@ -1148,7 +1179,7 @@ void ViewApp::drawGallery() {
 
     auto draw = [&](size_t i, float rowTop, float h) {
         Entry& entry = *entries[i];
-        ImVec2 p0(origin.x, origin.y + rowTop);
+        ImVec2 p0(content.x, content.y + rowTop);
         ImVec2 p1(p0.x + innerW, p0.y + h);
 
         if (!entry.thumbW && !entry.error.empty()) {
@@ -1202,9 +1233,9 @@ void ViewApp::drawGallery() {
         }
     };
 
-    ImVec2 viewportEnd(vp->Pos.x + vp->Size.x, windowPos.y + viewH);
+    ImVec2 viewportEnd(vp->Pos.x + vp->Size.x, bb.Max.y);
 
-    fg->PushClipRect(windowPos, viewportEnd, false);
+    fg->PushClipRect(bb.Min, viewportEnd, false);
 
     if (first < count) {
         size_t stop = nearest == count ? last + 1 : nearest;
@@ -1232,6 +1263,7 @@ void ViewApp::drawGallery() {
     }
 
     fg->PopClipRect();
+    dl->PopClipRect();
 }
 
 void ViewApp::drawInfo() {
@@ -1512,9 +1544,7 @@ void ViewApp::draw() {
         ImGui::BeginChild("tools", ImVec2(sideW, ImGui::GetFrameHeight()), 0, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
         drawTools();
         ImGui::EndChild();
-        ImGui::BeginChild("gallery", ImVec2(sideW, 0.f), 0, ImGuiWindowFlags_NoScrollbar);
-        drawGallery();
-        ImGui::EndChild();
+        drawGallery(ImVec2(sideW, ImGui::GetContentRegionAvail().y));
         ImGui::EndGroup();
         ImGui::SameLine();
     }
