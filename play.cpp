@@ -2483,7 +2483,9 @@ void Screen::draw() {
         VideoImage* image = shown->image;
 
         image->draws++;
+        dl->PushClipRect(lo, hi, true);
         image->render->draw(*dl, p0, p1);
+        dl->PopClipRect();
 
         if (p0.y > lo.y) {
             dl->AddRectFilled(lo, ImVec2(hi.x, p0.y), black);
