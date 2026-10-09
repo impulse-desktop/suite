@@ -18,12 +18,19 @@ on:
         type: choice
         options: [both, darwin, ubuntu]
         default: both
+      linux:
+        description: The Linux job's container and toolchain
+        type: choice
+        options: [ubuntu clang, gcc gcc, alpine clang]
+        default: ubuntu clang
 
 permissions:
   contents: read
 
 env:
   UBUNTU_IMAGE: ubuntu:26.04
+  GCC_IMAGE: gcc:16.1.0-trixie
+  ALPINE_IMAGE: alpine:3.24.1
   CI_TEST_FLAGS: -Dfilter=${{ inputs.filter }} -Drepeat=${{ inputs.repeat }}
 
 jobs:
@@ -72,9 +79,11 @@ jobs:
         run: |
           set -o pipefail
           if [ "${{ inputs.trace }}" = true ]; then export IM_TRACE_FRAMES=1; fi
+          set -- ${{ inputs.linux }}
+          case "$1" in ubuntu) image=$UBUNTU_IMAGE ;; gcc) image=$GCC_IMAGE ;; alpine) image=$ALPINE_IMAGE ;; esac
           docker run --rm --device /dev/udmabuf --env CI_TEST_FLAGS --env IM_TRACE_FRAMES \
             --volume "$GITHUB_WORKSPACE:/workspace" --workdir /workspace \
-            "$UBUNTU_IMAGE" sh dev/ci_linux.sh test clang \
+            "$image" sh dev/ci_linux.sh test "$2" \
             2>&1 | tee "$RUNNER_TEMP/stress-ubuntu.log"
 
       - name: Upload what the failed scenarios captured
