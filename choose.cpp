@@ -288,6 +288,7 @@ namespace {
         bool fieldActive = false;
         bool askOverwrite = false;
         bool askingOverwrite = false;
+        int askedFrame = 0;
         bool overwriteOk = false;
         bool done = false;
         int code = 1;
@@ -1645,6 +1646,7 @@ void ChooseApp::draw() {
         ImGui::OpenPopup("Replace");
         askOverwrite = false;
         askingOverwrite = true;
+        askedFrame = ImGui::GetFrameCount();
         TRACE(ui, StringView(u8"asking to replace"));
     }
 
@@ -1654,11 +1656,12 @@ void ChooseApp::draw() {
         ImGui::Text("%.*s is there already. Replace it?", (int)name.length(), (const char*)name.begin());
         ImGui::Spacing();
 
-        bool yes = ImGui::Button("Replace") || ImGui::IsKeyPressed(ImGuiKey_Enter, false);
+        bool keys = ImGui::GetFrameCount() > askedFrame;
+        bool yes = ImGui::Button("Replace") || (keys && ImGui::IsKeyPressed(ImGuiKey_Enter, false));
 
         ImGui::SameLine();
 
-        bool no = ImGui::Button("Cancel") || ImGui::IsKeyPressed(ImGuiKey_Escape, false);
+        bool no = ImGui::Button("Cancel") || (keys && ImGui::IsKeyPressed(ImGuiKey_Escape, false));
 
         if (yes) {
             askingOverwrite = false;
