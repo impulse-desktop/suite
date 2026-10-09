@@ -1742,6 +1742,16 @@ bool chooseInWindow(Ui& ui, const ChooseOptions& options, VisitChosen& chosen) {
     Chooser& chooser = *Chooser::create(*scope, ui, options);
     UiEvent event;
 
+    if (!options.title.empty()) {
+        ui.requestSubject(options.title);
+    } else if (options.mode == ChooseMode::Save) {
+        ui.requestSubject(StringView(u8"Save File"));
+    } else if (options.mode == ChooseMode::Directory) {
+        ui.requestSubject(StringView(u8"Choose Folder"));
+    } else {
+        ui.requestSubject(options.multiple ? StringView(u8"Open Files") : StringView(u8"Open File"));
+    }
+
     while (ui.next(event)) {
         if (event.kind == UiEvent::Kind::Close) {
             return false;

@@ -20,11 +20,13 @@ with Session("view_errors", tool="view") as s:
     (pictures / "notes.txt").write_text("not a picture\n")
     s.launch(cwd=str(pictures))
     s.focus()
+    s.wait(lambda: s.window()["name"] == "Open Files — ImView", "the title Open Files — ImView")
     s.said(f"going {pictures}")
     s.said("showing 1")
     s.tap(KEY_ENTER)
     s.said("chosen 1")
     s.said("showing only.png 40x30")
+    s.wait(lambda: s.window()["name"] == "only.png — ImView", "the title only.png — ImView")
     s.close()
 
     nowhere = s.artifacts / "nowhere"

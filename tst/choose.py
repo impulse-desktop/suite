@@ -30,6 +30,7 @@ with Session("choose", tool="choose") as s:
     # a file taken by its row: the arrow stands on it, Enter takes it
     s.launch("--filter", "Images|*.png|image/*", "--filter", "All|*", str(root / "pics"))
     s.focus()
+    s.wait(lambda: s.window()["name"] == "Open File — ImChoose", "the title Open File — ImChoose")
     s.said(f"going {root / 'pics'}")
     s.said("listed 5")
     s.said("showing 3")

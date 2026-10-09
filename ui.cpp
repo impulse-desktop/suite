@@ -424,7 +424,6 @@ namespace {
         u64 frameBegan = 0;
         u64 frameCount = 0;
         StringBuilder appId;
-        StringBuilder title;
         Vector<ImTextureData*> textures;
         bool framePending = false;
         bool closePending = false;
@@ -447,7 +446,7 @@ namespace {
         void requestFrame() override;
         void requestFullscreen(bool on) override;
         bool fullscreen() override;
-        void requestTitle(StringView title) override;
+        void requestSubject(StringView subject) override;
         void requestResize(u32 width, u32 height) override;
         RenderImage* uploadImage(ObjPool& pool, u32 width, u32 height, const void* rgba, bool hdr) override;
         RenderImage* importImage(ObjPool& pool, SharedImage& source, bool hdr) override;
@@ -729,12 +728,10 @@ void UiImpl::init(const UiOptions& options) {
         appId << StringView(&first, 1) << StringView(name.begin() + 1, name.end());
     }
 
-    title << StringView(u8"im ") << name;
-
     plt::WindowOptions made;
 
     made.appId = StringView(appId);
-    made.title = StringView(title);
+    made.title = StringView(appId);
     made.width = (u32)width;
     made.height = (u32)height;
     made.input = this;
@@ -856,8 +853,15 @@ bool UiImpl::fullscreen() {
     return fullscreenNow;
 }
 
-void UiImpl::requestTitle(StringView title) {
-    window->requestTitle(title);
+void UiImpl::requestSubject(StringView subject) {
+    StringBuilder title;
+
+    if (!subject.empty()) {
+        title << subject << StringView(u8" \xe2\x80\x94 ");
+    }
+
+    title << StringView(appId);
+    window->requestTitle(StringView(title));
 }
 
 void UiImpl::requestResize(u32 width, u32 height) {

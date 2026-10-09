@@ -308,6 +308,7 @@ int mainEdit(ObjPool& pool, int argc, char** argv) {
 
     app.ui = &ui;
     app.open(StringView(argv[1]));
+    ui.requestSubject(nameOf(StringView(argv[1])));
 
     auto body = makeRunable([&] {
         UiEvent event;

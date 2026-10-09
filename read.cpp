@@ -1336,6 +1336,8 @@ int mainRead(ObjPool& pool, int argc, char** argv) {
             app.open(StringView(path));
         }
 
+        ui.requestSubject(nameOf(StringView(app.path)));
+
         while (ui.next(event)) {
             if (event.kind == UiEvent::Kind::Close) {
                 return;

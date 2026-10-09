@@ -60,11 +60,13 @@ with Session("read", tool="read") as s:
 
     s.launch(cwd=str(docs))
     s.focus()
+    s.wait(lambda: s.window()["name"] == "Open File — ImRead", "the title Open File — ImRead")
     s.said(f"going {docs}")
     s.said("showing 1")
     s.tap(KEY_ENTER)
     s.said("chosen 1")
     s.said("opened pages=3")
+    s.wait(lambda: s.window()["name"] == "three.pdf — ImRead", "the title three.pdf — ImRead")
     s.close()
 
     s.launch(str(docs / "three.pdf"))

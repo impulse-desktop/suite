@@ -459,6 +459,16 @@ namespace {
         void post(Message* message);
     };
 
+    StringView nameOf(StringView path) {
+        size_t slash = path.length();
+
+        while (slash > 0 && path[slash - 1] != '/') {
+            slash--;
+        }
+
+        return StringView(path.begin() + slash, path.end());
+    }
+
     [[noreturn]] static void failAv(StringView what, int error) {
         char text[AV_ERROR_MAX_STRING_SIZE];
 
@@ -2786,6 +2796,7 @@ int mainPlay(ObjPool& pool, int argc, char** argv) {
         }
 
         player = pool.make<Player>(pool, ui, path);
+        ui.requestSubject(nameOf(StringView(path)));
 
         while (ui.next(event)) {
             if (event.kind == UiEvent::Kind::Close || !player->screen->frame()) {
