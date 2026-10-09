@@ -19,6 +19,7 @@ enum class ChooseMode : u8 {
 struct ChooseOptions {
     ChooseMode mode = ChooseMode::Open;
     bool multiple = false;
+    bool folders = false;
     stl::StringView title;
     stl::StringView name;
     stl::StringView start;

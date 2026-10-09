@@ -280,6 +280,7 @@ namespace {
         ObjPool* pool = nullptr;
         ChooseMode mode = ChooseMode::Open;
         bool multiple = false;
+        bool folders = false;
         Buffer title;
         Vector<Filter*> filters;
         size_t filter = 0;
@@ -1158,18 +1159,22 @@ void ChooserImpl::activate(size_t index) {
         return;
     }
 
-    select(index, false, false);
+    if (!multiple || !item.selected) {
+        select(index, false, false);
+    }
+
     finish(true);
 }
 
 // Enter on the line: a directory typed goes there, a name of an entry
 // takes it, a name to save under is the answer; nothing typed is the
-// entry under the cursor, or in the directory mode the directory itself
+// entry under the cursor, or, where a folder may be chosen and none is
+// selected, the directory itself
 void ChooserImpl::enter() {
     StringView name = fieldName();
 
     if (name.empty()) {
-        if (mode == ChooseMode::Directory && !(cursor < items.length() && items[cursor]->selected)) {
+        if ((mode == ChooseMode::Directory || folders) && !(cursor < items.length() && items[cursor]->selected)) {
             finish(true);
         } else if (cursor < items.length()) {
             activate(cursor);
@@ -1283,9 +1288,13 @@ void ChooserImpl::finish(bool ok) {
         }
     } else {
         for (Item* item : items) {
-            if (item->selected && !item->dir) {
+            if (item->selected && (folders || !item->dir)) {
                 chosen.pushBack(pool->make<Buffer>(StringView(joinPath(StringView(dir), StringView(item->name)))));
             }
+        }
+
+        if (chosen.empty() && folders) {
+            chosen.pushBack(pool->make<Buffer>(StringView(dir)));
         }
 
         if (chosen.empty()) {
@@ -1715,6 +1724,7 @@ Chooser* Chooser::create(ObjPool& pool, Ui& ui, const ChooseOptions& options) {
     chooser->ui = &ui;
     chooser->mode = options.mode;
     chooser->multiple = options.multiple;
+    chooser->folders = options.folders;
     chooser->title = Buffer(options.title);
 
     for (StringView spec : options.filters) {
@@ -1748,6 +1758,8 @@ bool chooseInWindow(Ui& ui, const ChooseOptions& options, VisitChosen& chosen) {
         ui.requestSubject(StringView(u8"Save File"));
     } else if (options.mode == ChooseMode::Directory) {
         ui.requestSubject(StringView(u8"Choose Folder"));
+    } else if (options.folders) {
+        ui.requestSubject(StringView(u8"Open"));
     } else {
         ui.requestSubject(options.multiple ? StringView(u8"Open Files") : StringView(u8"Open File"));
     }

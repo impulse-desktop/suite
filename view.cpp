@@ -1662,6 +1662,7 @@ int mainView(ObjPool& pool, int argc, char** argv) {
             ChooseOptions options;
 
             options.multiple = true;
+            options.folders = true;
             options.filters.pushBack(StringView(u8"Images|image/*"));
             options.filters.pushBack(StringView(u8"All|*"));
 
