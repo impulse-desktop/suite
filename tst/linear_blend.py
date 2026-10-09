@@ -46,7 +46,7 @@ with Session("linear_blend") as s:
     h = band * len(NITS)
     pixels = b"".join(bytes([round(pq_encode(n) * 255)] * 3 + [255]) * (w * band) for n in NITS)
     shot = s.capture_file("bands.shot", w, h, pixels=pixels)
-    s.launch(str(shot), IM_SHOT_COLOR="1:203")
+    s.launch(str(shot), IM_SHOT_COLOR="1")
     s.focus()
     s.said("surface HDR10 PQ")
     # the pointer parked over the panel's text, away from the canvas

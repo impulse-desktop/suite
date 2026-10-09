@@ -33,7 +33,7 @@ Each tool runs as `im <tool> ...`, or by its link `im<tool>`:
 | `im read [FILE]` | reads a PDF or DjVu document |
 | `im edit FILE` | edits a text file, or starts a new one |
 | `im choose [DIR]` | lets the user pick a file and prints its path |
-| `im screenshot FILE` | crops and saves a screenshot the shell hands over |
+| `im screenshot FILE [--white NITS]` | crops and saves a screenshot the shell hands over |
 | `im ui` | the widget demo |
 
 Given no file, `im view`, `im play` and `im read` open the chooser in
@@ -43,7 +43,8 @@ their window first, and go on with what is chosen.
 `--name N` and `--filter 'Label|*.ext|type/*'`; it prints the chosen
 paths and exits 0, or exits 1 when cancelled.
 
-`im screenshot` saves to `$XDG_PICTURES_DIR/screenshots` (else
+`im screenshot` takes `--white NITS`, the SDR white of an HDR capture (203
+if not given). It saves to `$XDG_PICTURES_DIR/screenshots` (else
 `~/Pictures/screenshots`) as JPEG XL. `IM_SHOT_DIR`, `IM_SHOT_NAME` (a
 strftime pattern) and `IM_SHOT_FORMAT=png` change where and how.
 `IM_SCALE` sets the interface scale of any tool.

@@ -586,7 +586,7 @@ namespace {
         }
     }
 
-    static VideoShader describeFrame(const AVFrame* frame, const char* output, float sdrWhiteNits) {
+    static VideoShader describeFrame(const AVFrame* frame, const char* output) {
         AVPixelFormat format = (AVPixelFormat)frame->format;
         const AVPixFmtDescriptor* descriptor = av_pix_fmt_desc_get(format);
         const AVBufferRef* buffer = frame->buf[0];
@@ -798,8 +798,8 @@ namespace {
         out.weights[0] = kr;
         out.weights[1] = kb;
         out.light[0] = transfer->decades;
-        out.light[1] = 10000. / sdrWhiteNits;
-        out.light[2] = 1000. / sdrWhiteNits;
+        out.light[1] = 10000.;
+        out.light[2] = 1000.;
 
         for (int i = 0; i < 3; i++) {
             out.luminance[i] = primaries->toXyz[1][i];
@@ -2059,7 +2059,7 @@ void Screen::makeRender(VideoImage* image) {
 
     bool hdr = frame->color_trc == AVCOL_TRC_SMPTE2084 || frame->color_trc == AVCOL_TRC_ARIB_STD_B67;
 
-    image->facts = describeFrame(frame, hdr ? "hdr" : "sdr", RendererOptions{}.sdrWhiteNits);
+    image->facts = describeFrame(frame, hdr ? "hdr" : "sdr");
 
     ScopedPtr<ObjPool> owner{ObjPool::fromMemoryRaw()};
 

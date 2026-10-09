@@ -53,7 +53,7 @@ with Session("input_errors") as s:
     error_panel("a zero height", good, IM_SHOT_DMABUF=f"64:0:44:0:256:0:12288:{uuid}")
     error_panel("a zero size", good, IM_SHOT_DMABUF=f"64:48:44:0:256:0:0:{uuid}")
     error_panel("a buffer that cannot be opened", missing, IM_SHOT_DMABUF=f"64:48:44:0:256:0:12288:{uuid}")
-    image("colour without a volume", good, IM_SHOT_COLOR="0:203")
+    image("colour without a volume", good, IM_SHOT_COLOR="0")
     image("colour without a transfer", good, IM_SHOT_COLOR="garbage")
     # a ui scale below zero falls back to the default 2: the 64x48 capture
     # at 50% beside the 400px panel and 8px of spacing, as tall as the

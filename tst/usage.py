@@ -1,6 +1,7 @@
 """The one binary's dispatch. `im` alone, `im` with a tool it has not got
 and `im screenshot` without a path each print their usage and exit 2, and
-so does the link imscreenshot without a path; `im screenshot PATH` runs
+so does the link imscreenshot without a path, with a white it cannot use,
+an option it does not know or a second path; `im screenshot PATH` runs
 the tool by its first word as the link does by its name."""
 
 from session import Session, png_size
@@ -17,6 +18,9 @@ with Session("usage") as s:
     assert code == 2 and "usage: im screenshot <path|fd:N>" in log, f"im screenshot without a path: rc={code}:\n{log}"
     code, log = s.run()
     assert code == 2 and "usage: im screenshot <path|fd:N>" in log, f"imscreenshot without a path: rc={code}:\n{log}"
+    for args in (["--white"], ["--white", "0"], ["--white", "20000"], ["--paint"], [str(shot)]):
+        code, log = s.run(str(shot), *args)
+        assert code == 2 and "usage: im screenshot <path|fd:N> [--white NITS]" in log, f"imscreenshot {args}: rc={code}:\n{log}"
 
     code, log = s.run("screenshot", str(shot), command=s.binary, IM_SHOT_ACTION="save", IM_SHOT_FORMAT="png",
                       IM_SHOT_DIR=str(shots), IM_SHOT_NAME="byword")

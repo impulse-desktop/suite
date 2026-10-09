@@ -747,7 +747,7 @@ typedef struct {
     int32_t video[2];
     uint32_t tilesX;
     uint32_t first;
-    float white;
+    float textureWhite;
     uint32_t pad;
     int32_t box[2];
 } Push;

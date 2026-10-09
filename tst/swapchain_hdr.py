@@ -16,7 +16,7 @@ with Session("swapchain_hdr") as s:
         return len(colours) > 4
 
     for fault in ("swapchain=0", "swapchain=3", "swapchain-suboptimal=3"):
-        s.launch(str(shot), IM_SHOT_COLOR="1:203", IM_CHAOS=fault)
+        s.launch(str(shot), IM_SHOT_COLOR="1", IM_CHAOS=fault)
         s.focus()
         s.said("surface HDR10 PQ")
         s.wait(drawn, f"{fault}: the HDR editor drawn after the rebuild")

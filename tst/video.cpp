@@ -390,7 +390,7 @@ namespace {
     }
 
     static void displayLight(int transfer, int primaries, const double* signal, double* light) {
-        double white = RendererOptions{}.sdrWhiteNits;
+        double white = outputWhiteNits(ShaderOutput::WideLinear);
         Matrix toXyz = primariesToXyz(primaries);
 
         for (int c = 0; c < 3; c++) {
@@ -801,8 +801,6 @@ VideoShader FormatCheck::describe(const AVFrame* frame, const char* output) {
     int shiftX = descriptor->log2_chroma_w;
     int shiftY = descriptor->log2_chroma_h;
     int red = model == Model::Bayer ? bayerRed(descriptor) : 0;
-    double white = RendererOptions{}.sdrWhiteNits;
-
     out.size[0] = (u32)frame->width;
     out.size[1] = (u32)frame->height;
     out.size[2] = (u32)AV_CEIL_RSHIFT(frame->width, shiftX);
@@ -816,8 +814,8 @@ VideoShader FormatCheck::describe(const AVFrame* frame, const char* output) {
     out.weights[0] = lumaWeight(kase, 0);
     out.weights[1] = lumaWeight(kase, 2);
     out.light[0] = transfer.decades;
-    out.light[1] = 10000. / white;
-    out.light[2] = 1000. / white;
+    out.light[1] = 10000.;
+    out.light[2] = 1000.;
 
     for (int i = 0; i < 3; i++) {
         out.luminance[i] = toXyz.m[1][i];
@@ -1667,7 +1665,7 @@ void FormatCheck::systems() {
 }
 
 void FormatCheck::transfers() {
-    float white = RendererOptions{}.sdrWhiteNits;
+    float white = outputWhiteNits(ShaderOutput::WideLinear);
 
     for (const VideoTransfer& entry : videoTransfers) {
         Case kase;

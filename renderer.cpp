@@ -150,7 +150,7 @@ namespace {
     static_assert(sizeof(Triangle) == 176);
 
     constexpr size_t callBytes = 40;
-    constexpr ShaderParameter hostParameters[] = {{ShaderInput::TargetSize, 0, 8}, {ShaderInput::VideoOrigin, 8, 8}, {ShaderInput::TilesAcross, 16, 4}, {ShaderInput::FirstTile, 20, 4}, {ShaderInput::White, 24, 4}};
+    constexpr ShaderParameter hostParameters[] = {{ShaderInput::TargetSize, 0, 8}, {ShaderInput::VideoOrigin, 8, 8}, {ShaderInput::TilesAcross, 16, 4}, {ShaderInput::FirstTile, 20, 4}, {ShaderInput::TextureWhite, 24, 4}};
     constexpr u32 hostParameterCount = (u32)(sizeof(hostParameters) / sizeof(hostParameters[0]));
 
     struct Call {
@@ -159,7 +159,7 @@ namespace {
         i32 box[2];
         u32 tilesX;
         u32 first;
-        float white;
+        float textureWhite;
     };
 
     void fillCall(const ShaderParameter* parameters, u32 count, const Call& call, u8 (&block)[callBytes]) {
@@ -183,8 +183,8 @@ namespace {
                 case ShaderInput::FirstTile:
                     from = &call.first;
                     break;
-                case ShaderInput::White:
-                    from = &call.white;
+                case ShaderInput::TextureWhite:
+                    from = &call.textureWhite;
                     break;
                 default:
                     continue;
@@ -845,8 +845,8 @@ void Tiles::compose(const ImDrawData* draw, const Vector<Layer>& underlays, u32 
 }
 
 Renderer* Renderer::create(stl::ObjPool& pool, plt::Platform& platform, plt::Window& window, const RendererOptions& options) {
-    if (!(options.sdrWhiteNits > 0.f) || options.sdrWhiteNits > 10000.f) {
-        fail(StringView(u8"invalid SDR white level"));
+    if (!(options.textureWhiteNits > 0.f) || options.textureWhiteNits > 10000.f) {
+        fail(StringView(u8"invalid texture white level"));
     }
     return createRenderer(pool, platform, window, options);
 }
@@ -996,7 +996,7 @@ namespace {
         id<MTLComputePipelineState> genericLayer[outputs] = {};
         bool edr = false;
         bool wide = false;
-        float sdrWhiteNits = 203.f;
+        float textureWhiteNits = 203.f;
         u64 frames = 0;
         Tiles tiles;
 
@@ -1034,6 +1034,7 @@ namespace {
 
 constant int OUTPUT [[function_constant(0)]];
 constant bool WIDE [[function_constant(1)]];
+constant float WHITE [[function_constant(2)]];
 
 constant int TILE = 24;
 constant uint NONE = 0xffffffffu;
@@ -1083,7 +1084,7 @@ struct Frame {
     int2 video;
     uint tilesX;
     uint first;
-    float white;
+    float textureWhite;
     int2 box;
 };
 
@@ -1144,7 +1145,7 @@ static float4 sampled(constant Textures& textures, uint index, uint flags, float
     if (decode == DECODE_SRGB) {
         s.rgb = srgbDecode(s.rgb);
     } else if (decode == DECODE_PQ) {
-        s.rgb = pqDecode(s.rgb) / frame.white;
+        s.rgb = pqDecode(s.rgb) / frame.textureWhite;
     }
 
     s.rgb = toFrame(s.rgb, (flags & SOURCE_WIDE) != 0u);
@@ -1455,9 +1456,11 @@ id<MTLComputePipelineState> MetalRenderer::pipeline(id<MTLLibrary> from, ShaderO
     MTLFunctionConstantValues* constants = [[MTLFunctionConstantValues alloc] init];
     int encoding = output == ShaderOutput::Srgb ? 0 : 2;
     bool wideOutput = output == ShaderOutput::WideLinear;
+    float white = outputWhiteNits(output);
     NSError* error = nil;
     [constants setConstantValue:&encoding type:MTLDataTypeInt atIndex:0];
     [constants setConstantValue:&wideOutput type:MTLDataTypeBool atIndex:1];
+    [constants setConstantValue:&white type:MTLDataTypeFloat atIndex:2];
     id<MTLFunction> function = [from newFunctionWithName:@"compose" constantValues:constants error:&error];
     if (!function) {
         fail(StringView(StringBuilder() << StringView(u8"Metal compositor function: ") << StringView(error ? error.localizedDescription.UTF8String : "missing")));
@@ -1507,7 +1510,7 @@ void MetalRenderer::encode(id<MTLCommandBuffer> command, id<MTLTexture> target, 
     }
     [compute setBuffer:textures offset:0 atIndex:6];
     [compute setTexture:target atIndex:0];
-    Call call{{(i32)target.width, (i32)target.height}, {0, 0}, {0, 0}, t.tilesX, 0, sdrWhiteNits};
+    Call call{{(i32)target.width, (i32)target.height}, {0, 0}, {0, 0}, t.tilesX, 0, textureWhiteNits};
     u8 block[callBytes];
     for (u32 p = 0; p * 2 < t.programs.length(); p++) {
         u32 count = t.programs[p * 2 + 1];
@@ -1881,7 +1884,7 @@ static Renderer* createRenderer(ObjPool& pool, plt::Platform& platform, plt::Win
     renderer->layer = (__bridge CAMetalLayer*)context.connection;
     renderer->window = (__bridge NSWindow*)context.window;
     renderer->device = MTLCreateSystemDefaultDevice();
-    renderer->sdrWhiteNits = options.sdrWhiteNits;
+    renderer->textureWhiteNits = options.textureWhiteNits;
     if (renderer->device == nil) {
         fail(StringView(u8"no metal device"));
     }
@@ -2090,7 +2093,7 @@ namespace {
         bool rebuild = false;
         PFN_vkGetMemoryHostPointerPropertiesEXT hostProperties = nullptr;
         VkDeviceSize hostAlignment = 0;
-        float sdrWhiteNits = 203.f;
+        float textureWhiteNits = 203.f;
         bool colorSpaces = false;
         PFN_vkCmdPushDescriptorSetKHR pushDescriptorSet = nullptr;
         VkSampler sampler = VK_NULL_HANDLE;
@@ -3114,9 +3117,15 @@ VkShaderModule Gpu::shaderModule(const u32* code, size_t bytes) {
 
 VkPipeline Gpu::pipeline(const u32* code, size_t bytes, ShaderOutput output) {
     VkShaderModule module = shaderModule(code, bytes);
-    u32 constants[2] = {output == ShaderOutput::Srgb ? 0u : output == ShaderOutput::Pq ? 1u : 2u, output == ShaderOutput::Pq || output == ShaderOutput::WideLinear ? 1u : 0u};
-    VkSpecializationMapEntry entries[2] = {{0, 0, 4}, {1, 4, 4}};
-    VkSpecializationInfo spec{2, entries, sizeof(constants), constants};
+
+    struct {
+        u32 output;
+        u32 wide;
+        float white;
+    } constants{output == ShaderOutput::Srgb ? 0u : output == ShaderOutput::Pq ? 1u : 2u, output == ShaderOutput::Pq || output == ShaderOutput::WideLinear ? 1u : 0u, outputWhiteNits(output)};
+
+    VkSpecializationMapEntry entries[3] = {{0, 0, 4}, {1, 4, 4}, {2, 8, 4}};
+    VkSpecializationInfo spec{3, entries, sizeof(constants), &constants};
     VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
 
     ci.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, module, "main", &spec};
@@ -3253,7 +3262,7 @@ void Gpu::bindCompose(VkDescriptorSet set, Buffer (&buffers)[composeBuffers], Vk
 
 void Gpu::dispatch(VkCommandBuffer command, VkDescriptorSet set, u32 width, u32 height, ShaderOutput output) {
     const Tiles& t = tiles;
-    Call call{{(i32)width, (i32)height}, {0, 0}, {0, 0}, t.tilesX, 0, sdrWhiteNits};
+    Call call{{(i32)width, (i32)height}, {0, 0}, {0, 0}, t.tilesX, 0, textureWhiteNits};
     u8 block[callBytes];
     u32 groups = (composeTile / composeGroup) * (composeTile / composeGroup);
 
@@ -4520,7 +4529,7 @@ static Renderer* createRenderer(ObjPool& pool, plt::Platform& platform, plt::Win
     gpu.platform = &platform;
     gpu.window = &window;
     gpu.timer = pool.make<PollGpu>(&gpu);
-    gpu.sdrWhiteNits = options.sdrWhiteNits;
+    gpu.textureWhiteNits = options.textureWhiteNits;
     pooledGuard(pool, [&gpu] {
         gpu.platform->poller()->cancel(*gpu.timer);
     });

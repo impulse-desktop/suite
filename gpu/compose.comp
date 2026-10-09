@@ -10,6 +10,7 @@ layout(local_size_x = GROUP, local_size_y = GROUP) in;
 
 layout(constant_id = 0) const int OUTPUT = 0;
 layout(constant_id = 1) const bool WIDE = false;
+layout(constant_id = 2) const float WHITE = 203.0;
 
 const int TILE = 24;
 const uint NONE = 0xffffffffu;
@@ -82,7 +83,7 @@ layout(push_constant) uniform Frame {
     ivec2 video;
     uint tilesX;
     uint first;
-    float white;
+    float textureWhite;
     ivec2 box;
 } frame;
 
@@ -149,7 +150,7 @@ vec3 encode(vec3 c, ivec2 pixel) {
     }
 
     if (OUTPUT == 1) {
-        return pqEncode(c * frame.white) + noise(pixel) / 1023.0;
+        return pqEncode(c * WHITE) + noise(pixel) / 1023.0;
     }
 
     return c;
@@ -162,7 +163,7 @@ vec4 sampled(uint index, uint flags, vec2 at) {
     if (decode == DECODE_SRGB) {
         s.rgb = srgbDecode(s.rgb);
     } else if (decode == DECODE_PQ) {
-        s.rgb = pqDecode(s.rgb) / frame.white;
+        s.rgb = pqDecode(s.rgb) / frame.textureWhite;
     }
 
     s.rgb = toFrame(s.rgb, (flags & SOURCE_WIDE) != 0u);

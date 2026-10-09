@@ -41,13 +41,12 @@ namespace {
 
     struct OutputColorState {
         bool hdr = false;
-        double sdrWhiteNits = 80.0;
         double displayMinNits = .2;
         double displayPeakNits = 80.0;
         double displayMaxFallNits = 80.0;
 
         static OutputColorState sdr();
-        static OutputColorState hdr10(double sdrWhiteNits);
+        static OutputColorState hdr10();
     };
 
     struct ColorRgb {
@@ -227,27 +226,15 @@ namespace {
         Buffer p(inherited ? StringView(u8"/proc/self/fd/3") : path);
 
         if (const char* color = getenv("IM_SHOT_COLOR")) {
-            StringView value(color), hs, rest;
+            StringView value(color), hs = value, volume, minString, rest, peakString, fallString;
 
-            if (value.split(':', hs, rest)) {
-                StringView whiteString = rest;
-                StringView minString, peakString, fallString, head, tail;
-                bool volume = false;
+            value.split(':', hs, volume);
+            img.color = hs == StringView(u8"1") ? OutputColorState::hdr10() : OutputColorState::sdr();
 
-                if (rest.split(':', head, tail)) {
-                    whiteString = head;
-                    volume = tail.split(':', minString, tail) && tail.split(':', peakString, fallString);
-                }
-
-                double white = parseFloat(whiteString);
-
-                img.color = hs == StringView(u8"1") ? OutputColorState::hdr10(white) : OutputColorState::sdr();
-
-                if (volume) {
-                    img.color.displayMinNits = parseFloat(minString);
-                    img.color.displayPeakNits = parseFloat(peakString);
-                    img.color.displayMaxFallNits = parseFloat(fallString);
-                }
+            if (volume.split(':', minString, rest) && rest.split(':', peakString, fallString)) {
+                img.color.displayMinNits = parseFloat(minString);
+                img.color.displayPeakNits = parseFloat(peakString);
+                img.color.displayMaxFallNits = parseFloat(fallString);
             }
         }
 
@@ -840,11 +827,10 @@ OutputColorState OutputColorState::sdr() {
     return {};
 }
 
-OutputColorState OutputColorState::hdr10(double white) {
+OutputColorState OutputColorState::hdr10() {
     OutputColorState state;
 
     state.hdr = true;
-    state.sdrWhiteNits = white;
     state.displayMinNits = .0001;
     state.displayPeakNits = 1000.0;
     state.displayMaxFallNits = 400.0;
@@ -874,11 +860,27 @@ bool Image::shared() const {
 }
 
 int mainScreenshot(ObjPool& pool, int argc, char** argv) {
-    if (argc < 2) {
-        sysE << StringView(u8"usage: im screenshot <path|fd:N>") << endL;
+    StringView path;
+    float white = RendererOptions{}.textureWhiteNits;
+    bool usage = false;
+
+    for (int i = 1; i < argc && !usage; i++) {
+        StringView arg(argv[i]);
+
+        if (arg == StringView(u8"--white") && i + 1 < argc) {
+            white = (float)parseFloat(StringView(argv[++i]));
+            usage = !(white > 0.f) || white > 10000.f;
+        } else if (!arg.startsWith(StringView(u8"-")) && path.empty()) {
+            path = arg;
+        } else {
+            usage = true;
+        }
+    }
+
+    if (usage || path.empty()) {
+        sysE << StringView(u8"usage: im screenshot <path|fd:N> [--white NITS]") << endL;
         return 2;
     }
-    StringView path(argv[1]);
     Viewer view;
     Image img;
     Buffer errText;
@@ -901,7 +903,7 @@ int mainScreenshot(ObjPool& pool, int argc, char** argv) {
     ChaosMonkey& chaos = *ChaosMonkey::create(pool);
 
     UiOptions options{480_d, 180_d};
-    options.renderer.sdrWhiteNits = (float)img.color.sdrWhiteNits;
+    options.renderer.textureWhiteNits = white;
     options.renderer.shared = img.native;
     Ui& ui = *Ui::create(pool, StringView(u8"screenshot"), options);
     auto body = makeRunable([&] {

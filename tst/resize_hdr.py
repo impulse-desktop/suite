@@ -11,7 +11,7 @@ with Session("resize_hdr") as s:
     # PQ codes that vary across the frame: many colours once drawn
     pixels = bytes(b for y in range(h) for x in range(w) for b in ((x * 255) // w, (y * 255) // h, ((x ^ y) & 64) * 3, 255))
     shot = s.capture_file("frame.shot", w, h, pixels=pixels)
-    s.launch(str(shot), IM_SHOT_COLOR="1:203", IM_SCALE="3")
+    s.launch(str(shot), IM_SHOT_COLOR="1", IM_SCALE="3")
     s.focus()
     s.said("surface HDR10 PQ")
     s.wait(lambda: s.size()[0] == 1280 * 9 // 10, "the clamped size")

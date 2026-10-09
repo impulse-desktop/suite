@@ -9,7 +9,7 @@ with Session("no_hdr_surface") as s:
     if "wp_color_manager_v1" in s.globals:
         s.skip("the compositor offers wp_color_manager_v1")
     shot = s.capture_file("good.shot", 64, 48)
-    s.launch(str(shot), IM_SHOT_COLOR="1:203")
+    s.launch(str(shot), IM_SHOT_COLOR="1")
     s.focus()
 
     def drawn():

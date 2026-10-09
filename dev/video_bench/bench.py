@@ -17,8 +17,6 @@ sys.path.insert(0, str(SUITE / "gpu"))
 
 import video_shaders
 
-WHITE = 203.0
-
 MODULE = video_shaders.tables()
 LAYOUTS = video_shaders.layouts(MODULE)
 
@@ -94,5 +92,5 @@ def facts(case, layout, components, offsets, lines):
     numbers += [value for row in decode for value in row] + bias + [red % 2, red // 2, kr, kb]
     numbers += curve + table(transfer.get("oetf")) + table(transfer.get("inverse"))
     numbers += [value for row in to_output for value in row]
-    numbers += [transfer.get("decades", 0), 10000 / WHITE, 1000 / WHITE, *to_xyz[1]]
+    numbers += [transfer.get("decades", 0), 10000, 1000, *to_xyz[1]]
     return [case["format"], system, shape, conversion, output, *(format(word, "x") for word in words), *map(bits, numbers)]

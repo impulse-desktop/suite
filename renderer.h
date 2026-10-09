@@ -51,7 +51,7 @@ enum class ShaderInput : u8 {
     BoxSize,
     TilesAcross,
     FirstTile,
-    White,
+    TextureWhite,
     Constant,
     Words,
     Headers,
@@ -86,6 +86,13 @@ enum class ShaderOutput : u8 {
     WideLinear
 };
 
+// The nits a PQ source shows at 1 of an output's light. On EDR it is 100,
+// as Apple maps PQ; everywhere else 203, the reference luminance of the PQ
+// output's description, which the window system shows at its SDR white.
+inline float outputWhiteNits(ShaderOutput output) {
+    return output == ShaderOutput::WideLinear ? 100.f : 203.f;
+}
+
 enum class ShaderTiles : u8 {
     Inside,
     Edge,
@@ -112,7 +119,8 @@ struct RenderImage {
 };
 
 struct RendererOptions {
-    float sdrWhiteNits = 203.f;
+    // The nits a PQ texture's SDR white sits at, decoded to 1.
+    float textureWhiteNits = 203.f;
     SharedImage* shared = nullptr;
 };
 

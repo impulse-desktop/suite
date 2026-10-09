@@ -1438,7 +1438,7 @@ namespace {
                 luminance = g.add(luminance, g.mul(scene[i], s.luminance[i]));
             }
 
-            Node* factor = g.mul(g.pow(luminance, 0.2), s.light[2]);
+            Node* factor = g.mul(g.pow(luminance, 0.2), s.light[2] / outputWhiteNits(o.output));
 
             for (int i = 0; i < 3; i++) {
                 scene[i] = g.mul(scene[i], factor);
@@ -1567,7 +1567,7 @@ namespace {
                 rows(toLight, lms, scene);
 
                 for (int i = 0; i < 3; i++) {
-                    light[i] = pq ? g.mul(scene[i], s.light[1]) : scene[i];
+                    light[i] = pq ? g.mul(scene[i], s.light[1] / outputWhiteNits(o.output)) : scene[i];
                 }
 
                 if (!pq) {
@@ -1583,7 +1583,7 @@ namespace {
                 }
             } else if (!strcmp(s.transfer, "pq")) {
                 for (int i = 0; i < 3; i++) {
-                    light[i] = g.mul(pqLight(signal[i]), s.light[1]);
+                    light[i] = g.mul(pqLight(signal[i]), s.light[1] / outputWhiteNits(o.output));
                 }
             } else {
                 for (int i = 0; i < 3; i++) {
@@ -2313,7 +2313,7 @@ namespace {
 
                     k.encoded[c] = g.add(g.select(g.le(v, 0.0031308), g.mul(v, 12.92), g.sub(g.mul(g.pow(v, 1. / 2.4), 1.055), 0.055)), g.mul(noise, 1. / 255.));
                 } else if (o.output == ShaderOutput::Pq) {
-                    Node* y = g.pow(g.clamp(g.mul(g.mul(straight, g.frame(4, Kind::Float, 100000.)), 1. / 10000.), 0., 1.), 2610. / 16384.);
+                    Node* y = g.pow(g.clamp(g.mul(straight, outputWhiteNits(o.output) / 10000.), 0., 1.), 2610. / 16384.);
 
                     k.encoded[c] = g.add(g.pow(g.div(g.add(g.mul(y, 18.8515625), 0.8359375), g.add(g.mul(y, 18.6875), 1.)), 2523. / 32.), g.mul(noise, 1. / 1023.));
                 } else {
@@ -4619,7 +4619,7 @@ namespace {
             described[i] = e.tuple(i, "air.buffer", "air.location_index", locations[i], 1, "air.read", "air.address_space", 1, "air.arg_type_size", 4, "air.arg_type_align_size", 4, "air.arg_type_name", "uint", "air.arg_name", names[i]).handle;
         }
 
-        Meta layout = e.tuple(0, 8, 0, "int2", "size", 8, 8, 0, "int2", "video", 16, 4, 0, "uint", "tilesX", 20, 4, 0, "uint", "first", 24, 4, 0, "float", "white");
+        Meta layout = e.tuple(0, 8, 0, "int2", "size", 8, 8, 0, "int2", "video", 16, 4, 0, "uint", "tilesX", 20, 4, 0, "uint", "first", 24, 4, 0, "float", "textureWhite");
 
         described[4] = e.tuple(4, "air.buffer", "air.buffer_size", 32, "air.location_index", 5, 1, "air.read", "air.address_space", 2, "air.struct_type_info", layout, "air.arg_type_size", 32, "air.arg_type_align_size", 8, "air.arg_type_name", "Frame", "air.arg_name", "frame").handle;
         described[5] = e.tuple(5, "air.buffer", "air.location_index", 7, 1, "air.read", "air.address_space", 1, "air.arg_type_size", 4, "air.arg_type_align_size", 4, "air.arg_type_name", "uint", "air.arg_name", "words").handle;
@@ -4780,8 +4780,8 @@ namespace {
 }
 
 CompiledShader compile(ObjPool& pool, const VideoShader& shader, const ShaderOptions& options) {
-    static constexpr ShaderParameter kernelParameters[] = {{ShaderInput::TargetSize, 0, 8}, {ShaderInput::VideoOrigin, 8, 8}, {ShaderInput::TilesAcross, 16, 4}, {ShaderInput::FirstTile, 20, 4}, {ShaderInput::White, 24, 4}, {ShaderInput::Words, 0, 0}, {ShaderInput::Headers, 0, 0}, {ShaderInput::List, 0, 0}, {ShaderInput::Ops, 0, 0}, {ShaderInput::Tiles, 0, 0}, {ShaderInput::Target, 0, 0}};
-    static constexpr ShaderParameter layerParameters[] = {{ShaderInput::TargetSize, 0, 8}, {ShaderInput::VideoOrigin, 8, 8}, {ShaderInput::TilesAcross, 16, 4}, {ShaderInput::FirstTile, 20, 4}, {ShaderInput::White, 24, 4}, {ShaderInput::Words, 0, 0}};
+    static constexpr ShaderParameter kernelParameters[] = {{ShaderInput::TargetSize, 0, 8}, {ShaderInput::VideoOrigin, 8, 8}, {ShaderInput::TilesAcross, 16, 4}, {ShaderInput::FirstTile, 20, 4}, {ShaderInput::Words, 0, 0}, {ShaderInput::Headers, 0, 0}, {ShaderInput::List, 0, 0}, {ShaderInput::Ops, 0, 0}, {ShaderInput::Tiles, 0, 0}, {ShaderInput::Target, 0, 0}};
+    static constexpr ShaderParameter layerParameters[] = {{ShaderInput::TargetSize, 0, 8}, {ShaderInput::VideoOrigin, 8, 8}, {ShaderInput::TilesAcross, 16, 4}, {ShaderInput::FirstTile, 20, 4}, {ShaderInput::TextureWhite, 24, 4}, {ShaderInput::Words, 0, 0}};
     bool mixed = options.tiles == ShaderTiles::Mixed;
 
     if (!shader.tile || shader.tile > 32) {
@@ -4815,7 +4815,7 @@ CompiledShader compile(ObjPool& pool, const VideoShader& shader, const ShaderOpt
 }
 
 CompiledShader compileGeneric(ObjPool& pool, const VideoShader& shader) {
-    static constexpr ShaderParameter parameters[] = {{ShaderInput::TargetSize, 0, 8}, {ShaderInput::VideoOrigin, 8, 8}, {ShaderInput::TilesAcross, 16, 4}, {ShaderInput::FirstTile, 20, 4}, {ShaderInput::White, 24, 4}, {ShaderInput::BoxSize, 32, 8}, {ShaderInput::Constant, 0, sizeof(Facts)}, {ShaderInput::Words, 0, 0}};
+    static constexpr ShaderParameter parameters[] = {{ShaderInput::TargetSize, 0, 8}, {ShaderInput::VideoOrigin, 8, 8}, {ShaderInput::TilesAcross, 16, 4}, {ShaderInput::FirstTile, 20, 4}, {ShaderInput::TextureWhite, 24, 4}, {ShaderInput::BoxSize, 32, 8}, {ShaderInput::Constant, 0, sizeof(Facts)}, {ShaderInput::Words, 0, 0}};
 
     if (!shader.tile || shader.tile > 32) {
         fail(StringView(u8"a video layer has an invalid tile"));

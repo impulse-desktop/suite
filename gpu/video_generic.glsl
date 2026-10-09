@@ -238,7 +238,7 @@ float genericHlgScene(float signal) {
 vec3 genericHlgDisplay(vec3 scene ARGS_DECL) {
     float luminance = scene.x * facts.luminance[0] + scene.y * facts.luminance[1] + scene.z * facts.luminance[2];
 
-    return scene * (pow(luminance, 0.2) * facts.light[2]);
+    return scene * (pow(luminance, 0.2) * (facts.light[2] / WHITE));
 }
 
 float genericLogLight(float signal ARGS_DECL) {
@@ -347,7 +347,7 @@ vec3 genericLight(vec3 signal ARGS_DECL) {
 
         vec3 scene = genericRows(1, lms ARGS);
 
-        return pq ? scene * facts.light[1] : genericHlgDisplay(scene ARGS);
+        return pq ? scene * (facts.light[1] / WHITE) : genericHlgDisplay(scene ARGS);
     }
 
     if (facts.transfer == 0u) {
@@ -368,7 +368,7 @@ vec3 genericLight(vec3 signal ARGS_DECL) {
 
     if (facts.transfer == 2u) {
         for (int i = 0; i < 3; i++) {
-            light[i] = genericPqLight(signal[i]) * facts.light[1];
+            light[i] = genericPqLight(signal[i]) * (facts.light[1] / WHITE);
         }
 
         return light;

@@ -51,7 +51,7 @@ with Session("shared_buffer") as s:
 
     if "wp_color_manager_v1" in s.globals:
         # HDR: the PNG comes from the readback's 16-bit samples, PQ decoded
-        pw, ph, px = png_pixels(save("shared-hdr", "png", IM_SHOT_COLOR="1:203"))
+        pw, ph, px = png_pixels(save("shared-hdr", "png", IM_SHOT_COLOR="1"))
         for x, y in probes:
             at = (y * w + x) * 4
             expected = hdr_png_pixel(tuple(pq_decode(c / 255) for c in rgb[y * w + x]))

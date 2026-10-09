@@ -1,7 +1,6 @@
-"""Colour metadata with a partial display volume (a white level followed by
-a minimum but no peak, or no frame average) is read as no volume at all:
-the white level is still the one it names, so the image looks exactly as
-with the white level alone, not as if the stray minimum were its white."""
+"""Colour metadata with a partial display volume (a minimum but no peak, or
+no frame average) is read as no volume at all: the image looks exactly as
+with the transfer alone."""
 
 from session import Session
 
@@ -28,9 +27,9 @@ with Session("color_partial") as s:
         s.close()
         return tuple(sum(p[c] for p in found) // len(found) for c in range(3))
 
-    white = look("1:203", "white")
-    for partial in ("1:203:0.1", "1:203:0.1:1000"):
+    alone = look("1", "alone")
+    for partial in ("1:0.1", "1:0.1:1000"):
         seen = look(partial, "partial")
-        print(f"{partial}: {seen}, with the white level alone {white}")
-        assert all(abs(a - b) <= 12 for a, b in zip(white, seen)), f"{partial}: the frame is {seen}, with the white level alone {white}"
-    print("OK: a partial display volume leaves the white level as named")
+        print(f"{partial}: {seen}, with the transfer alone {alone}")
+        assert all(abs(a - b) <= 12 for a, b in zip(alone, seen)), f"{partial}: the frame is {seen}, with the transfer alone {alone}"
+    print("OK: a partial display volume leaves the image as it is")
