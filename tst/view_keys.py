@@ -1,10 +1,9 @@
 """The view on an image: the wheel over the canvas zooms in, - and = step
 the zoom, 1 is 1:1 and 0 fits again; r turns the image a quarter clockwise
 (the 64x48 image stands 48x64), R back; f makes the window fullscreen and
-back; Tab hides the list, and the canvas takes its room; a drag pans; a
-window narrower than the list is fine."""
+back; a drag pans; a window narrower than the list is fine."""
 
-from session import KEY_1, KEY_EQUAL, KEY_F, KEY_LEFTSHIFT, KEY_MINUS, KEY_R, KEY_TAB, KEY_ZERO, Session, colour_box, write_png
+from session import KEY_1, KEY_EQUAL, KEY_F, KEY_LEFTSHIFT, KEY_MINUS, KEY_R, KEY_ZERO, Session, colour_box, write_png
 
 with Session("view_keys", tool="view") as s:
     pics = s.artifacts / "pics"
@@ -51,19 +50,12 @@ with Session("view_keys", tool="view") as s:
     s.key(KEY_LEFTSHIFT, 0)
     s.said("rotated 0")
     size("back", 64, 48)
-    before = box("panel")
     s.tap(KEY_F)
     s.said("fullscreen on")
     s.wait(lambda: s.size() == (s.width, s.height), "the fullscreen window")
     s.tap(KEY_F)
     s.said("fullscreen off")
     s.wait(lambda: s.size() == (r["width"], r["height"]), "the window back at its size")
-    s.tap(KEY_TAB)
-    s.said("panel off")
-    # the canvas grew by the list's 200 px: the centred image sits 100 px further left
-    s.wait(lambda: (b := colour_box(s.capture("nopanel", region=canvas), reddish)) and before[0] - b[0] >= 95, "the image moved left")
-    s.tap(KEY_TAB)
-    s.said("panel on")
     # a drag over the canvas pans (a fitted image stays centred)
     cx, cy = canvas[0] + canvas[2] // 2, canvas[3] // 2
     s.drag(cx, cy, cx + 40, cy + 30)

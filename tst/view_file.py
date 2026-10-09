@@ -4,7 +4,7 @@ on in the background; a file whose name says nothing about its format is
 listed all the same by its bytes, and decoded by them; several files make
 the list themselves, in the given order; q leaves the viewer."""
 
-from session import KEY_LEFT, KEY_Q, Session, near, write_png
+from session import KEY_Q, Session, near, write_png
 
 with Session("view_file", tool="view") as s:
     pics = s.artifacts / "pics"
@@ -29,9 +29,6 @@ with Session("view_file", tool="view") as s:
     assert log.count("im view: selected ") == 1, "the listing selected the image again"
     s.said("showing b.png 80x60")
     shows((0, 255, 0), 4500, "b")
-    s.tap(KEY_LEFT)
-    s.said("selected a.png")
-    s.said("showing a.png 64x48")
     s.close(KEY_Q)
 
     s.launch(str(pics / "notes"))

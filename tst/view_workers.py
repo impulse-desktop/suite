@@ -3,7 +3,7 @@ import os
 import time
 from pathlib import Path
 
-from session import KEY_END, Session, png
+from session import Session, png
 
 
 with Session("view_four_workers", tool="view") as s:
@@ -25,7 +25,10 @@ with Session("view_four_workers", tool="view") as s:
     try:
         for i in range(4):
             readers.append(os.open(pics / f"f{i:02}.png", os.O_WRONLY | os.O_NONBLOCK))
-        s.tap(KEY_END)
+        w, h = s.size()
+        s.pointer(100, h // 2)
+        s.scroll(100)
+        s.click(100, h - 20)
         s.said("selected f19.png")
         assert s.client_log().count("im view: loading ") == 4, "selection queued extra work behind occupied workers"
         # Completing one thumbnail frees one credit. The latest Show goes next.

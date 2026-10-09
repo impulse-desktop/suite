@@ -411,6 +411,7 @@ namespace {
         bool fullscreen = false;
         bool panel = true;
         bool info = false;
+        bool leaving = false;
         bool scrollToCurrent = true;
         float tracedScrollY = 0.f;
 
@@ -426,7 +427,6 @@ namespace {
         void select(size_t index);
         void show(size_t index);
         void replaceShown(const ShownImage* next);
-        void step(long delta);
         void setZoom(float value);
         void fitView();
         void keys();
@@ -880,22 +880,6 @@ void ViewApp::replaceShown(const ShownImage* next) {
     ui->requestFrame();
 }
 
-void ViewApp::step(long delta) {
-    if (entries.empty()) {
-        return;
-    }
-
-    long last = (long)entries.length() - 1;
-    long next = (long)current + delta;
-
-    next = next < 0 ? 0 : next > last ? last : next;
-
-    if ((size_t)next != current) {
-        scrollToCurrent = true;
-        show((size_t)next);
-    }
-}
-
 void ViewApp::setZoom(float value) {
     zoom = clampf(value, zoomMin, zoomMax);
     fit = false;
@@ -912,59 +896,43 @@ void ViewApp::fitView() {
 }
 
 void ViewApp::keys() {
-    ImGuiIO& io = ImGui::GetIO();
-
-    if (ImGui::IsKeyPressed(ImGuiKey_RightArrow) || ImGui::IsKeyPressed(ImGuiKey_DownArrow) || ImGui::IsKeyPressed(ImGuiKey_Space) || ImGui::IsKeyPressed(ImGuiKey_PageDown) || ImGui::IsKeyPressed(ImGuiKey_J) || ImGui::IsKeyPressed(ImGuiKey_N)) {
-        step(1);
+    if (ImGui::Shortcut(ImGuiKey_Escape) || ImGui::Shortcut(ImGuiKey_Q)) {
+        leaving = true;
     }
 
-    if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow) || ImGui::IsKeyPressed(ImGuiKey_UpArrow) || ImGui::IsKeyPressed(ImGuiKey_Backspace) || ImGui::IsKeyPressed(ImGuiKey_PageUp) || ImGui::IsKeyPressed(ImGuiKey_K) || ImGui::IsKeyPressed(ImGuiKey_P)) {
-        step(-1);
-    }
-
-    if (ImGui::IsKeyPressed(ImGuiKey_Home) || (ImGui::IsKeyPressed(ImGuiKey_G) && !io.KeyShift)) {
-        step(-(long)entries.length());
-    }
-
-    if (ImGui::IsKeyPressed(ImGuiKey_End) || (ImGui::IsKeyPressed(ImGuiKey_G) && io.KeyShift)) {
-        step((long)entries.length());
-    }
-
-    if (ImGui::IsKeyPressed(ImGuiKey_W) || ImGui::IsKeyPressed(ImGuiKey_0) || ImGui::IsKeyPressed(ImGuiKey_Keypad0)) {
+    if (ImGui::Shortcut(ImGuiKey_W) || ImGui::Shortcut(ImGuiKey_0) || ImGui::Shortcut(ImGuiKey_Keypad0)) {
         fitView();
     }
 
-    if (ImGui::IsKeyPressed(ImGuiKey_1) || ImGui::IsKeyPressed(ImGuiKey_Keypad1)) {
+    if (ImGui::Shortcut(ImGuiKey_1) || ImGui::Shortcut(ImGuiKey_Keypad1)) {
         panX = 0.f;
         panY = 0.f;
         setZoom(1.f);
     }
 
-    if (ImGui::IsKeyPressed(ImGuiKey_Equal) || ImGui::IsKeyPressed(ImGuiKey_KeypadAdd)) {
+    if (ImGui::Shortcut(ImGuiKey_Equal, ImGuiInputFlags_Repeat) || ImGui::Shortcut(ImGuiKey_KeypadAdd, ImGuiInputFlags_Repeat)) {
         setZoom(zoom * zoomStep);
     }
 
-    if (ImGui::IsKeyPressed(ImGuiKey_Minus) || ImGui::IsKeyPressed(ImGuiKey_KeypadSubtract)) {
+    if (ImGui::Shortcut(ImGuiKey_Minus, ImGuiInputFlags_Repeat) || ImGui::Shortcut(ImGuiKey_KeypadSubtract, ImGuiInputFlags_Repeat)) {
         setZoom(zoom / zoomStep);
     }
 
-    if (ImGui::IsKeyPressed(ImGuiKey_F, false) || ImGui::IsKeyPressed(ImGuiKey_F11, false)) {
+    if (ImGui::Shortcut(ImGuiKey_F) || ImGui::Shortcut(ImGuiKey_F11)) {
         fullscreen = !fullscreen;
         ui->requestFullscreen(fullscreen);
         TRACE(ui, fullscreen ? StringView(u8"fullscreen on") : StringView(u8"fullscreen off"));
     }
 
-    if (ImGui::IsKeyPressed(ImGuiKey_R, false)) {
-        rotation = (rotation + (io.KeyShift ? 3 : 1)) % 4;
+    bool clockwise = ImGui::Shortcut(ImGuiKey_R);
+    bool counter = ImGui::Shortcut(ImGuiMod_Shift | ImGuiKey_R);
+
+    if (clockwise || counter) {
+        rotation = (rotation + (counter ? 3 : 1)) % 4;
         TRACE(ui, StringView(StringBuilder() << StringView(u8"rotated ") << (i64)(rotation * 90)));
     }
 
-    if (ImGui::IsKeyPressed(ImGuiKey_Tab, false)) {
-        panel = !panel;
-        TRACE(ui, panel ? StringView(u8"panel on") : StringView(u8"panel off"));
-    }
-
-    if (ImGui::IsKeyPressed(ImGuiKey_I, false)) {
+    if (ImGui::Shortcut(ImGuiKey_I)) {
         info = !info;
         TRACE(ui, info ? StringView(u8"info on") : StringView(u8"info off"));
     }
@@ -1449,6 +1417,7 @@ void ViewApp::draw() {
     ImGui::SetNextWindowPos(vp->Pos);
     ImGui::SetNextWindowSize(vp->Size);
     ImGui::Begin("##view", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoSavedSettings);
+    keys();
 
     float sideW = floorf(vp->Size.x * sideShare);
     bool left = panel && !fullscreen;
@@ -1507,14 +1476,13 @@ int mainView(ObjPool& pool, int argc, char** argv) {
                 return;
             }
 
-            if (ImGui::IsKeyPressed(ImGuiKey_Escape, false) || ImGui::IsKeyPressed(ImGuiKey_Q, false)) {
-                return;
-            }
-
-            app.keys();
             app.accept();
             app.draw();
             app.submit();
+
+            if (app.leaving) {
+                return;
+            }
         }
     });
     return ui.run(body);

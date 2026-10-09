@@ -1,7 +1,7 @@
-"""Three hundred files: visible thumbnails load on demand, and
-Down held walks the whole list by the client's own key repeat."""
+"""Three hundred files: the list holds them all, and the visible
+thumbnails load on demand."""
 
-from session import KEY_DOWN, Session, write_png
+from session import Session, write_png
 
 with Session("view_many", tool="view") as s:
     pics = s.artifacts / "pics"
@@ -12,12 +12,7 @@ with Session("view_many", tool="view") as s:
     s.focus()
     s.said("listed 300")
     s.said("showing f000.png 8x8")
-    # 25 repeats a second after 600 ms, one per frame at most: the end of
-    # the list within the hold with room for a slow renderer (Alpine got
-    # to f286 in 16 s)
-    s.tap(KEY_DOWN, hold=20.0)
-    s.said("selected f299.png")
-    s.said("showing f299.png 8x8")
-    s.said("thumbnail f299.png")
+    s.said("thumbnail f000.png")
+    assert "thumbnail f299.png" not in s.client_log(), "offscreen thumbnail loaded at startup"
     s.close()
-    print("OK: a long list walks by key repeat and loads the final thumbnail")
+    print("OK: a long list loads and its visible thumbnails come on demand")

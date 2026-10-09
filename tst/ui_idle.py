@@ -1,7 +1,7 @@
 """A mapped window sleeps, wakes on input/resize, and sleeps again after repeat and texture retirement."""
 import time
 
-from session import KEY_RIGHT, Session, write_png
+from session import KEY_EQUAL, Session, write_png
 
 
 def frames(s):
@@ -50,14 +50,14 @@ with Session("view_idle", tool="view") as s:
     s.focus()
     s.said("showing f00.png")
     idle(s)
-    s.key(KEY_RIGHT, 1)
-    s.said("selected f03.png")
-    s.key(KEY_RIGHT, 0)
+    s.key(KEY_EQUAL, 1)
+    s.said("zoom ", 3)
+    s.key(KEY_EQUAL, 0)
     idle(s)
-    selections = s.client_log().count("selected ")
+    zooms = s.client_log().count("im view: zoom ")
     before = frames(s)
     time.sleep(0.7)
-    assert s.client_log().count("selected ") == selections, "released key still repeats"
+    assert s.client_log().count("im view: zoom ") == zooms, "released key still repeats"
     assert frames(s) == before, "texture retirement does not finish"
     s.close()
 
