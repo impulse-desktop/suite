@@ -302,6 +302,7 @@ class Session:
         output."""
         self.clients += 1
         log = self.artifacts / f"client{self.clients}.log"
+        started = time.time()
         with log.open("wb") as out:
             process = subprocess.Popen(
                 self.debugged([str(command or self.link), *args], f"client{self.clients}"), env=self.environment(unset, environment), stdout=out, stderr=subprocess.STDOUT,
@@ -314,6 +315,8 @@ class Session:
                 process.kill()
                 process.wait()
                 raise
+        if process.returncode < 0:
+            self.crash_report(f"client{self.clients}", command or self.link, started)
         return process.returncode, log.read_text(errors="replace")
 
     def finished(self, timeout=10):
@@ -589,6 +592,35 @@ class Session:
             self.runtime.cleanup()
         if errors:
             raise RuntimeError("; ".join(errors))
+
+    def crash_report(self, label, binary, started):
+        if sys.platform != "darwin":
+            return
+        reports = Path.home() / "Library" / "Logs" / "DiagnosticReports"
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            found = sorted((path for path in reports.glob(f"{Path(binary).name}-*.ips") if path.stat().st_mtime >= started), key=lambda path: path.stat().st_mtime)
+            if found:
+                break
+            time.sleep(0.5)
+        else:
+            return
+        text = found[-1].read_text(errors="replace")
+        (self.artifacts / f"{label}-crash.ips").write_text(text)
+        try:
+            body = json.loads(text.split("\n", 1)[1])
+            images = [image.get("name", "?") for image in body.get("usedImages", [])]
+            lines = [f"{body.get('exception', {}).get('type', '?')} {body.get('exception', {}).get('signal', '?')}"]
+            for thread in body.get("threads", []):
+                if not thread.get("triggered"):
+                    continue
+                for index, frame in enumerate(thread.get("frames", [])):
+                    image = images[frame["imageIndex"]] if frame.get("imageIndex", -1) < len(images) else "?"
+                    where = f" {frame['sourceFile']}:{frame.get('sourceLine', '?')}" if "sourceFile" in frame else ""
+                    lines.append(f"#{index} {image} {frame.get('symbol', hex(frame.get('imageOffset', 0)))}+{frame.get('symbolLocation', 0)}{where}")
+            (self.artifacts / f"{label}-crash.log").write_text("\n".join(lines) + "\n")
+        except (ValueError, IndexError, KeyError, TypeError) as error:
+            (self.artifacts / f"{label}-crash.log").write_text(f"unreadable crash report {found[-1].name}: {error}\n")
 
     def stacks(self, process):
         if Path(process.args[0]).name != "gdb" or process.poll() is not None:

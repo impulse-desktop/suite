@@ -13,6 +13,10 @@ on:
         description: The tools trace their frames and keys
         type: boolean
         default: false
+      debugger:
+        description: The tools run under gdb or lldb
+        type: boolean
+        default: true
       platform:
         description: Where the scenarios run
         type: choice
@@ -47,6 +51,7 @@ jobs:
         run: |
           set -o pipefail
           if [ "${{ inputs.trace }}" = true ]; then export IM_TRACE_FRAMES=1; fi
+          if [ "${{ inputs.debugger }}" = false ]; then export IM_E2E_NO_DEBUGGER=1; fi
           bash dev/ci_darwin.sh test 2>&1 | tee "$RUNNER_TEMP/stress-darwin.log"
 
       - name: Upload what the failed scenarios captured
@@ -79,9 +84,10 @@ jobs:
         run: |
           set -o pipefail
           if [ "${{ inputs.trace }}" = true ]; then export IM_TRACE_FRAMES=1; fi
+          if [ "${{ inputs.debugger }}" = false ]; then export IM_E2E_NO_DEBUGGER=1; fi
           set -- ${{ inputs.linux }}
           case "$1" in ubuntu) image=$UBUNTU_IMAGE ;; gcc) image=$GCC_IMAGE ;; alpine) image=$ALPINE_IMAGE ;; esac
-          docker run --rm --device /dev/udmabuf --env CI_TEST_FLAGS --env IM_TRACE_FRAMES \
+          docker run --rm --device /dev/udmabuf --env CI_TEST_FLAGS --env IM_TRACE_FRAMES --env IM_E2E_NO_DEBUGGER \
             --volume "$GITHUB_WORKSPACE:/workspace" --workdir /workspace \
             "$image" sh dev/ci_linux.sh test "$2" \
             2>&1 | tee "$RUNNER_TEMP/stress-ubuntu.log"
