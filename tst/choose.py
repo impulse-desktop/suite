@@ -7,7 +7,7 @@ of globs or types keeps the rest out; `--save --name N` answers with the
 name typed, asking before an existing file is replaced; `--directory`
 answers with the directory; Ctrl+G shows the grid with thumbnails."""
 
-from session import KEY_BACKSPACE, KEY_ENTER, KEY_G, KEY_LEFTCTRL, Session, write_png
+from session import KEY_BACKSPACE, KEY_DOWN, KEY_ENTER, KEY_G, KEY_LEFTCTRL, Session, write_png
 
 
 def answer(s):
@@ -27,13 +27,16 @@ with Session("choose", tool="choose") as s:
     (root / "pics" / ".hidden").write_text("x\n")
     (root / "readme.txt").write_text("top\n")
 
+    # a file taken by its row: the arrow stands on it, Enter takes it
     s.launch("--filter", "Images|*.png|image/*", "--filter", "All|*", str(root / "pics"))
     s.focus()
     s.said(f"going {root / 'pics'}")
     s.said("listed 5")
     s.said("showing 3")
-    s.type("a.png")
-    s.said("showing 1")
+    s.tap(KEY_DOWN)
+    s.said("selected deep")
+    s.tap(KEY_DOWN)
+    s.said("selected a.png")
     s.tap(KEY_ENTER, client=False)
     s.said("chosen 1")
     s.gone()

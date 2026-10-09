@@ -1289,6 +1289,42 @@ void ChooseApp::keys() {
     if (ImGui::Shortcut(ImGuiKey_Backspace, ImGuiInputFlags_Repeat) && fieldName().empty() && StringView(dir).length() > 1) {
         go(StringView(joinPath(StringView(dir), StringView(u8".."))));
     }
+
+    if (ImGui::GetIO().NavVisible) {
+        return;
+    }
+
+    if (ImGui::Shortcut(ImGuiKey_Enter)) {
+        enter();
+    }
+
+    bool down = ImGui::Shortcut(ImGuiKey_DownArrow, ImGuiInputFlags_Repeat);
+    bool downExtend = ImGui::Shortcut(ImGuiMod_Shift | ImGuiKey_DownArrow, ImGuiInputFlags_Repeat);
+    bool up = ImGui::Shortcut(ImGuiKey_UpArrow, ImGuiInputFlags_Repeat);
+    bool upExtend = ImGui::Shortcut(ImGuiMod_Shift | ImGuiKey_UpArrow, ImGuiInputFlags_Repeat);
+    bool downKey = down || downExtend;
+    bool upKey = up || upExtend;
+
+    if ((downKey || upKey) && !shown.empty()) {
+        size_t at = 0;
+        bool standing = false;
+
+        for (size_t i = 0; i < shown.length(); i++) {
+            if (shown[i] == cursor) {
+                at = i;
+                standing = items[cursor]->selected;
+            }
+        }
+
+        if (standing && downKey && at + 1 < shown.length()) {
+            at++;
+        } else if (standing && upKey && at > 0) {
+            at--;
+        }
+
+        select(shown[at], downExtend || upExtend, false);
+        scrollToCursor = true;
+    }
 }
 
 // the places as the rows of a table, as the entries are, so that the two
@@ -1524,8 +1560,7 @@ void ChooseApp::drawLine() {
         fieldFocus = false;
     }
 
-    // Up and Down stay the list's: the line's history would take them
-    bool entered = ImGui::InputText("##path", field, sizeof(field), ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CallbackCompletion | ImGuiInputTextFlags_CallbackEdit | ImGuiInputTextFlags_CallbackHistory | ImGuiInputTextFlags_CallbackAlways, fieldCallback, this);
+    bool entered = ImGui::InputText("##path", field, sizeof(field), ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CallbackCompletion | ImGuiInputTextFlags_CallbackEdit | ImGuiInputTextFlags_CallbackAlways, fieldCallback, this);
 
     if (entered) {
         enter();
