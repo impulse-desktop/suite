@@ -314,6 +314,7 @@ namespace {
         ImGuiIO& io = ImGui::GetIO();
 
         io.IniFilename = nullptr;
+        io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
         ImGui::GetStyle() = scaledStyle(scale);
         io.MouseDragThreshold = scaledPx(mouseThreshold, scale);
         io.MouseDoubleClickMaxDist = scaledPx(mouseThreshold, scale);
@@ -346,7 +347,7 @@ namespace {
         ImGui::Spacing();
         ImGui::Spacing();
 
-        if (ImGui::Button("Exit", ImVec2(scaledPx(120_d, scale), 0.f)) || ImGui::IsKeyPressed(ImGuiKey_Escape) || ImGui::IsKeyPressed(ImGuiKey_Enter)) {
+        if (ImGui::Button("Exit", ImVec2(scaledPx(120_d, scale), 0.f)) || ImGui::Shortcut(ImGuiKey_Escape) || ImGui::Shortcut(ImGuiKey_Enter)) {
             result = -1;
         }
 
