@@ -285,10 +285,7 @@ namespace {
         Buffer fieldDir;
         bool fieldDirty = false;
         bool fieldFocus = true;
-        bool fieldActive = false;
         bool askOverwrite = false;
-        bool askingOverwrite = false;
-        int askedFrame = 0;
         bool overwriteOk = false;
         bool done = false;
         int code = 1;
@@ -1277,62 +1274,24 @@ void ChooseApp::finish(bool ok) {
 }
 
 void ChooseApp::keys() {
-    ImGuiIO& io = ImGui::GetIO();
-
-    if (askingOverwrite) {
-        return;
-    }
-
-    if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+    if (ImGui::Shortcut(ImGuiKey_Escape)) {
         finish(false);
     }
 
-    if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_H)) {
+    if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_H)) {
         showHidden = !showHidden;
         TRACE(ui, showHidden ? StringView(u8"hidden on") : StringView(u8"hidden off"));
         refilter();
     }
 
-    if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_G)) {
+    if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_G)) {
         grid = !grid;
         TRACE(ui, grid ? StringView(u8"grid on") : StringView(u8"grid off"));
         scrollToCursor = true;
     }
 
-    // with the line active, Backspace and Enter are its own; elsewhere
-    // Backspace on an empty name is the directory above, Enter the entry
-    if (!fieldActive && ImGui::IsKeyPressed(ImGuiKey_Backspace) && fieldName().empty() && !io.KeyCtrl && StringView(dir).length() > 1) {
+    if (ImGui::Shortcut(ImGuiKey_Backspace, ImGuiInputFlags_Repeat) && fieldName().empty() && StringView(dir).length() > 1) {
         go(StringView(joinPath(StringView(dir), StringView(u8".."))));
-    }
-
-    if (!fieldActive && ImGui::IsKeyPressed(ImGuiKey_Enter, false)) {
-        enter();
-    }
-
-    // the arrows walk the entries shown: the first press takes the one
-    // under the cursor, the next ones move it
-    bool downKey = ImGui::IsKeyPressed(ImGuiKey_DownArrow);
-    bool upKey = ImGui::IsKeyPressed(ImGuiKey_UpArrow);
-
-    if ((downKey || upKey) && !shown.empty()) {
-        size_t at = 0;
-        bool standing = false;
-
-        for (size_t i = 0; i < shown.length(); i++) {
-            if (shown[i] == cursor) {
-                at = i;
-                standing = items[cursor]->selected;
-            }
-        }
-
-        if (standing && downKey && at + 1 < shown.length()) {
-            at++;
-        } else if (standing && upKey && at > 0) {
-            at--;
-        }
-
-        select(shown[at], io.KeyShift, false);
-        scrollToCursor = true;
     }
 }
 
@@ -1572,8 +1531,6 @@ void ChooseApp::drawLine() {
     // Up and Down stay the list's: the line's history would take them
     bool entered = ImGui::InputText("##path", field, sizeof(field), ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CallbackCompletion | ImGuiInputTextFlags_CallbackEdit | ImGuiInputTextFlags_CallbackHistory | ImGuiInputTextFlags_CallbackAlways, fieldCallback, this);
 
-    fieldActive = ImGui::IsItemActive();
-
     if (entered) {
         enter();
         fieldFocus = true;
@@ -1618,6 +1575,7 @@ void ChooseApp::draw() {
     ImGui::SetNextWindowPos(vp->Pos);
     ImGui::SetNextWindowSize(vp->Size);
     ImGui::Begin("##choose", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoSavedSettings);
+    keys();
 
     if (!title.empty()) {
         ImGui::TextUnformatted((const char*)title.data(), (const char*)title.data() + title.length());
@@ -1645,8 +1603,6 @@ void ChooseApp::draw() {
     if (askOverwrite) {
         ImGui::OpenPopup("Replace");
         askOverwrite = false;
-        askingOverwrite = true;
-        askedFrame = ImGui::GetFrameCount();
         TRACE(ui, StringView(u8"asking to replace"));
     }
 
@@ -1656,20 +1612,21 @@ void ChooseApp::draw() {
         ImGui::Text("%.*s is there already. Replace it?", (int)name.length(), (const char*)name.begin());
         ImGui::Spacing();
 
-        bool keys = ImGui::GetFrameCount() > askedFrame;
-        bool yes = ImGui::Button("Replace") || (keys && ImGui::IsKeyPressed(ImGuiKey_Enter, false));
+        ImGui::SetNextItemShortcut(ImGuiKey_Enter);
+
+        bool yes = ImGui::Button("Replace");
 
         ImGui::SameLine();
 
-        bool no = ImGui::Button("Cancel") || (keys && ImGui::IsKeyPressed(ImGuiKey_Escape, false));
+        ImGui::SetNextItemShortcut(ImGuiKey_Escape);
+
+        bool no = ImGui::Button("Cancel");
 
         if (yes) {
-            askingOverwrite = false;
             overwriteOk = true;
             ImGui::CloseCurrentPopup();
             finish(true);
         } else if (no) {
-            askingOverwrite = false;
             ImGui::CloseCurrentPopup();
             fieldFocus = true;
         }
@@ -1764,7 +1721,6 @@ int mainChoose(ObjPool& pool, int argc, char** argv) {
                 return;
             }
 
-            app.keys();
             app.accept();
             app.draw();
             app.submit();

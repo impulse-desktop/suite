@@ -1,12 +1,13 @@
 """The chooser: `imchoose DIR` lists the directory, the line at the bottom
 holds its path and what is typed after the slash narrows the list; Enter
 on a directory enters it, on a file takes it and the path comes out on
-stdout with status 0; Escape leaves with status 1 and nothing; a filter
+stdout with status 0; Escape leaves the line, and a second Escape leaves
+with status 1 and nothing; a filter
 of globs or types keeps the rest out; `--save --name N` answers with the
 name typed, asking before an existing file is replaced; `--directory`
 answers with the directory; Ctrl+G shows the grid with thumbnails."""
 
-from session import KEY_BACKSPACE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC, KEY_G, KEY_LEFTCTRL, Session, write_png
+from session import KEY_BACKSPACE, KEY_ENTER, KEY_ESC, KEY_G, KEY_LEFTCTRL, Session, write_png
 
 
 def answer(s):
@@ -26,16 +27,13 @@ with Session("choose", tool="choose") as s:
     (root / "pics" / ".hidden").write_text("x\n")
     (root / "readme.txt").write_text("top\n")
 
-    # a file taken by its row: the arrow stands on it, Enter takes it
     s.launch("--filter", "Images|*.png|image/*", "--filter", "All|*", str(root / "pics"))
     s.focus()
     s.said(f"going {root / 'pics'}")
     s.said("listed 5")
     s.said("showing 3")
-    s.tap(KEY_DOWN)
-    s.said("selected deep")
-    s.tap(KEY_DOWN)
-    s.said("selected a.png")
+    s.type("a.png")
+    s.said("showing 1")
     s.tap(KEY_ENTER, client=False)
     s.said("chosen 1")
     s.gone()
@@ -64,6 +62,7 @@ with Session("choose", tool="choose") as s:
     s.type("pics/")
     s.said(f"going {root / 'pics'}", 2)
     s.said("listed 5", 2)
+    s.tap(KEY_ESC)
     s.tap(KEY_ESC, client=False)
     s.said("cancelled")
     s.gone()
@@ -112,7 +111,7 @@ with Session("choose", tool="choose") as s:
     s.said("grid on")
     s.said("thumbnail a.png")
     s.said("thumbnail b.png")
-    s.tap(KEY_END)
+    s.tap(KEY_ESC)
     s.tap(KEY_ESC, client=False)
     s.gone()
     assert s.finished() == 1
