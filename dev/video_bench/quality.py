@@ -57,12 +57,12 @@ def case(fmt, source, target):
     return {"format": fmt, "subsampling": subsampling, "matrix": 0 if rgb else 1, "range": 2 if rgb else 1, "transfer": 13, "primaries": 1, "location": 0 if rgb else 1, "output": "sdr", "source": source, "target": target, "origin": (0, 0), "tile": TILE, "content": "noise"}
 
 
-def shader(corpus, compiler, host, fmt, source, target, directory, generic_kernel=None, generic_layer=None):
+def shader(corpus, compiler, host, fmt, source, target, directory, generic_layer=None):
     """The player's programs for the frame's video tiles: the kernels of the
     tiles it covers and of its edge, and its layer merged into the
-    compositor; given the generic programs, also the generic way of drawing
-    the same video under generic/: the frame's facts for the kernel the
-    build made once."""
+    compositor; given the generic program, also the generic way of drawing
+    the same video under generic/: the frame's facts for the layer program
+    the build made once."""
     import bench
 
     spec = importlib.util.spec_from_file_location("compositor", HERE.parent / "compositor" / "bench.py")
@@ -76,12 +76,11 @@ def shader(corpus, compiler, host, fmt, source, target, directory, generic_kerne
     for tiles in ("inside", "edge", "mixed"):
         code = subprocess.run([compiler, "--target", "spirv", "--output", "srgb", "--tiles", tiles, "--size", "%dx%d" % target, *facts], check=True, stdout=subprocess.PIPE).stdout
         (directory / f"{tiles}.spv").write_bytes(compositor.merge(Path(host).read_bytes(), code) if tiles == "mixed" else code)
-    if generic_kernel:
+    if generic_layer:
         generic = directory / "generic"
         generic.mkdir(exist_ok=True)
-        constants = subprocess.run([compiler, "--target", "spirv", "--output", "srgb", "--tiles", "inside", "--size", "%dx%d" % target, "--generic", *facts], check=True, stdout=subprocess.PIPE).stdout
+        constants = subprocess.run([compiler, "--target", "spirv", "--output", "srgb", "--tiles", "mixed", "--size", "%dx%d" % target, "--generic", *facts], check=True, stdout=subprocess.PIPE).stdout
         (generic / "facts.bin").write_bytes(constants)
-        shutil.copyfile(generic_kernel, generic / "generic.spv")
         shutil.copyfile(generic_layer, generic / "generic_layer.spv")
 
 
@@ -171,7 +170,7 @@ def cases(args):
         else:
             (directory / "data.bin").rename(frame)
         filled(directory / "frame.bin", screen)
-        shader(args.corpus, args.compiler, args.host, args.format, video, screen, directory, args.generic_kernel, args.generic_layer)
+        shader(args.corpus, args.compiler, args.host, args.format, video, screen, directory, args.generic_layer)
 
 
 def speed(args):
@@ -218,7 +217,6 @@ def main():
     one.add_argument("corpus")
     one.add_argument("compiler")
     one.add_argument("host")
-    one.add_argument("generic_kernel")
     one.add_argument("generic_layer")
     one.add_argument("format")
     one.add_argument("sizes", type=int, nargs=4)
@@ -243,7 +241,6 @@ def main():
     one.add_argument("corpus")
     one.add_argument("compiler")
     one.add_argument("host")
-    one.add_argument("generic_kernel")
     one.add_argument("generic_layer")
     one.add_argument("format")
     one.add_argument("directory")
@@ -261,7 +258,7 @@ def main():
     one.add_argument("--rounds", type=int, default=20)
     args = parser.parse_args()
     if args.command == "shader":
-        shader(args.corpus, args.compiler, args.host, args.format, tuple(args.sizes[:2]), tuple(args.sizes[2:]), Path(args.directory), args.generic_kernel, args.generic_layer)
+        shader(args.corpus, args.compiler, args.host, args.format, tuple(args.sizes[:2]), tuple(args.sizes[2:]), Path(args.directory), args.generic_layer)
     elif args.command == "render":
         render(args)
     elif args.command == "report":

@@ -4782,7 +4782,6 @@ namespace {
 CompiledShader compile(ObjPool& pool, const VideoShader& shader, const ShaderOptions& options) {
     static constexpr ShaderParameter kernelParameters[] = {{ShaderInput::TargetSize, 0, 8}, {ShaderInput::VideoOrigin, 8, 8}, {ShaderInput::TilesAcross, 16, 4}, {ShaderInput::FirstTile, 20, 4}, {ShaderInput::White, 24, 4}, {ShaderInput::Words, 0, 0}, {ShaderInput::Headers, 0, 0}, {ShaderInput::List, 0, 0}, {ShaderInput::Ops, 0, 0}, {ShaderInput::Tiles, 0, 0}, {ShaderInput::Target, 0, 0}};
     static constexpr ShaderParameter layerParameters[] = {{ShaderInput::TargetSize, 0, 8}, {ShaderInput::VideoOrigin, 8, 8}, {ShaderInput::TilesAcross, 16, 4}, {ShaderInput::FirstTile, 20, 4}, {ShaderInput::White, 24, 4}, {ShaderInput::Words, 0, 0}};
-    static constexpr ShaderParameter genericKernelParameters[] = {{ShaderInput::TargetSize, 0, 8}, {ShaderInput::VideoOrigin, 8, 8}, {ShaderInput::TilesAcross, 16, 4}, {ShaderInput::FirstTile, 20, 4}, {ShaderInput::White, 24, 4}, {ShaderInput::BoxSize, 32, 8}, {ShaderInput::Constant, 0, sizeof(Facts)}, {ShaderInput::Words, 0, 0}, {ShaderInput::Headers, 0, 0}, {ShaderInput::List, 0, 0}, {ShaderInput::Ops, 0, 0}, {ShaderInput::Tiles, 0, 0}, {ShaderInput::Target, 0, 0}};
     static constexpr ShaderParameter genericLayerParameters[] = {{ShaderInput::TargetSize, 0, 8}, {ShaderInput::VideoOrigin, 8, 8}, {ShaderInput::TilesAcross, 16, 4}, {ShaderInput::FirstTile, 20, 4}, {ShaderInput::White, 24, 4}, {ShaderInput::BoxSize, 32, 8}, {ShaderInput::Constant, 0, sizeof(Facts)}, {ShaderInput::Words, 0, 0}};
     bool mixed = options.tiles == ShaderTiles::Mixed;
 
@@ -4795,7 +4794,7 @@ CompiledShader compile(ObjPool& pool, const VideoShader& shader, const ShaderOpt
 
         describeGeneric(shader, *facts);
 
-        return CompiledShader{StringView(), mixed ? genericLayerParameters : genericKernelParameters, (u32)(mixed ? sizeof(genericLayerParameters) : sizeof(genericKernelParameters)) / (u32)sizeof(ShaderParameter), StringView((const u8*)facts, sizeof(Facts))};
+        return CompiledShader{StringView(), genericLayerParameters, (u32)sizeof(genericLayerParameters) / (u32)sizeof(ShaderParameter), StringView((const u8*)facts, sizeof(Facts))};
     }
 
     CompiledShader out{StringView(), mixed ? layerParameters : kernelParameters, (u32)(mixed ? sizeof(layerParameters) : sizeof(kernelParameters)) / (u32)sizeof(ShaderParameter), StringView()};

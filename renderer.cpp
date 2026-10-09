@@ -991,10 +991,8 @@ namespace {
         id<MTLCommandBuffer> last = nil;
         id<MTLLibrary> plainLibrary = nil;
         id<MTLLibrary> layeredLibrary = nil;
-        id<MTLLibrary> genericLibrary = nil;
         id<MTLLibrary> genericLayeredLibrary = nil;
         id<MTLComputePipelineState> plain[outputs] = {};
-        id<MTLComputePipelineState> generic[outputs][2] = {};
         id<MTLComputePipelineState> genericLayer[outputs] = {};
         bool edr = false;
         bool wide = false;
@@ -1017,7 +1015,7 @@ namespace {
         RenderImage* shade(ObjPool& pool, ShaderFactory& factory, u32 width, u32 height, const void* data, size_t size, bool hdr, Runable& retired) override;
         id<MTLLibrary> library(NSString* source);
         id<MTLLibrary> composeLibrary(const char* defines, bool generic);
-        id<MTLComputePipelineState> pipeline(id<MTLLibrary> library, ShaderOutput output, u32 side, id<MTLFunction> linked, bool edge);
+        id<MTLComputePipelineState> pipeline(id<MTLLibrary> library, ShaderOutput output, u32 side, id<MTLFunction> linked);
         void updateTextures(ImDrawData* draw);
         void encode(id<MTLCommandBuffer> command, id<MTLTexture> target, ShaderOutput output);
         void setMode(bool wide);
@@ -1036,7 +1034,6 @@ namespace {
 
 constant int OUTPUT [[function_constant(0)]];
 constant bool WIDE [[function_constant(1)]];
-constant bool EDGE [[function_constant(2)]];
 
 constant int TILE = 24;
 constant uint NONE = 0xffffffffu;
@@ -1170,11 +1167,6 @@ static float4 over(float4 src, float4 acc) {
 )metal";
 
     static constexpr const char* composeKernel = R"metal(
-#ifdef GENERIC_KERNEL
-kernel void compose(device const Header* headers [[buffer(0)]], device const uint* list [[buffer(1)]], device const Op* ops [[buffer(2)]], device const uint* tiles [[buffer(4)]], constant Frame& frame [[buffer(5)]], const device uint* words [[buffer(7)]], constant Facts& facts [[buffer(8)]], texture2d<float, access::write> target [[texture(0)]], uint3 group [[threadgroup_position_in_grid]], uint3 inside [[thread_position_in_threadgroup]]) {
-    genericKernel(inside.xy, group.x ARGS);
-}
-#else
 #ifdef LAYER
 #ifndef GENERIC
 [[visible]] float4 layer(uint2 local, int2 origin, const device uint* words);
@@ -1286,7 +1278,6 @@ kernel void compose(device const Header* headers [[buffer(0)]], device const uin
         target.write(acc.a > 0.0 ? float4(encode(acc.rgb / acc.a, pixel, frame) * acc.a, acc.a) : float4(0.0), uint2(pixel));
     }
 }
-#endif
 )metal";
 }
 
@@ -1460,14 +1451,13 @@ id<MTLLibrary> MetalRenderer::composeLibrary(const char* defines, bool generic) 
     return library([NSString stringWithFormat:@"%s%s%s%s%s", defines, composeSource, generic ? genericPrelude : "", generic ? genericSource : "", composeKernel]);
 }
 
-id<MTLComputePipelineState> MetalRenderer::pipeline(id<MTLLibrary> from, ShaderOutput output, u32 side, id<MTLFunction> linked, bool edge) {
+id<MTLComputePipelineState> MetalRenderer::pipeline(id<MTLLibrary> from, ShaderOutput output, u32 side, id<MTLFunction> linked) {
     MTLFunctionConstantValues* constants = [[MTLFunctionConstantValues alloc] init];
     int encoding = output == ShaderOutput::Srgb ? 0 : 2;
     bool wideOutput = output == ShaderOutput::WideLinear;
     NSError* error = nil;
     [constants setConstantValue:&encoding type:MTLDataTypeInt atIndex:0];
     [constants setConstantValue:&wideOutput type:MTLDataTypeBool atIndex:1];
-    [constants setConstantValue:&edge type:MTLDataTypeBool atIndex:2];
     id<MTLFunction> function = [from newFunctionWithName:@"compose" constantValues:constants error:&error];
     if (!function) {
         fail(StringView(StringBuilder() << StringView(u8"Metal compositor function: ") << StringView(error ? error.localizedDescription.UTF8String : "missing")));
@@ -1527,7 +1517,7 @@ void MetalRenderer::encode(id<MTLCommandBuffer> command, id<MTLTexture> target, 
         call.first = t.programs[p * 2];
         if (p == 0) {
             if (!plain[(u32)output]) {
-                plain[(u32)output] = pipeline(plainLibrary, output, composeGroup, nil, false);
+                plain[(u32)output] = pipeline(plainLibrary, output, composeGroup, nil);
             }
             fillCall(hostParameters, hostParameterCount, call, block);
             [compute setComputePipelineState:plain[(u32)output]];
@@ -1823,18 +1813,12 @@ RenderShader* MetalRenderer::compileKernel(ObjPool& pool, const CompiledShader& 
             }
         }
         if (compiled.code.empty()) {
-            bool edge = options.tiles == ShaderTiles::Edge;
-            __strong id<MTLComputePipelineState>* made = mixed ? &genericLayer[(u32)options.output] : &generic[(u32)options.output][edge ? 1 : 0];
-            if (!*made && mixed) {
+            __strong id<MTLComputePipelineState>* made = &genericLayer[(u32)options.output];
+            if (!*made) {
                 if (!genericLayeredLibrary) {
                     genericLayeredLibrary = composeLibrary("#define GROUP 24\n#define GENERIC 1\n#define LAYER 1\n", true);
                 }
-                *made = pipeline(genericLayeredLibrary, options.output, composeTile, nil, false);
-            } else if (!*made) {
-                if (!genericLibrary) {
-                    genericLibrary = composeLibrary("#define GROUP 24\n#define GENERIC 1\n#define GENERIC_KERNEL 1\n", true);
-                }
-                *made = pipeline(genericLibrary, options.output, composeTile, nil, edge);
+                *made = pipeline(genericLayeredLibrary, options.output, composeTile, nil);
             }
             shader->pipeline = *made;
             return shader;
@@ -1846,7 +1830,7 @@ RenderShader* MetalRenderer::compileKernel(ObjPool& pool, const CompiledShader& 
             fail(StringView(StringBuilder() << StringView(u8"Metal shader: ") << StringView(error ? error.localizedDescription.UTF8String : "no library")));
         }
         if (!mixed) {
-            shader->pipeline = pipeline(made, options.output, composeTile, nil, false);
+            shader->pipeline = pipeline(made, options.output, composeTile, nil);
             return shader;
         }
         id<MTLFunction> layer = [made newFunctionWithName:@"layer"];
@@ -1856,7 +1840,7 @@ RenderShader* MetalRenderer::compileKernel(ObjPool& pool, const CompiledShader& 
         if (!layeredLibrary) {
             layeredLibrary = composeLibrary("#define GROUP 24\n#define LAYER 1\n", false);
         }
-        shader->pipeline = pipeline(layeredLibrary, options.output, composeTile, layer, false);
+        shader->pipeline = pipeline(layeredLibrary, options.output, composeTile, layer);
         return shader;
     }
 }
@@ -1920,9 +1904,8 @@ static Renderer* createRenderer(ObjPool& pool, plt::Platform& platform, plt::Win
     layer.presentsWithTransaction = NO;
     renderer->setMode(false);
     renderer->plainLibrary = renderer->composeLibrary("#define GROUP 8\n", false);
-    renderer->genericLibrary = renderer->composeLibrary("#define GROUP 24\n#define GENERIC 1\n#define GENERIC_KERNEL 1\n", true);
     renderer->genericLayeredLibrary = renderer->composeLibrary("#define GROUP 24\n#define GENERIC 1\n#define LAYER 1\n", true);
-    renderer->plain[(u32)ShaderOutput::Srgb] = renderer->pipeline(renderer->plainLibrary, ShaderOutput::Srgb, composeGroup, nil, false);
+    renderer->plain[(u32)ShaderOutput::Srgb] = renderer->pipeline(renderer->plainLibrary, ShaderOutput::Srgb, composeGroup, nil);
     renderer->wake = platform.createLoopWake(pool, *pool.make<PollMetal>(renderer));
     renderer->smallObjects = SmallObjAllocator::create(&pool);
     renderer->landed = Channel::create(&pool, 64);
@@ -1979,7 +1962,6 @@ static Renderer* createRenderer(ObjPool& pool, plt::Platform& platform, plt::Win
     #include <compose_comp.spv.h>
     #include <vulkan/vulkan_wayland.h>
     #include <compose_layer_comp.spv.h>
-    #include <compose_generic_comp.spv.h>
     #include <compose_generic_layer_comp.spv.h>
 
 using namespace stl;
@@ -2116,7 +2098,6 @@ namespace {
         VkDescriptorSetLayout wordsSetLayout = VK_NULL_HANDLE;
         VkPipelineLayout composeLayout = VK_NULL_HANDLE;
         VkPipeline plain[outputs] = {};
-        VkPipeline generic[outputs][2] = {};
         VkPipeline genericLayer[outputs] = {};
         VkDescriptorSet readSet = VK_NULL_HANDLE;
         Buffer readBuffers[composeBuffers];
@@ -2145,7 +2126,7 @@ namespace {
         bool importHost(HostBuffer& host, size_t size, VkBufferUsageFlags usage);
         void allocateHost(HostBuffer& host, const void* source, size_t size, size_t bytes, VkBufferUsageFlags usage);
         void flushHost(HostBuffer& host);
-        VkPipeline pipeline(const u32* code, size_t bytes, ShaderOutput output, bool edge);
+        VkPipeline pipeline(const u32* code, size_t bytes, ShaderOutput output);
         void bindCompose(VkDescriptorSet set, Buffer (&buffers)[composeBuffers], VkImageView target, bool content);
         void dispatch(VkCommandBuffer command, VkDescriptorSet set, u32 width, u32 height, ShaderOutput output);
 
@@ -3131,11 +3112,11 @@ VkShaderModule Gpu::shaderModule(const u32* code, size_t bytes) {
     return module;
 }
 
-VkPipeline Gpu::pipeline(const u32* code, size_t bytes, ShaderOutput output, bool edge) {
+VkPipeline Gpu::pipeline(const u32* code, size_t bytes, ShaderOutput output) {
     VkShaderModule module = shaderModule(code, bytes);
-    u32 constants[3] = {output == ShaderOutput::Srgb ? 0u : output == ShaderOutput::Pq ? 1u : 2u, output == ShaderOutput::Pq || output == ShaderOutput::WideLinear ? 1u : 0u, edge ? 1u : 0u};
-    VkSpecializationMapEntry entries[3] = {{0, 0, 4}, {1, 4, 4}, {2, 8, 4}};
-    VkSpecializationInfo spec{3, entries, sizeof(constants), constants};
+    u32 constants[2] = {output == ShaderOutput::Srgb ? 0u : output == ShaderOutput::Pq ? 1u : 2u, output == ShaderOutput::Pq || output == ShaderOutput::WideLinear ? 1u : 0u};
+    VkSpecializationMapEntry entries[2] = {{0, 0, 4}, {1, 4, 4}};
+    VkSpecializationInfo spec{2, entries, sizeof(constants), constants};
     VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
 
     ci.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, module, "main", &spec};
@@ -3289,7 +3270,7 @@ void Gpu::dispatch(VkCommandBuffer command, VkDescriptorSet set, u32 width, u32 
 
         if (p == 0) {
             if (!plain[(u32)output]) {
-                plain[(u32)output] = pipeline(compose_comp_spv, sizeof(compose_comp_spv), output, false);
+                plain[(u32)output] = pipeline(compose_comp_spv, sizeof(compose_comp_spv), output);
             }
 
             fillCall(hostParameters, hostParameterCount, call, block);
@@ -3738,14 +3719,6 @@ void Gpu::setupCompose(ObjPool& pool) {
             }
         }
 
-        for (u32 i = 0; i < outputs; i++) {
-            for (VkPipeline made : generic[i]) {
-                if (made) {
-                    vkDestroyPipeline(device, made, alloc);
-                }
-            }
-        }
-
         vkDestroyPipelineLayout(device, composeLayout, alloc);
     });
 
@@ -3760,7 +3733,7 @@ void Gpu::setupCompose(ObjPool& pool) {
             releaseBuffer(buffer);
         }
     });
-    plain[(u32)ShaderOutput::Srgb] = pipeline(compose_comp_spv, sizeof(compose_comp_spv), ShaderOutput::Srgb, false);
+    plain[(u32)ShaderOutput::Srgb] = pipeline(compose_comp_spv, sizeof(compose_comp_spv), ShaderOutput::Srgb);
 }
 
 VkSurfaceKHR Gpu::createSurface(plt::Window& window) {
@@ -3806,7 +3779,7 @@ void Gpu::setupWindow(ObjPool& pool, VkSurfaceKHR surface, int w, int h) {
     present.hdr = colorSpaces && selectSurfaceFormat(surface, pqFormats, 2, VK_COLOR_SPACE_HDR10_ST2084_EXT, present.pq);
 
     if (present.hdr) {
-        plain[(u32)ShaderOutput::Pq] = pipeline(compose_comp_spv, sizeof(compose_comp_spv), ShaderOutput::Pq, false);
+        plain[(u32)ShaderOutput::Pq] = pipeline(compose_comp_spv, sizeof(compose_comp_spv), ShaderOutput::Pq);
     }
 
     createSwapchain((u32)w, (u32)h);
@@ -4406,11 +4379,9 @@ RenderShader* VulkanRenderer::compileKernel(ObjPool& pool, const CompiledShader&
         memcpy(shader->constants.map, compiled.constants.data(), compiled.constants.length());
     }
     if (!code) {
-        bool mixed = options.tiles == ShaderTiles::Mixed;
-        bool edge = options.tiles == ShaderTiles::Edge;
-        VkPipeline& made = mixed ? gpu->genericLayer[(u32)options.output] : gpu->generic[(u32)options.output][edge ? 1 : 0];
+        VkPipeline& made = gpu->genericLayer[(u32)options.output];
         if (!made) {
-            made = mixed ? gpu->pipeline(compose_generic_layer_comp_spv, sizeof(compose_generic_layer_comp_spv), options.output, false) : gpu->pipeline(compose_generic_comp_spv, sizeof(compose_generic_comp_spv), options.output, edge);
+            made = gpu->pipeline(compose_generic_layer_comp_spv, sizeof(compose_generic_layer_comp_spv), options.output);
         }
         shader->pipeline = made;
         shader->shared = true;
@@ -4419,9 +4390,9 @@ RenderShader* VulkanRenderer::compileKernel(ObjPool& pool, const CompiledShader&
     if (options.tiles == ShaderTiles::Mixed) {
         Vector<u32> merged;
         mergeLayer(compose_layer_comp_spv, sizeof(compose_layer_comp_spv) / 4, (const u32*)code, size / 4, merged);
-        shader->pipeline = gpu->pipeline(merged.data(), merged.length() * 4, options.output, false);
+        shader->pipeline = gpu->pipeline(merged.data(), merged.length() * 4, options.output);
     } else {
-        shader->pipeline = gpu->pipeline((const u32*)code, size, options.output, false);
+        shader->pipeline = gpu->pipeline((const u32*)code, size, options.output);
     }
     return shader;
 }

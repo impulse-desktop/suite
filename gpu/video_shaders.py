@@ -165,7 +165,7 @@ MSL_TYPES = {"vec2": "float2", "vec3": "float3", "vec4": "float4", "ivec2": "int
 
 
 def msl(source, path):
-    """The generic video kernel of gpu/video_generic.glsl as Metal source: the
+    """The generic video code of gpu/video_generic.glsl as Metal source: the
     same body with Metal's type names, for the Metal renderer to compile at
     run time behind its own compositor."""
     import re

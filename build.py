@@ -113,7 +113,6 @@ shader_rules = []
 for shader, defines in [] if darwin else [
     ("compose", []),
     ("compose_layer", ["-DGROUP=24", "-DLAYER"]),
-    ("compose_generic", ["-DGROUP=24", "-DGENERIC", "-DGENERIC_KERNEL"]),
     ("compose_generic_layer", ["-DGROUP=24", "-DGENERIC", "-DLAYER"]),
 ]:
     shader_rules.append(command(
@@ -127,7 +126,7 @@ for shader, defines in [] if darwin else [
         ],
     ))
 
-# the generic video kernel for Metal, the same gpu/video_generic.glsl in
+# the generic video code for Metal, the same gpu/video_generic.glsl in
 # Metal's spelling, which the Metal renderer in renderer.cpp compiles behind
 # its compositor
 shader_rules.append(command(
@@ -557,11 +556,10 @@ if not darwin:
     compositor_hosts = command(
         name="compositor_hosts",
         inputs=["$(S)/gpu/compose.comp", "$(S)/gpu/video_generic.glsl"],
-        outputs=[f"{bench_dir}/compose_plain.spv", f"{bench_dir}/compose_layer.spv", f"{bench_dir}/compose_generic.spv", f"{bench_dir}/compose_generic_layer.spv"],
+        outputs=[f"{bench_dir}/compose_plain.spv", f"{bench_dir}/compose_layer.spv", f"{bench_dir}/compose_generic_layer.spv"],
         cmd=[
             ["glslangValidator", "--quiet", "--target-env", "vulkan1.1", "-V", "$(S)/gpu/compose.comp", "-o", f"{bench_dir}/compose_plain.spv"],
             ["glslangValidator", "--quiet", "--target-env", "vulkan1.1", "-V", "-DGROUP=24", "-DLAYER", "$(S)/gpu/compose.comp", "-o", f"{bench_dir}/compose_layer.spv"],
-            ["glslangValidator", "--quiet", "--target-env", "vulkan1.1", "-V", "-DGROUP=24", "-DGENERIC", "-DGENERIC_KERNEL", "-I$(S)/gpu", "$(S)/gpu/compose.comp", "-o", f"{bench_dir}/compose_generic.spv"],
             ["glslangValidator", "--quiet", "--target-env", "vulkan1.1", "-V", "-DGROUP=24", "-DGENERIC", "-DLAYER", "-I$(S)/gpu", "$(S)/gpu/compose.comp", "-o", f"{bench_dir}/compose_generic_layer.spv"],
         ],
         descr="SH",
@@ -576,8 +574,8 @@ if not darwin:
     presets = ["fast", "default", "high_quality"] if libplacebo else []
     ours_tools = ["--compositor", f"{bench_dir}/compositor", "--plain", f"{bench_dir}/compose_plain.spv"]
     shader_tools = [f"{bench_dir}/corpus", "$(B)/dev/video_shader", f"{bench_dir}/compose_layer.spv"]
-    generic_tools = [f"{bench_dir}/compose_generic.spv", f"{bench_dir}/compose_generic_layer.spv"]
-    generic_files = ["generic/facts.bin", "generic/generic.spv", "generic/generic_layer.spv"]
+    generic_tools = [f"{bench_dir}/compose_generic_layer.spv"]
+    generic_files = ["generic/facts.bin", "generic/generic_layer.spv"]
     video_formats = ["yuv420p", "nv12", "yuv420p10le", "p010le", "yuv444p", "bgra"]
 
     # a factor above 1 draws the crop shrunk by it back to the crop's size,

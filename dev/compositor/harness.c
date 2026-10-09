@@ -752,10 +752,10 @@ typedef struct {
     int32_t box[2];
 } Push;
 
-static VkPipeline composePipeline(VkPipelineLayout layout, const char* path, uint32_t edge) {
-    VkSpecializationMapEntry entries[3] = {{0, 0, 4}, {1, 4, 4}, {2, 8, 4}};
-    uint32_t data[3] = {0, VK_FALSE, edge};
-    VkSpecializationInfo spec = {3, entries, sizeof(data), data};
+static VkPipeline composePipeline(VkPipelineLayout layout, const char* path) {
+    VkSpecializationMapEntry entries[2] = {{0, 0, 4}, {1, 4, 4}};
+    uint32_t data[2] = {0, VK_FALSE};
+    VkSpecializationInfo spec = {2, entries, sizeof(data), data};
     VkComputePipelineCreateInfo cp = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
     cp.stage = (VkPipelineShaderStageCreateInfo){VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_COMPUTE_BIT, module(path), "main", &spec};
     cp.layout = layout;
@@ -906,20 +906,19 @@ int main(int argc, char** argv) {
         cpl.pushConstantRangeCount = 1;
         cpl.pPushConstantRanges = &range;
         CHECK(vkCreatePipelineLayout(device, &cpl, NULL, &composeLayout));
-        pipelines[0] = composePipeline(composeLayout, plain, 0);
+        pipelines[0] = composePipeline(composeLayout, plain);
         if (f.hasVideo && generic) {
-            char kernel[1024], layer[1024];
-            snprintf(kernel, sizeof(kernel), "%s/generic.spv", layers);
+            char layer[1024];
             snprintf(layer, sizeof(layer), "%s/generic_layer.spv", layers);
-            pipelines[1] = composePipeline(composeLayout, kernel, 0);
-            pipelines[2] = composePipeline(composeLayout, kernel, 1);
-            pipelines[3] = composePipeline(composeLayout, layer, 0);
+            pipelines[1] = composePipeline(composeLayout, layer);
+            pipelines[2] = pipelines[1];
+            pipelines[3] = pipelines[1];
         }
         const char* kinds[4] = {"", "inside", "edge", "mixed"};
         for (int k = 1; f.hasVideo && !generic && k < 4; k++) {
             char path[1024];
             snprintf(path, sizeof(path), "%s/%s.spv", layers, kinds[k]);
-            pipelines[k] = composePipeline(composeLayout, path, 0);
+            pipelines[k] = composePipeline(composeLayout, path);
         }
         for (int s = 0; s < 2; s++) {
             VkDescriptorSetAllocateInfo ca = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};

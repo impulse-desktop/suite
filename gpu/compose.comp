@@ -10,7 +10,6 @@ layout(local_size_x = GROUP, local_size_y = GROUP) in;
 
 layout(constant_id = 0) const int OUTPUT = 0;
 layout(constant_id = 1) const bool WIDE = false;
-layout(constant_id = 2) const bool EDGE = false;
 
 const int TILE = 24;
 const uint NONE = 0xffffffffu;
@@ -185,11 +184,6 @@ vec4 layer(uvec2 local, ivec2 origin) {
 }
 #endif
 
-#ifdef GENERIC_KERNEL
-void main() {
-    genericKernel(gl_LocalInvocationID.xy, gl_WorkGroupID.x);
-}
-#else
 void main() {
     const uint across = uint(TILE / GROUP);
     uint tile = tiles[frame.first + gl_WorkGroupID.x];
@@ -285,4 +279,3 @@ void main() {
         imageStore(target, pixel, acc.a > 0.0 ? vec4(encode(acc.rgb / acc.a, pixel) * acc.a, acc.a) : vec4(0.0));
     }
 }
-#endif

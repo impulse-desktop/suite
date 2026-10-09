@@ -2101,6 +2101,9 @@ RenderShader& Screen::shaderFor(const VideoShader& facts, const ShaderOptions& o
     ShaderOptions wanted = options;
 
     wanted.generic = true;
+    wanted.tiles = ShaderTiles::Mixed;
+    wanted.size[0] = 0;
+    wanted.size[1] = 0;
 
     if (Made* generic = find(facts, wanted)) {
         generic->used = madeClock;
