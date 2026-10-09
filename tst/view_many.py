@@ -12,11 +12,11 @@ with Session("view_many", tool="view") as s:
     s.focus()
     s.said("listed 300")
     s.said("showing f000.png 8x8")
-    # 25 repeats a second after 600 ms, one per frame at most: the end of
-    # the list within the hold with room for a slow renderer (Alpine got
-    # to f286 in 16 s)
-    s.tap(KEY_DOWN, hold=20.0)
-    s.said("selected f299.png")
+    # one step a frame at most: Down stays held until the end of the list,
+    # however slow the renderer is
+    s.key(KEY_DOWN, 1)
+    s.wait(lambda: "im view: selected f299.png" in s.client_log(), "the walk to f299.png", timeout=60)
+    s.key(KEY_DOWN, 0)
     s.said("showing f299.png 8x8")
     s.said("thumbnail f299.png")
     s.close()
