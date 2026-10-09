@@ -1,0 +1,76 @@
+name: Stress
+
+on:
+  workflow_dispatch:
+    inputs:
+      filter:
+        description: Glob of the scenarios to repeat
+        default: video_*
+      repeat:
+        description: Runs of each scenario
+        default: "10"
+
+permissions:
+  contents: read
+
+env:
+  UBUNTU_IMAGE: ubuntu:26.04
+  CI_TEST_FLAGS: -Dfilter=${{ inputs.filter }} -Drepeat=${{ inputs.repeat }}
+
+jobs:
+  stress-darwin:
+    name: Stress Darwin
+    runs-on: macos-15
+    timeout-minutes: 180
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build the tools and repeat the scenarios
+        run: |
+          set -o pipefail
+          bash dev/ci_darwin.sh test 2>&1 | tee "$RUNNER_TEMP/stress-darwin.log"
+
+      - name: Upload what the failed scenarios captured
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: stress-darwin-evidence
+          path: .build/ci-*/evidence
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 7
+          compression-level: 9
+
+  stress-ubuntu:
+    name: Stress Ubuntu
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Give lavapipe its dma-bufs
+        run: |
+          [ -e /dev/udmabuf ] || sudo modprobe udmabuf || true
+          test -e /dev/udmabuf
+          sudo chmod 666 /dev/udmabuf
+
+      - name: Build the tools and repeat the scenarios
+        run: |
+          set -o pipefail
+          docker run --rm --device /dev/udmabuf --env CI_TEST_FLAGS \
+            --volume "$GITHUB_WORKSPACE:/workspace" --workdir /workspace \
+            "$UBUNTU_IMAGE" sh dev/ci_linux.sh test clang \
+            2>&1 | tee "$RUNNER_TEMP/stress-ubuntu.log"
+
+      - name: Upload what the failed scenarios captured
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: stress-ubuntu-evidence
+          path: .build/ci-*/evidence
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 7
+          compression-level: 9

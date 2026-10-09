@@ -27,6 +27,7 @@ case "$mode" in
         # lavapipe compiles shaders through LLVM on worker threads of its
         # own, whose stacks asan's inflated frames overrun: no extra threads
         export LP_NUM_THREADS=0
+        if [[ "$mode" == asan ]]; then export IM_E2E_NO_DEBUGGER=1; fi
         ;;
     coverage)
         "$CXX" --version | grep -qi clang
@@ -59,11 +60,12 @@ if [[ -n "$darwin" ]]; then
 else
     targets=(im im_test links devices jxl_dump device_uuid)
 fi
+read -ra extra <<< "${CI_TEST_FLAGS:-}"
 status=0
 if [[ "$mode" == build ]]; then
     python3 ./build -B "$build_dir" -j "$jobs" "${targets[@]}" || status=1
 else
-    python3 ./build -B "$build_dir" -j "$jobs" -k -Druntime=/tmp/im-e2e -Devidence="$build_dir/evidence" "${targets[@]}" test || status=1
+    python3 ./build -B "$build_dir" -j "$jobs" -k -Druntime=/tmp/im-e2e -Devidence="$build_dir/evidence" "${extra[@]}" "${targets[@]}" test || status=1
 fi
 # Test controls must never ship in the production binary.
 if [[ -z "$darwin" && -f "$build_dir/im" && -f "$build_dir/im_test" ]]; then

@@ -103,6 +103,38 @@ TYPING["\n"] = (28, False)
 TYPING["\t"] = (15, False)
 
 
+LLDB_EXIT = "script lldb.debugger.HandleCommand('quit %d' % lldb.process.GetExitStatus())"
+LLDB_CRASH = (
+    "script thread = lldb.process.GetSelectedThread(); "
+    "signal = thread.GetStopReasonDataAtIndex(0) if thread.GetStopReason() == lldb.eStopReasonSignal else 0; "
+    "lldb.debugger.HandleCommand('quit %d' % (128 + signal))"
+)
+
+
+def debugger():
+    if os.environ.get("IM_E2E_NO_DEBUGGER"):
+        return None
+    if sys.platform == "darwin":
+        return shutil.which("lldb", path="/usr/bin")
+    return shutil.which("gdb")
+
+
+def debugged(command):
+    tool = debugger()
+    if tool is None:
+        return command
+    if sys.platform == "darwin":
+        return [
+            tool, "--batch", "--no-lldbinit",
+            "-O", "settings set interpreter.prompt-on-quit false",
+            "-O", "settings set platform.plugin.darwin.ignored-exceptions EXC_BAD_ACCESS|EXC_BAD_INSTRUCTION|EXC_ARITHMETIC",
+            "-o", "process launch", "-o", LLDB_EXIT,
+            "-k", "thread backtrace all", "-k", "thread backtrace", "-k", LLDB_CRASH,
+            "--", *command,
+        ]
+    return [tool, "-q", "-nx", "-batch", "-x", str(Path(__file__).with_name("stacks.gdb")), "--args", *command]
+
+
 class Skip(Exception):
     """The compositor lacks what the scenario needs; the scenario ends as
     skipped, saying what."""
@@ -188,7 +220,7 @@ class Session:
             self.socket = self.wait(lambda: next(runtime.glob("sway-ipc.*.sock"), None), "Sway IPC", client=False)
             self.env["WAYLAND_DISPLAY"] = wayland.name
             self.env["SWAYSOCK"] = str(self.socket)
-            self.devices = self.start([str(self.devices_binary)], "devices", stdin=subprocess.PIPE)
+            self.devices = self.start(debugged([str(self.devices_binary)]), "devices", stdin=subprocess.PIPE)
             self.wait(lambda: "READY" in (self.artifacts / "devices.log").read_text(), "virtual devices", client=False)
             for line in (self.artifacts / "devices.log").read_text().splitlines():
                 word = line.split()
@@ -253,7 +285,7 @@ class Session:
         names the variables it must not see); a mapped launch waits for
         its window."""
         self.clients += 1
-        self.client = self.start([self.link, *args], f"client{self.clients}", cwd=cwd, unset=unset, fd3=fd3, **environment)
+        self.client = self.start(debugged([self.link, *args]), f"client{self.clients}", cwd=cwd, unset=unset, fd3=fd3, **environment)
         if mapped:
             self.wait(lambda: self.windows(), "mapped window")
         return self.client
@@ -266,19 +298,16 @@ class Session:
         log = self.artifacts / f"client{self.clients}.log"
         with log.open("wb") as out:
             process = subprocess.Popen(
-                [str(command or self.link), *args], env=self.environment(unset, environment), stdout=out, stderr=subprocess.STDOUT,
+                debugged([str(command or self.link), *args]), env=self.environment(unset, environment), stdout=out, stderr=subprocess.STDOUT,
                 cwd=cwd, **as_fd3(fd3),
             )
             try:
                 process.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
-                # where a tool that never ended stands, before it is killed
-                self.stacks(f"client{self.clients}", process.pid)
+                self.stacks(process)
                 process.kill()
                 process.wait()
                 raise
-        if process.returncode < 0:
-            self.crash(f"client{self.clients}", [str(command or self.link), *args], cwd, self.environment(unset, environment), timeout)
         return process.returncode, log.read_text(errors="replace")
 
     def finished(self, timeout=10):
@@ -555,38 +584,14 @@ class Session:
         if errors:
             raise RuntimeError("; ".join(errors))
 
-    def stacks(self, label, pid=None):
-        """A tool's threads' stacks, kept as <label>.stack: a scenario that
-        timed out on a tool still alive says where it stands."""
-        gdb = shutil.which("gdb")
-        if gdb is None:
+    def stacks(self, process):
+        if Path(process.args[0]).name != "gdb" or process.poll() is not None:
             return
+        process.send_signal(signal.SIGINT)
         try:
-            result = subprocess.run(
-                [gdb, "-p", str(pid or self.client.pid), "-batch", "-nx", "-ex", "set pagination off", "-ex", "thread apply all bt",
-                 "-ex", "detach", "-ex", "quit"],
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30,
-            )
-            text = result.stdout.decode(errors="replace")
-        except (OSError, subprocess.TimeoutExpired) as error:
-            text = f"gdb failed: {error}\n"
-        (self.artifacts / f"{label}.stack").write_text(text)
-
-    def crash(self, label, command, cwd, environment, timeout):
-        """A tool that died of a signal, run again under gdb: the stacks of
-        its threads where it died, kept as <label>.crash."""
-        gdb = shutil.which("gdb")
-        if gdb is None:
-            return
-        try:
-            result = subprocess.run(
-                [gdb, "-batch", "-nx", "-ex", "set pagination off", "-ex", "run", "-ex", "thread apply all bt", "--args", *command],
-                env=environment, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout,
-            )
-            text = result.stdout.decode(errors="replace")
-        except (OSError, subprocess.TimeoutExpired) as error:
-            text = f"gdb failed: {error}\n"
-        (self.artifacts / f"{label}.crash").write_text(text)
+            process.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            pass
 
     def __exit__(self, kind, value, traceback):
         if kind is Skip:
@@ -595,12 +600,12 @@ class Session:
             sys.exit(SKIPPED)
         try:
             if kind is not None and self.client and self.client.poll() is None:
-                self.stacks(f"client{self.clients}")
                 if self.windows():
                     try:
                         self.capture("failure")
                     except Exception:
                         pass
+                self.stacks(self.client)
             if kind is None:
                 for log in self.artifacts.glob("client*.log"):
                     text = log.read_text(errors="replace")

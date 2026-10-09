@@ -124,6 +124,7 @@ def run(name, args):
 def main():
     parser = argparse.ArgumentParser(description="one scenario run -> JSON verdict")
     parser.add_argument("--scenario", required=True)
+    parser.add_argument("--name", default="")
     parser.add_argument("--binary", required=True, help="the tools binary under test (im_test)")
     parser.add_argument("--helpers", required=True, help="the directory of the scenarios' helpers: devices, jxl_dump, device_uuid")
     parser.add_argument("--out", required=True)
@@ -135,6 +136,7 @@ def main():
     name = os.path.basename(args.scenario)[:-len(".py")]
     if args.bucket:
         name += "_" + args.bucket.split("/")[0]
+    name = args.name or name
     try:
         record = run(name, args)
     except Exception as e:  # never let a runner bug abort the graph

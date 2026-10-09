@@ -34,6 +34,7 @@ flags.allow({
     "shard": {"descr": "K/N: run only the K-th of N stable slices of the scenarios (0-based)", "default": ""},
     "runtime": {"descr": "a short dir for the scenarios' runtime dirs (Wayland sockets)", "default": ""},
     "evidence": {"descr": "a dir that keeps a failed scenario's captures and logs, under its name", "default": ""},
+    "repeat": {"descr": "N: run every scenario N times, each run a test node of its own", "default": ""},
     "decode_wasm": {"descr": "the image decoder module, in place of ext/decode/decode.wasm", "default": ""},
     "pdf_wasm": {"descr": "the PDF module, in place of ext/pdf/pdf.wasm", "default": ""},
     "djvu_wasm": {"descr": "the DjVu module, in place of ext/djvu/djvu.wasm", "default": ""},
@@ -393,10 +394,15 @@ install(im, links)
 # that drive the renderer's own helpers, each in a window of its own, and
 # tst/session.py starts no compositor there.
 # the fixture and the runner: any change to the harness re-runs every scenario
-harness = ["$(S)/tst/session.py", "$(S)/dev/run_test.py"]
+harness = ["$(S)/tst/session.py", "$(S)/tst/stacks.gdb", "$(S)/dev/run_test.py"]
+fault = program(
+    name="fault",
+    output="$(B)/e2e/fault",
+    srcs=["$(S)/tst/fault.cpp"],
+)
 if darwin:
-    helpers = [renderer_test, video_test, imgui_frames_test]
-    scenarios = [f"$(S)/tst/{name}.py" for name in ("renderer_pixels", "renderer_hdr", "video", "imgui_frames")]
+    helpers = [renderer_test, video_test, imgui_frames_test, fault]
+    scenarios = [f"$(S)/tst/{name}.py" for name in ("renderer_pixels", "renderer_hdr", "video", "imgui_frames", "debugger")]
 else:
     e2e_protocols = []
     e2e_protocol_headers = []
@@ -444,7 +450,7 @@ else:
         srcs=["$(S)/tst/device_uuid.cpp"],
         deps=[vulkan],
     )
-    helpers = [devices, jxl_dump, device_uuid, renderer_test, video_test, imgui_frames_test]
+    helpers = [devices, jxl_dump, device_uuid, renderer_test, video_test, imgui_frames_test, fault]
     scenarios = sorted(set(build.glob("$(S)/tst/*.py")) - set(harness))
 
 
@@ -455,6 +461,7 @@ shard_index, shard_count = (int(part) for part in flags.shard.split("/")) if fla
 # a scenario with buckets becomes that many test nodes, each running the
 # checks whose names hash into its bucket
 buckets = {"video": 64}
+repeat = int(flags.repeat) if flags.repeat else 1
 
 runs = []
 for scenario in scenarios:
@@ -469,30 +476,33 @@ for scenario, name, bucket in runs:
         continue
     if int(hashlib.sha1(name.encode()).hexdigest(), 16) % shard_count != shard_index:
         continue
-    out = f"$(B)/test-results/{name}.json"
-    cmd = [
-        "python3", "$(S)/dev/run_test.py",
-        "--scenario", scenario,
-        "--binary", "$(B)/im_test",
-        "--helpers", "$(B)/e2e",
-        "--out", out,
-    ]
-    if bucket:
-        cmd += ["--bucket", bucket]
-    if flags.runtime:
-        cmd += ["--runtime", flags.runtime]
-    if flags.evidence:
-        cmd += ["--evidence", flags.evidence]
-    test_verdicts.append(out)
-    test_nodes.append(command(
-        name=f"test_{name}",
-        inputs=[scenario, *harness],
-        outputs=[out],
-        deps=[im_test, *helpers],
-        cmd=cmd,
-        descr="TS",
-        color="cyan",
-    ))
+    for k in range(repeat):
+        run_name = f"{name}_r{k}" if repeat > 1 else name
+        out = f"$(B)/test-results/{run_name}.json"
+        cmd = [
+            "python3", "$(S)/dev/run_test.py",
+            "--scenario", scenario,
+            "--name", run_name,
+            "--binary", "$(B)/im_test",
+            "--helpers", "$(B)/e2e",
+            "--out", out,
+        ]
+        if bucket:
+            cmd += ["--bucket", bucket]
+        if flags.runtime:
+            cmd += ["--runtime", flags.runtime]
+        if flags.evidence:
+            cmd += ["--evidence", flags.evidence]
+        test_verdicts.append(out)
+        test_nodes.append(command(
+            name=f"test_{run_name}",
+            inputs=[scenario, *harness],
+            outputs=[out],
+            deps=[im_test, *helpers],
+            cmd=cmd,
+            descr="TS",
+            color="cyan",
+        ))
 
 if test_nodes:
     test = command(
