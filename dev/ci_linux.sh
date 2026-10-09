@@ -11,7 +11,7 @@ if [ -f /etc/alpine-release ]; then
     # they live under the version's own prefix
     apk add --no-cache bash binutils clang compiler-rt llvm g++ linux-headers lld python3 pkgconf glslang \
         wayland-dev wayland-protocols libxkbcommon-dev cairo-dev fontconfig-dev \
-        vulkan-headers vulkan-loader-dev libpng-dev libjxl-dev ffmpeg-dev openal-soft-dev ffmpeg cmake samurai xz
+        vulkan-headers vulkan-loader-dev libpng-dev libjxl-dev ffmpeg-dev openal-soft-dev ffmpeg cmake samurai xz curl
     export CC=clang CXX=clang++
     export LDFLAGS="${LDFLAGS:-} -fuse-ld=lld"
     export PATH="/usr/lib/llvm$(clang -dumpversion | cut -d. -f1)/bin:$PATH"
@@ -34,7 +34,8 @@ else
     # wabt's wasm2c turns the vendored image decoder into C
     apt-get install --yes --no-install-recommends python3 pkg-config glslang-tools wabt curl ca-certificates \
         libwayland-dev libwayland-bin wayland-protocols libxkbcommon-dev libcairo2-dev libfontconfig-dev \
-        libvulkan-dev libpng-dev libjxl-dev libavformat-dev libavcodec-dev libavutil-dev libswresample-dev libopenal-dev ffmpeg
+        libvulkan-dev libpng-dev libjxl-dev libavformat-dev libavcodec-dev libavutil-dev libswresample-dev libopenal-dev ffmpeg \
+        cmake ninja-build
     # the package leaves out the includes its wasm2c runtime is made of;
     # they come from wabt's tree, at the packaged version
     rt=/usr/share/wabt/wasm2c
@@ -52,6 +53,14 @@ else
         export LDFLAGS="${LDFLAGS:-} -fuse-ld=lld"
     fi
 fi
+lunasvg=3.5.0
+curl -fsSL --retry 5 --retry-all-errors "https://github.com/sammycage/lunasvg/archive/refs/tags/v$lunasvg.tar.gz" | tar xz -C /tmp
+cmake -S "/tmp/lunasvg-$lunasvg" -B /tmp/lunasvg-build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr \
+    -DBUILD_SHARED_LIBS=ON -DLUNASVG_BUILD_EXAMPLES=OFF
+cmake --build /tmp/lunasvg-build
+cmake --install /tmp/lunasvg-build
+if [ ! -f /etc/alpine-release ]; then ldconfig; fi
+rm -rf "/tmp/lunasvg-$lunasvg" /tmp/lunasvg-build
 if [ "$mode" != build ]; then
     # the scenarios' compositor, drawn by pixman, with grim for its pixels;
     # the tool's own Vulkan is lavapipe, under the validation layer the

@@ -5,7 +5,7 @@
 # The scenarios there need no compositor: tst/session.py starts none.
 set -euo pipefail
 mode=${1:-test}
-brew install --quiet bash llvm@21 ffmpeg openal-soft wabt pkgconf
+brew install --quiet bash llvm@21 ffmpeg openal-soft wabt pkgconf lunasvg
 llvm=$(brew --prefix llvm@21)
 export PATH="$llvm/bin:$(brew --prefix)/bin:$PATH"
 export CC=clang CXX=clang++

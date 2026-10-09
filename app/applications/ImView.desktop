@@ -8,4 +8,4 @@ Icon=ImView
 Terminal=false
 StartupWMClass=ImView
 Categories=Graphics;Viewer;
-MimeType=image/png;image/jpeg;image/webp;image/gif;image/bmp;image/tiff;image/jxl;image/avif;image/jp2;image/x-portable-pixmap;image/x-portable-graymap;image/x-portable-bitmap;image/x-portable-anymap;image/x-tga;image/x-pcx;image/x-sgi;image/x-miff;
+MimeType=image/png;image/jpeg;image/webp;image/gif;image/bmp;image/tiff;image/jxl;image/avif;image/jp2;image/x-portable-pixmap;image/x-portable-graymap;image/x-portable-bitmap;image/x-portable-anymap;image/x-tga;image/x-pcx;image/x-sgi;image/x-miff;image/svg+xml;

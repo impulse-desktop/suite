@@ -1,6 +1,7 @@
 #include "view.h"
 
 #include "ui.h"
+#include "svg.h"
 #include "error.h"
 #include "choose.h"
 #include "pooled.h"
@@ -16,6 +17,7 @@
 #include <std/sys/throw.h>
 #include <std/alg/minmax.h>
 #include <std/lib/vector.h>
+#include <std/ptr/scoped.h>
 #include <std/thr/thread.h>
 #include <std/str/builder.h>
 #include <std/thr/channel.h>
@@ -94,27 +96,20 @@ namespace {
         StringView name() const;
     };
 
-    // the file decoded and fitted to a side: as a thumbnail, its transparent
-    // margins cut before it is scaled; as the image to show, whole
-    static Image* decodeFile(ObjPool& pool, Buffer& path, size_t nameAt, u32 side, bool asThumbnail, Buffer& timing) {
-        u64 began = monotonicNowUs();
-        Buffer file;
+    int levelFor(float zoom) {
+        return (int)ceilf(2.f * log2f(max(zoom, zoomMin)) - .001f);
+    }
 
-        readFileContent(path, file);
-        StringView whole(path);
-        StringView name(whole.begin() + nameAt, whole.end());
-        Image* image = decode(pool, StringView(file), name);
+    int levelOf(float zoom, float width, float height, u32 side) {
+        return min(levelFor(zoom), levelFor((float)side / max(width, height)));
+    }
 
-        u64 decoded = monotonicNowUs();
+    float levelScale(int level, float width, float height, u32 side) {
+        return min(exp2f((float)level * .5f), (float)side / max(width, height));
+    }
 
-        image = asThumbnail ? thumbnail(pool, image, side) : shrink(pool, image, side);
-
-        StringBuilder text;
-
-        text << StringView(u8"im decode ") << name << StringView(u8": read/decode ") << MS{decoded - began};
-        text << StringView(u8" shrink ") << MS{monotonicNowUs() - decoded};
-        timing = Buffer(StringView(text));
-        return image;
+    u32 rasterSide(float extent, float scale, u32 side) {
+        return (u32)clampf(ceilf(extent * scale), 1.f, (float)side);
     }
 
     // the first bytes of a file the MIME engine looks at: an image names
@@ -343,20 +338,29 @@ namespace {
     };
 
     struct Decoded final: Job {
+        SvgLibrary* svgs;
         Buffer path;
         size_t nameAt;
         u32 side;
         u32 thumbSide;
         u64 request;
+        bool redraw;
+        float zoom;
+        ImVec2 room;
         Image* image = nullptr;
         Image* thumb = nullptr;
+        bool vector = false;
+        float extentW = 0.f;
+        float extentH = 0.f;
+        int level = 0;
         i64 fileBytes = -1;
         Buffer fileModified;
         Buffer error;
         Buffer timing;
 
-        Decoded(ObjPool* owner, ViewApp& app, const Entry& entry, u32 side, u32 thumbSide, u64 request);
+        Decoded(ObjPool* owner, ViewApp& app, const Entry& entry, u32 side, u32 thumbSide, u64 request, bool redraw = false);
         void run() override;
+        Image* draw(SvgDocument& svg);
     };
 
     struct Listed final: Job {
@@ -379,6 +383,10 @@ namespace {
         ImTextureRef texture;
         u32 width = 0;
         u32 height = 0;
+        bool vector;
+        float extentW;
+        float extentH;
+        int level;
         i64 fileBytes;
         Buffer fileModified;
         Buffer error;
@@ -390,6 +398,7 @@ namespace {
     struct ViewApp {
         Ui* ui = nullptr;
         ObjPool* pool = nullptr;
+        SvgLibrary* svgs = nullptr;
         Channel* jobs = nullptr;
         Channel* results = nullptr;
         Thread* workers[workerCount] = {};
@@ -407,6 +416,11 @@ namespace {
         const ShownImage* shown = nullptr;
         float zoom = 1.f;
         bool fit = true;
+        ImVec2 room;
+        bool redrawWanted = false;
+        bool redrawing = false;
+        u64 stuckRequest = 0;
+        int stuckLevel = 0;
         float panX = 0.f;
         float panY = 0.f;
         int rotation = 0;
@@ -461,6 +475,10 @@ ShownImage::ShownImage(ObjPool* owner_, Ui* ui_, const Entry* entry_, Decoded& r
     : owner(owner_)
     , ui(ui_)
     , entry(entry_)
+    , vector(result.vector)
+    , extentW(result.extentW)
+    , extentH(result.extentH)
+    , level(result.level)
     , fileBytes(result.fileBytes)
 {
     fileModified.xchg(result.fileModified);
@@ -470,6 +488,11 @@ ShownImage::ShownImage(ObjPool* owner_, Ui* ui_, const Entry* entry_, Decoded& r
         width = result.image->width();
         height = result.image->height();
         texture = ui->loadTexture(width, height, result.image->data());
+
+        if (!vector) {
+            extentW = (float)width;
+            extentH = (float)height;
+        }
     }
 }
 
@@ -507,14 +530,37 @@ void Job::post() {
     notify->requestFrame();
 }
 
-Decoded::Decoded(ObjPool* owner, ViewApp& app, const Entry& entry, u32 side_, u32 thumbSide_, u64 request_)
+Decoded::Decoded(ObjPool* owner, ViewApp& app, const Entry& entry, u32 side_, u32 thumbSide_, u64 request_, bool redraw_)
     : Job(owner, app, false)
+    , svgs(app.svgs)
     , path(StringView(entry.path))
     , nameAt(entry.nameAt)
     , side(side_)
     , thumbSide(thumbSide_)
     , request(request_)
+    , redraw(redraw_)
+    , zoom(redraw_ || !app.fit ? app.zoom : 0.f)
+    , room(app.rotation & 1 ? ImVec2(app.room.y, app.room.x) : app.room)
 {
+}
+
+Image* Decoded::draw(SvgDocument& svg) {
+    float scale;
+
+    vector = true;
+    extentW = svg.width();
+    extentH = svg.height();
+
+    if (request) {
+        float wanted = zoom > 0.f ? zoom : room.x >= 1.f && room.y >= 1.f ? min(zoomMax, min(room.x / extentW, room.y / extentH)) : 1.f;
+
+        level = levelOf(wanted, extentW, extentH, side);
+        scale = levelScale(level, extentW, extentH, side);
+    } else {
+        scale = (float)side / max(extentW, extentH);
+    }
+
+    return svg.render(*owner, rasterSide(extentW, scale, side), rasterSide(extentH, scale, side));
 }
 
 void Decoded::run() {
@@ -532,7 +578,34 @@ void Decoded::run() {
     }
 
     try {
-        image = decodeFile(*owner, path, nameAt, side, request == 0, timing);
+        u64 began = monotonicNowUs();
+        StringView whole(path);
+        StringView name(whole.begin() + nameAt, whole.end());
+        ScopedPtr<ObjPool> scratch{ObjPool::fromMemoryRaw()};
+        Buffer file;
+
+        readFileContent(path, file);
+
+        SvgDocument* svg = svgs->parse(*scratch.ptr, StringView(file));
+
+        image = svg ? nullptr : decode(*owner, StringView(file), name);
+
+        u64 decoded = monotonicNowUs();
+        StringBuilder text;
+
+        if (svg) {
+            image = draw(*svg);
+            image = request ? image : thumbnail(*owner, image, side);
+            text << StringView(u8"im decode ") << name << StringView(u8": read/parse ") << MS{decoded - began};
+            text << StringView(u8" draw ") << MS{monotonicNowUs() - decoded};
+        } else {
+            image = request ? shrink(*owner, image, side) : thumbnail(*owner, image, side);
+            text << StringView(u8"im decode ") << name << StringView(u8": read/decode ") << MS{decoded - began};
+            text << StringView(u8" shrink ") << MS{monotonicNowUs() - decoded};
+        }
+
+        timing = Buffer(StringView(text));
+
         if (thumbSide) {
             thumb = thumbnail(*owner, image, thumbSide);
         }
@@ -656,8 +729,12 @@ void ViewApp::take(Decoded& decoded) {
 
     ui->timing(StringView(decoded.timing));
 
+    if (decoded.redraw) {
+        redrawing = false;
+    }
+
     for (Entry* entry : entries) {
-        if (StringView(entry->path) != path) {
+        if (decoded.redraw || StringView(entry->path) != path) {
             continue;
         }
 
@@ -681,6 +758,13 @@ void ViewApp::take(Decoded& decoded) {
         return;
     }
 
+    if (decoded.redraw && !decoded.error.empty()) {
+        stuckRequest = decoded.request;
+        stuckLevel = decoded.level;
+        TRACE(ui, StringView(StringBuilder() << StringView(u8"cannot draw ") << name << StringView(u8": ") << StringView(decoded.error)));
+        return;
+    }
+
     ObjPool* storage = ObjPool::fromMemoryRaw();
     const ShownImage* next = storage->make<ShownImage>(storage, ui, entries[current], decoded);
 
@@ -688,8 +772,12 @@ void ViewApp::take(Decoded& decoded) {
 
     if (!next->error.empty()) {
         TRACE(ui, StringView(StringBuilder() << StringView(u8"cannot show ") << name << StringView(u8": ") << StringView(next->error)));
-    } else {
-        TRACE(ui, StringView(StringBuilder() << StringView(u8"showing ") << name << StringView(u8" ") << (i64)next->width << StringView(u8"x") << (i64)next->height));
+    } else if (!decoded.redraw) {
+        TRACE(ui, StringView(StringBuilder() << StringView(u8"showing ") << name << StringView(u8" ") << (i64)lroundf(next->extentW) << StringView(u8"x") << (i64)lroundf(next->extentH)));
+    }
+
+    if (next->error.empty() && next->vector) {
+        TRACE(ui, StringView(StringBuilder() << StringView(u8"drawn ") << name << StringView(u8" level ") << (i64)next->level << StringView(u8" ") << (i64)next->width << StringView(u8"x") << (i64)next->height));
     }
 }
 
@@ -808,6 +896,15 @@ void ViewApp::submit() {
         showPending = false;
         TRACE(ui, StringView(StringBuilder() << StringView(u8"loading image ") << entry.name()));
         dispatch(owner->make<Decoded>(owner, *this, entry, maxSide, thumbs, showRequest));
+    }
+
+    if (redrawWanted && !redrawing && inFlight < workerCount) {
+        ObjPool* owner = ObjPool::fromMemoryRaw();
+
+        redrawWanted = false;
+        redrawing = true;
+        TRACE(ui, StringView(StringBuilder() << StringView(u8"drawing ") << entries[current]->name() << StringView(u8" level ") << (i64)levelOf(zoom, shown->extentW, shown->extentH, maxSide)));
+        dispatch(owner->make<Decoded>(owner, *this, *entries[current], maxSide, 0, showRequest, true));
     }
 
     while (listedNext < paths.length() && inFlight < workerCount) {
@@ -1341,12 +1438,19 @@ void ViewApp::drawInfo() {
             row("Error", StringView(shown->error));
         }
 
+        if (ready && shown->vector) {
+            StringBuilder text;
+
+            text << (i64)lroundf(shown->extentW) << StringView(u8" \xc3\x97 ") << (i64)lroundf(shown->extentH);
+            row("Dimensions", StringView(text));
+        }
+
         if (ready) {
             StringBuilder text;
             i64 tenths = ((i64)shown->width * (i64)shown->height + 50000) / 100000;
 
             text << (i64)shown->width << StringView(u8" \xc3\x97 ") << (i64)shown->height << StringView(u8"   ") << tenths / 10 << StringView(u8".") << tenths % 10 << StringView(u8" MP");
-            row("Dimensions", StringView(text));
+            row(shown->vector ? "Drawn" : "Dimensions", StringView(text));
         }
 
         {
@@ -1473,6 +1577,9 @@ void ViewApp::drawCanvas(ImVec2 size) {
     ImVec2 origin = ImGui::GetCursorScreenPos();
     ImRect bb(origin, ImVec2(origin.x + size.x, origin.y + size.y));
 
+    room = size;
+    redrawWanted = false;
+
     ImGui::ItemSize(size);
 
     if (!ImGui::ItemAdd(bb, id)) {
@@ -1509,11 +1616,11 @@ void ViewApp::drawCanvas(ImVec2 size) {
         return;
     }
 
-    float rw = (float)(rotation & 1 ? shown->height : shown->width);
-    float rh = (float)(rotation & 1 ? shown->width : shown->height);
+    float rw = rotation & 1 ? shown->extentH : shown->extentW;
+    float rh = rotation & 1 ? shown->extentW : shown->extentH;
 
     if (fit) {
-        zoom = min(1.f, min(size.x / rw, size.y / rh));
+        zoom = min(shown->vector ? zoomMax : 1.f, min(size.x / rw, size.y / rh));
     }
 
     float dw = rw * zoom;
@@ -1549,6 +1656,12 @@ void ViewApp::drawCanvas(ImVec2 size) {
     ImVec2 p1(centre.x + dw / 2.f, centre.y + dh / 2.f);
     const ImVec2 uv[4] = {ImVec2(0, 0), ImVec2(1, 0), ImVec2(1, 1), ImVec2(0, 1)};
     int r = rotation;
+
+    if (shown->vector) {
+        int wanted = levelOf(zoom, shown->extentW, shown->extentH, maxSide);
+
+        redrawWanted = wanted != shown->level && !(stuckRequest == showRequest && stuckLevel == wanted);
+    }
 
     dl->PushClipRect(bb.Min, bb.Max, true);
     dl->AddImageQuad(shown->texture, p0, ImVec2(p1.x, p0.y), p1, ImVec2(p0.x, p1.y), uv[(4 - r) & 3], uv[(5 - r) & 3], uv[(6 - r) & 3], uv[(7 - r) & 3]);
@@ -1648,6 +1761,7 @@ int mainView(ObjPool& pool, int argc, char** argv) {
 
     app.ui = &ui;
     app.pool = &pool;
+    app.svgs = SvgLibrary::create(pool);
     app.maxSide = ui.maxTextureSide();
     app.startWorkers(pool);
 

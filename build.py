@@ -98,6 +98,7 @@ plt = import_build(
 )
 system = dependency(ldflags=["-lm"])
 media = [pkg_config(name) for name in ("libavformat", "libavcodec", "libavutil", "libswresample", "openal")]
+svg = pkg_config("lunasvg")
 # Vulkan's canonical `VkFoo info{VK_STRUCTURE_TYPE_FOO}` initialization zeros
 # the remaining aggregate fields by design; Clang otherwise diagnoses every
 # such declaration under -Wextra.
@@ -296,7 +297,7 @@ if darwin:
 # graph hands over its archive, not what the archive wants linked
 im_deps = [
     *shader_rules, codes, imgui, textedit, pdf, djvu, mime, decode, plt, libstd,
-    *platform_deps, *encoders, *media, system,
+    *platform_deps, *encoders, *media, svg, system,
 ]
 
 # one binary, every tool: `im screenshot ...`, and a link named after the

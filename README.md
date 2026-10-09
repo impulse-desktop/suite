@@ -20,7 +20,7 @@ and the editor open what the user opens. Every tool is a small native
 program in a process of its own, drawn on Vulkan straight to Wayland,
 with no toolkit underneath. Images, documents and file types are read by
 sandboxed decoders, so a hostile file cannot reach past the decoder's own
-memory.
+memory; SVG alone is drawn natively, by lunasvg.
 
 ## Running
 
@@ -56,7 +56,7 @@ Linux. You need clang 21 or GCC 16, python3, pkg-config,
 wayland-scanner, glslangValidator, `wasm2c` from wabt with the runtime it
 ships, and the development files of wayland-client, xkbcommon, vulkan,
 libpng, libjxl, FFmpeg (libavformat, libavcodec, libavutil,
-libswresample) and OpenAL.
+libswresample), OpenAL and lunasvg.
 
 ```
 ./build          # .build/im and the im<tool> links
