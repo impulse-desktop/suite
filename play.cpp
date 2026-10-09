@@ -2394,6 +2394,11 @@ void Screen::keys() {
         flipFullscreen();
     }
 
+    if (ImGui::Shortcut(ImGuiKey_I)) {
+        panel = !panel;
+        TRACE(player->ui, panel ? StringView(u8"panel on") : StringView(u8"panel off"));
+    }
+
     if (ImGui::GetIO().NavVisible) {
         return;
     }
@@ -2516,6 +2521,7 @@ void Screen::draw() {
 
     if (ImGui::Button("i##panel", ImVec2(square, square))) {
         panel = !panel;
+        TRACE(player->ui, panel ? StringView(u8"panel on") : StringView(u8"panel off"));
     }
 
     if (lit) {

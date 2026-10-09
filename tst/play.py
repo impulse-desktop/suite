@@ -1,7 +1,7 @@
 """Playback recycles the video swapchain, sleeps when paused and seeks with full queues."""
 import re
 import time
-from session import KEY_HOME, KEY_LEFT, KEY_RIGHT, KEY_SPACE, Session, write_video
+from session import KEY_HOME, KEY_I, KEY_LEFT, KEY_RIGHT, KEY_SPACE, Session, write_video
 
 
 def shows(s):
@@ -50,6 +50,10 @@ for audio in (True, False):
         s.said("play generation=9")
         s.wait(lambda: len(shows(s)) > n + 10, "play resumes after seeks")
         assert all(g == 9 for g, _ in shows(s)[n:]), "old generation was displayed after seek"
+        s.tap(KEY_I)
+        s.said("panel on")
+        s.tap(KEY_I)
+        s.said("panel off")
         s.close()
 
 print("OK: A/V and silent playback, buffer reuse, pause idle, seek preview, stop and rapid seeks")
