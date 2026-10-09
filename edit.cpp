@@ -192,15 +192,15 @@ void EditApp::askQuit() {
 }
 
 void EditApp::keys() {
-    if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_S)) {
+    if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_S)) {
         save();
     }
 
-    if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_Q)) {
+    if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_Q)) {
         askQuit();
     }
 
-    if (ImGui::IsKeyPressed(ImGuiKey_F11, false)) {
+    if (ImGui::Shortcut(ImGuiKey_F11)) {
         fullscreen = !fullscreen;
         ui->requestFullscreen(fullscreen);
         TRACE(ui, fullscreen ? StringView(u8"fullscreen on") : StringView(u8"fullscreen off"));
@@ -216,6 +216,7 @@ void EditApp::draw() {
     ImGui::SetNextWindowPos(vp->Pos);
     ImGui::SetNextWindowSize(vp->Size);
     ImGui::Begin("##edit", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoSavedSettings);
+    keys();
 
     float statusH = ImGui::GetTextLineHeightWithSpacing();
 
@@ -260,15 +261,21 @@ void EditApp::draw() {
         ImGui::Text("%.*s has unsaved changes.", (int)name.length(), (const char*)name.begin());
         ImGui::Spacing();
 
-        bool doSave = ImGui::Button("Save") || ImGui::IsKeyPressed(ImGuiKey_S, false);
+        ImGui::SetNextItemShortcut(ImGuiKey_S);
+
+        bool doSave = ImGui::Button("Save");
 
         ImGui::SameLine();
 
-        bool doDiscard = ImGui::Button("Discard") || ImGui::IsKeyPressed(ImGuiKey_D, false);
+        ImGui::SetNextItemShortcut(ImGuiKey_D);
+
+        bool doDiscard = ImGui::Button("Discard");
 
         ImGui::SameLine();
 
-        bool doCancel = ImGui::Button("Cancel") || ImGui::IsKeyPressed(ImGuiKey_Escape, false);
+        ImGui::SetNextItemShortcut(ImGuiKey_Escape);
+
+        bool doCancel = ImGui::Button("Cancel");
 
         if (doSave) {
             save();
@@ -312,7 +319,6 @@ int mainEdit(ObjPool& pool, int argc, char** argv) {
                 return;
             }
 
-            app.keys();
             app.draw();
 
             if (app.quit) {
