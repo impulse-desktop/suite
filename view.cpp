@@ -436,7 +436,7 @@ namespace {
         void draw();
         void drawTools();
         void drawGallery(ImVec2 size);
-        void galleryKeys(ImGuiID id);
+        void galleryKeys(ImGuiID owner);
         void drawCanvas();
         void drawInfo();
     };
@@ -884,42 +884,42 @@ void ViewApp::replaceShown(const ShownImage* next) {
     ui->requestFrame();
 }
 
-void ViewApp::galleryKeys(ImGuiID id) {
-    bool next = ImGui::Shortcut(ImGuiKey_RightArrow, ImGuiInputFlags_Repeat, id);
+void ViewApp::galleryKeys(ImGuiID owner) {
+    bool next = ImGui::Shortcut(ImGuiKey_RightArrow, ImGuiInputFlags_Repeat, owner);
 
-    next |= ImGui::Shortcut(ImGuiKey_DownArrow, ImGuiInputFlags_Repeat, id);
-    next |= ImGui::Shortcut(ImGuiKey_Space, ImGuiInputFlags_Repeat, id);
-    next |= ImGui::Shortcut(ImGuiKey_PageDown, ImGuiInputFlags_Repeat, id);
-    next |= ImGui::Shortcut(ImGuiKey_J, ImGuiInputFlags_Repeat, id);
-    next |= ImGui::Shortcut(ImGuiKey_N, ImGuiInputFlags_Repeat, id);
+    next |= ImGui::Shortcut(ImGuiKey_DownArrow, ImGuiInputFlags_Repeat, owner);
+    next |= ImGui::Shortcut(ImGuiKey_Space, ImGuiInputFlags_Repeat, owner);
+    next |= ImGui::Shortcut(ImGuiKey_PageDown, ImGuiInputFlags_Repeat, owner);
+    next |= ImGui::Shortcut(ImGuiKey_J, ImGuiInputFlags_Repeat, owner);
+    next |= ImGui::Shortcut(ImGuiKey_N, ImGuiInputFlags_Repeat, owner);
 
     if (next) {
         step(1);
     }
 
-    bool previous = ImGui::Shortcut(ImGuiKey_LeftArrow, ImGuiInputFlags_Repeat, id);
+    bool previous = ImGui::Shortcut(ImGuiKey_LeftArrow, ImGuiInputFlags_Repeat, owner);
 
-    previous |= ImGui::Shortcut(ImGuiKey_UpArrow, ImGuiInputFlags_Repeat, id);
-    previous |= ImGui::Shortcut(ImGuiKey_Backspace, ImGuiInputFlags_Repeat, id);
-    previous |= ImGui::Shortcut(ImGuiKey_PageUp, ImGuiInputFlags_Repeat, id);
-    previous |= ImGui::Shortcut(ImGuiKey_K, ImGuiInputFlags_Repeat, id);
-    previous |= ImGui::Shortcut(ImGuiKey_P, ImGuiInputFlags_Repeat, id);
+    previous |= ImGui::Shortcut(ImGuiKey_UpArrow, ImGuiInputFlags_Repeat, owner);
+    previous |= ImGui::Shortcut(ImGuiKey_Backspace, ImGuiInputFlags_Repeat, owner);
+    previous |= ImGui::Shortcut(ImGuiKey_PageUp, ImGuiInputFlags_Repeat, owner);
+    previous |= ImGui::Shortcut(ImGuiKey_K, ImGuiInputFlags_Repeat, owner);
+    previous |= ImGui::Shortcut(ImGuiKey_P, ImGuiInputFlags_Repeat, owner);
 
     if (previous) {
         step(-1);
     }
 
-    bool first = ImGui::Shortcut(ImGuiKey_Home, ImGuiInputFlags_None, id);
+    bool first = ImGui::Shortcut(ImGuiKey_Home, ImGuiInputFlags_None, owner);
 
-    first |= ImGui::Shortcut(ImGuiKey_G, ImGuiInputFlags_None, id);
+    first |= ImGui::Shortcut(ImGuiKey_G, ImGuiInputFlags_None, owner);
 
     if (first) {
         step(-(long)entries.length());
     }
 
-    bool last = ImGui::Shortcut(ImGuiKey_End, ImGuiInputFlags_None, id);
+    bool last = ImGui::Shortcut(ImGuiKey_End, ImGuiInputFlags_None, owner);
 
-    last |= ImGui::Shortcut(ImGuiMod_Shift | ImGuiKey_G, ImGuiInputFlags_None, id);
+    last |= ImGui::Shortcut(ImGuiMod_Shift | ImGuiKey_G, ImGuiInputFlags_None, owner);
 
     if (last) {
         step((long)entries.length());
@@ -1019,6 +1019,10 @@ void ViewApp::keys() {
         info = !info;
         TRACE(ui, info ? StringView(u8"info on") : StringView(u8"info off"));
     }
+
+    if (!ImGui::GetIO().NavVisible) {
+        galleryKeys(ImGuiKeyOwner_Any);
+    }
 }
 
 // the rows down the list, the list's width each and the image's shape,
@@ -1037,18 +1041,31 @@ void ViewApp::drawGallery(ImVec2 size) {
         return;
     }
 
-    ImGui::SetItemDefaultFocus();
+    ImGuiContext& context = *GImGui;
+    bool hovered = ImGui::ItemHoverable(bb, id, context.LastItemData.ItemFlags);
+    bool clicked = hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left);
 
-    bool hovered = false;
-    bool held = false;
-    bool pressed = ImGui::ButtonBehavior(bb, id, &hovered, &held);
+    if (clicked || context.NavActivateId == id) {
+        ImGui::SetActiveID(id, window);
+        ImGui::SetFocusID(id, window);
+        ImGui::FocusWindow(window);
+    }
+
+    if (context.ActiveId == id && context.ActiveIdSource == ImGuiInputSource_Mouse && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        ImGui::ClearActiveID();
+    }
+
+    if (context.ActiveId == id && context.ActiveIdSource != ImGuiInputSource_Mouse) {
+        if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            ImGui::ClearActiveID();
+        } else {
+            context.ActiveIdAllowOverlap = true;
+            galleryKeys(id);
+        }
+    }
 
     if (hovered) {
         ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelY);
-    }
-
-    if (ImGui::IsItemFocused()) {
-        galleryKeys(id);
     }
 
     ImGui::RenderNavCursor(bb, id);
@@ -1098,8 +1115,6 @@ void ViewApp::drawGallery(ImVec2 size) {
 
     float scrollY = galleryScroll;
     ImVec2 content(origin.x, origin.y - scrollY);
-    bool clicked = pressed && ImGui::IsMouseReleased(ImGuiMouseButton_Left);
-
     if (scrollY != tracedScrollY) {
         StringBuilder text;
 
