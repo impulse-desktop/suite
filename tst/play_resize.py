@@ -23,6 +23,8 @@ with Session("play_resize", tool="play") as s:
     node = s.window()
     s.ipc(f'[con_id={node["id"]}] resize set 640 px 160 px')
     s.wait(lambda: s.window()["rect"]["height"] == 160, "the short window")
+    s.said("presenting 640x160")
+    s.settled("short")
 
     def colour():
         w, h, px = s.capture("middle", region=(300, 60, 40, 20))
