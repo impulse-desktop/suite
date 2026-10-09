@@ -648,7 +648,7 @@ namespace {
         float avail = ImGui::GetContentRegionAvail().x;
         float bw = (avail - ImGui::GetStyle().ItemSpacing.x) / 2.f;
 
-        if (ImGui::Button("Save", ImVec2(bw, 0)) || ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false)) {
+        if (ImGui::Button("Save", ImVec2(bw, 0)) || ImGui::Shortcut(ImGuiKey_Enter, ImGuiInputFlags_RouteFromRootWindow) || ImGui::Shortcut(ImGuiKey_KeypadEnter, ImGuiInputFlags_RouteFromRootWindow)) {
             result = 1;
         }
 
@@ -659,7 +659,7 @@ namespace {
             reset = true;
         }
 
-        if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+        if (ImGui::Shortcut(ImGuiKey_Escape, ImGuiInputFlags_RouteFromRootWindow)) {
             result = -1;
         }
 
@@ -772,15 +772,15 @@ namespace {
         ImGui::Begin("##shot", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoSavedSettings);
         const float panelW = ui.px(200_d);
 
-        if (ImGui::IsKeyPressed(ImGuiKey_Equal) || ImGui::IsKeyPressed(ImGuiKey_KeypadAdd)) {
+        if (ImGui::Shortcut(ImGuiKey_Equal, ImGuiInputFlags_Repeat) || ImGui::Shortcut(ImGuiKey_KeypadAdd, ImGuiInputFlags_Repeat)) {
             applyZoom(v, kZoomStep);
         }
 
-        if (ImGui::IsKeyPressed(ImGuiKey_Minus) || ImGui::IsKeyPressed(ImGuiKey_KeypadSubtract)) {
+        if (ImGui::Shortcut(ImGuiKey_Minus, ImGuiInputFlags_Repeat) || ImGui::Shortcut(ImGuiKey_KeypadSubtract, ImGuiInputFlags_Repeat)) {
             applyZoom(v, -kZoomStep);
         }
 
-        if (ImGui::IsKeyPressed(ImGuiKey_0) || ImGui::IsKeyPressed(ImGuiKey_Keypad0)) {
+        if (ImGui::Shortcut(ImGuiKey_0) || ImGui::Shortcut(ImGuiKey_Keypad0)) {
             resetView(v);
             reset = true;
         }
