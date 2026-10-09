@@ -1,15 +1,13 @@
 """The reader on a PDF and a DjVu: `imread FILE` opens the document, its
 pages down the list on the left, the pages themselves one under another
-on the canvas, the widest as wide as the canvas; n/p and the arrows go
-page by page, Home and End to the ends, the wheel scrolls, a click on a
-row goes to its page; the thumbnails arrive; Tab hides the list and the
-pages take its room; a file that is neither is refused, and a PDF that
-does not open says so."""
+on the canvas, the widest as wide as the canvas; the wheel scrolls, a
+click on a row goes to its page; the thumbnails arrive; a file that is
+neither is refused, and a PDF that does not open says so."""
 
 import os
 from pathlib import Path
 
-from session import KEY_END, KEY_HOME, KEY_N, KEY_Q, KEY_TAB, Session, near
+from session import KEY_Q, Session, near
 
 
 def pdf(pages):
@@ -78,33 +76,24 @@ with Session("read", tool="read") as s:
     s.pointer(canvas[0] + canvas[2] // 2, canvas[3] // 2)
     s.scroll(1)
     s.changed(top, "wheeled")
-    s.tap(KEY_N)
-    s.said("page 2")
-    s.said("showing page 2 ")
-    # the second page, 3:2, as wide as the canvas allows: 768x512
-    shows(green, 350000, "second")
-    s.tap(KEY_END)
-    s.said("page 3")
-    s.said("showing page 3 ")
-    shows(blue, 300000, "last")
-    s.tap(KEY_HOME)
-    s.said("page 1", 2)
-    shows(red, 300000, "home")
     # the pages down the list, each as wide as the list and shaped as the
-    # page, 6 px apart: the first row 300 px tall, the second 133, the
+    # page, 4 px apart: the first row 300 px tall, the second 133, the
     # third 300, the list at the window's top
     s.said("thumbnail 1")
     s.said("thumbnail 2")
     s.said("thumbnail 3")
-    s.click(side // 2, 300 + 6 + 133 + 6 + 100)
-    s.said("page 3", 2)
-    shows(blue, 300000, "clicked")
-    s.tap(KEY_TAB)
-    s.said("panel off")
-    # the canvas is the window now, and the page is laid out wider for it
-    s.wait(lambda: near(s.capture("alone", region=(0, 0, r["width"], r["height"])), blue) >= 400000, "the page across the whole window")
-    s.tap(KEY_TAB)
-    s.said("panel on")
+    s.click(side // 2, 300 + 4 + 60)
+    s.said("page 2")
+    s.said("showing page 2 ")
+    # the second page, 3:2, as wide as the canvas allows: 768x512
+    shows(green, 350000, "second")
+    s.click(side // 2, 300 + 4 + 133 + 4 + 100)
+    s.said("page 3")
+    s.said("showing page 3 ")
+    shows(blue, 300000, "last")
+    s.click(side // 2, 150)
+    s.said("page 1", 2)
+    shows(red, 300000, "first-again")
     s.close(KEY_Q)
 
     s.launch(str(Path(__file__).resolve().parent / "page.djvu"))

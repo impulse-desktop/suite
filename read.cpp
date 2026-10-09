@@ -44,8 +44,6 @@ namespace {
     constexpr Design windowWidth = 1000_d;
     constexpr Design windowHeight = 700_d;
     constexpr float sideShare = .2f;
-    constexpr Design scrollStep = 48_d;
-    constexpr float screenShare = .9f;
     constexpr float placeholderAspect = 1.4142f;
     constexpr u32 thumbTexelsStep = 64;
     constexpr u32 thumbTexelsMin = 128;
@@ -255,6 +253,7 @@ namespace {
         bool followCurrent = true;
         bool fullscreen = false;
         bool panel = true;
+        bool leaving = false;
 
         void startWorkers(ObjPool& pool);
         void stopWorkers();
@@ -952,52 +951,14 @@ void ReadApp::goTo(size_t index) {
 }
 
 void ReadApp::keys() {
-    ImGuiIO& io = ImGui::GetIO();
-    float step = ui->px(scrollStep);
-
-    size_t at = current == (size_t)-1 ? 0 : current;
-
-    if (ImGui::IsKeyPressed(ImGuiKey_RightArrow) || ImGui::IsKeyPressed(ImGuiKey_N)) {
-        goTo(at + 1);
+    if (ImGui::Shortcut(ImGuiKey_Escape) || ImGui::Shortcut(ImGuiKey_Q)) {
+        leaving = true;
     }
 
-    if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow) || ImGui::IsKeyPressed(ImGuiKey_P)) {
-        goTo(at > 0 ? at - 1 : 0);
-    }
-
-    if (ImGui::IsKeyPressed(ImGuiKey_DownArrow) || ImGui::IsKeyPressed(ImGuiKey_J)) {
-        scrollTo(scrollY + step);
-    }
-
-    if (ImGui::IsKeyPressed(ImGuiKey_UpArrow) || ImGui::IsKeyPressed(ImGuiKey_K)) {
-        scrollTo(scrollY - step);
-    }
-
-    if (ImGui::IsKeyPressed(ImGuiKey_Space) || ImGui::IsKeyPressed(ImGuiKey_PageDown)) {
-        scrollTo(scrollY + viewH * screenShare);
-    }
-
-    if (ImGui::IsKeyPressed(ImGuiKey_Backspace) || ImGui::IsKeyPressed(ImGuiKey_PageUp)) {
-        scrollTo(scrollY - viewH * screenShare);
-    }
-
-    if (ImGui::IsKeyPressed(ImGuiKey_Home) || (ImGui::IsKeyPressed(ImGuiKey_G) && !io.KeyShift)) {
-        scrollTo(0.f);
-    }
-
-    if (ImGui::IsKeyPressed(ImGuiKey_End) || (ImGui::IsKeyPressed(ImGuiKey_G) && io.KeyShift)) {
-        scrollTo(totalH);
-    }
-
-    if (ImGui::IsKeyPressed(ImGuiKey_F, false) || ImGui::IsKeyPressed(ImGuiKey_F11, false)) {
+    if (ImGui::Shortcut(ImGuiKey_F) || ImGui::Shortcut(ImGuiKey_F11)) {
         fullscreen = !fullscreen;
         ui->requestFullscreen(fullscreen);
         TRACE(ui, fullscreen ? StringView(u8"fullscreen on") : StringView(u8"fullscreen off"));
-    }
-
-    if (ImGui::IsKeyPressed(ImGuiKey_Tab, false)) {
-        panel = !panel;
-        TRACE(ui, panel ? StringView(u8"panel on") : StringView(u8"panel off"));
     }
 }
 
@@ -1235,6 +1196,7 @@ void ReadApp::draw() {
     ImGui::SetNextWindowPos(vp->Pos);
     ImGui::SetNextWindowSize(vp->Size);
     ImGui::Begin("##read", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoSavedSettings);
+    keys();
 
     float sideW = floorf(vp->Size.x * sideShare);
 
@@ -1280,14 +1242,13 @@ int mainRead(ObjPool& pool, int argc, char** argv) {
                 return;
             }
 
-            if (ImGui::IsKeyPressed(ImGuiKey_Escape, false) || ImGui::IsKeyPressed(ImGuiKey_Q, false)) {
-                return;
-            }
-
-            app.keys();
             app.accept();
             app.draw();
             app.submit();
+
+            if (app.leaving) {
+                return;
+            }
         }
     });
     return ui.run(body);
