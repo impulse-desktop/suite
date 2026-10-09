@@ -66,6 +66,12 @@ namespace {
         void run() override;
     };
 
+    struct Landed final: public Runable {
+        int count = 0;
+
+        void run() override;
+    };
+
     enum class Model {
         Yuv,
         Rgb,
@@ -678,6 +684,10 @@ namespace {
 }
 
 void Ignored::run() {
+}
+
+void Landed::run() {
+    count++;
 }
 
 FormatCheck::FormatCheck(ObjPool* pool_, Ui* ui_)
@@ -1392,10 +1402,12 @@ void FormatCheck::underlay() {
 
     VideoShader facts = describe(frame, "sdr");
 
+    Landed landed;
     ScopedPtr<ObjPool> owner{ObjPool::fromMemoryRaw()};
-    RenderImage* image = ui->shadeImage(*owner.ptr, factoryFor(facts), (u32)frame->width, (u32)frame->height, frame->buf[0]->data, frame->buf[0]->size, false, retired);
+    RenderImage* image = ui->shadeImage(*owner.ptr, factoryFor(facts), (u32)frame->width, (u32)frame->height, frame->buf[0]->data, frame->buf[0]->size, false, landed);
     UiEvent event;
     int frames = 0;
+    int waited = 0;
 
     image->prepare();
     ui->requestFrame();
@@ -1405,20 +1417,30 @@ void FormatCheck::underlay() {
             continue;
         }
 
-        if (frames == 3) {
+        if (frames == 3 && (landed.count == frames || waited == 240)) {
             break;
         }
 
-        ImVec2 at = ImGui::GetMainViewport()->Pos;
+        if (frames < 3) {
+            ImVec2 at = ImGui::GetMainViewport()->Pos;
 
-        image->draw(*ImGui::GetBackgroundDrawList(), ImVec2(at.x + 1.f, at.y + 1.f), ImVec2(at.x + 1.f + (float)frame->width, at.y + 1.f + (float)frame->height));
-        frames++;
+            image->draw(*ImGui::GetBackgroundDrawList(), ImVec2(at.x + 1.f, at.y + 1.f), ImVec2(at.x + 1.f + (float)frame->width, at.y + 1.f + (float)frame->height));
+            frames++;
+        } else {
+            waited++;
+        }
+
         ui->requestFrame();
     }
 
     if (frames < 3) {
         failed++;
         sysE << StringView(u8"video formats: the layer underlay saw ") << (u64)frames << StringView(u8" frames") << endL;
+    }
+
+    if (landed.count != frames) {
+        failed++;
+        sysE << StringView(u8"video formats: the layer underlay drew ") << (u64)frames << StringView(u8" frames and ") << (u64)landed.count << StringView(u8" came back") << endL;
     }
 }
 
