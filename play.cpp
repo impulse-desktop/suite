@@ -378,6 +378,7 @@ namespace {
         VideoInfo* video = nullptr;
         AudioInfo* audio = nullptr;
         bool failed = false;
+        bool leaving = false;
         Buffer error;
 
         explicit Screen(Player* player);
@@ -1761,14 +1762,9 @@ bool Screen::frame() {
         return !player->ui->drawErrorPanel(StringView(error));
     }
 
-    if (ImGui::IsKeyPressed(ImGuiKey_Escape, false) || ImGui::IsKeyPressed(ImGuiKey_Q, false)) {
-        return false;
-    }
-
-    keys();
     draw();
 
-    return true;
+    return !leaving;
 }
 
 void Screen::drain() {
@@ -2282,23 +2278,27 @@ void Screen::setClock(double base, bool running, u64 at) {
 void Screen::keys() {
     double at = position(monotonicNowUs());
 
-    if (ImGui::IsKeyPressed(ImGuiKey_Space, false)) {
+    if (ImGui::Shortcut(ImGuiKey_Escape) || ImGui::Shortcut(ImGuiKey_Q)) {
+        leaving = true;
+    }
+
+    if (ImGui::Shortcut(ImGuiKey_Space)) {
         toggle();
     }
 
-    if (ImGui::IsKeyPressed(ImGuiKey_RightArrow)) {
+    if (ImGui::Shortcut(ImGuiKey_RightArrow, ImGuiInputFlags_Repeat)) {
         seek(at + seekStep, playing);
     }
 
-    if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow)) {
+    if (ImGui::Shortcut(ImGuiKey_LeftArrow, ImGuiInputFlags_Repeat)) {
         seek(at - seekStep, playing);
     }
 
-    if (ImGui::IsKeyPressed(ImGuiKey_Home, false)) {
+    if (ImGui::Shortcut(ImGuiKey_Home)) {
         seek(0., false);
     }
 
-    if (ImGui::IsKeyPressed(ImGuiKey_F, false) || ImGui::IsKeyPressed(ImGuiKey_F11, false)) {
+    if (ImGui::Shortcut(ImGuiKey_F) || ImGui::Shortcut(ImGuiKey_F11)) {
         flipFullscreen();
     }
 }
@@ -2318,11 +2318,13 @@ void Screen::draw() {
     // panel: the video alone.
     bool chrome = !ui.fullscreen();
     float bar = chrome ? ImGui::GetFrameHeightWithSpacing() : 0.f;
-    double at = position(monotonicNowUs());
 
     ImGui::SetNextWindowPos(vp->Pos);
     ImGui::SetNextWindowSize(vp->Size);
     ImGui::Begin("##play", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoSavedSettings);
+    keys();
+
+    double at = position(monotonicNowUs());
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImVec2 room = ImGui::GetContentRegionAvail();
