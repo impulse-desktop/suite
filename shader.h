@@ -38,3 +38,4 @@ struct VideoShader {
 };
 
 CompiledShader compile(stl::ObjPool& pool, const VideoShader& shader, const ShaderOptions& options);
+CompiledShader compileGeneric(stl::ObjPool& pool, const VideoShader& shader);

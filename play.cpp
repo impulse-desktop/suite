@@ -367,6 +367,7 @@ namespace {
         bool hasAudio;
         double duration;
         Vector<Made> made;
+        Vector<Made> standIns;
         u64 madeClock = 0;
         int shownWidth = 0;
         int shownHeight = 0;
@@ -1820,6 +1821,10 @@ Screen::~Screen() noexcept {
     for (const Made& known : made) {
         delete known.pool;
     }
+
+    for (const Made& known : standIns) {
+        delete known.pool;
+    }
 }
 
 void Screen::run() {
@@ -2069,7 +2074,7 @@ RenderShader& VideoImage::shader(const ShaderOptions& options) {
 }
 
 static bool sameOptions(const ShaderOptions& a, const ShaderOptions& b) {
-    return a.target == b.target && a.output == b.output && a.tiles == b.tiles && a.size[0] == b.size[0] && a.size[1] == b.size[1] && a.generic == b.generic;
+    return a.target == b.target && a.output == b.output && a.tiles == b.tiles && a.size[0] == b.size[0] && a.size[1] == b.size[1];
 }
 
 Made* Screen::find(const VideoShader& facts, const ShaderOptions& options) {
@@ -2098,25 +2103,19 @@ RenderShader& Screen::shaderFor(const VideoShader& facts, const ShaderOptions& o
         player->shaderInbox->enqueue(new Compile(facts, options));
     }
 
-    ShaderOptions wanted = options;
-
-    wanted.generic = true;
-    wanted.tiles = ShaderTiles::Mixed;
-    wanted.size[0] = 0;
-    wanted.size[1] = 0;
-
-    if (Made* generic = find(facts, wanted)) {
-        generic->used = madeClock;
-
-        return *generic->shader;
+    for (const Made& known : standIns) {
+        if (known.options.target == options.target && known.options.output == options.output && !memcmp(&known.facts, &facts, sizeof(facts))) {
+            return *known.shader;
+        }
     }
 
+    ShaderOptions wanted{options.target, options.output, ShaderTiles::Mixed, {0, 0}};
     ScopedPtr<ObjPool> scratch{ObjPool::fromMemoryRaw()};
-    CompiledShader code = compile(*scratch.ptr, facts, wanted);
+    CompiledShader code = compileGeneric(*scratch.ptr, facts);
     ScopedPtr<ObjPool> owner{ObjPool::fromMemoryRaw()};
     RenderShader* shader = player->ui->compileKernel(*owner.ptr, code, facts.tile, wanted);
 
-    made.pushBack(Made{facts, wanted, owner.ptr, shader, madeClock});
+    standIns.pushBack(Made{facts, wanted, owner.ptr, shader, madeClock});
     owner.drop();
 
     return *shader;

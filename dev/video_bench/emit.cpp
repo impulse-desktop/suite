@@ -107,7 +107,7 @@ int main(int argc, char** argv) {
     static const char* const tiles[3] = {"inside", "edge", "mixed"};
     ObjPool::Ref owner = ObjPool::fromMemory();
     VideoShader shader;
-    ShaderOptions options{(ShaderTarget)pick("--target", argv[1], argv[2], targets, 2), (ShaderOutput)pick("--output", argv[3], argv[4], outputs, 4), (ShaderTiles)pick("--tiles", argv[5], argv[6], tiles, 3), {0, 0}, generic};
+    ShaderOptions options{(ShaderTarget)pick("--target", argv[1], argv[2], targets, 2), (ShaderOutput)pick("--output", argv[3], argv[4], outputs, 4), (ShaderTiles)pick("--tiles", argv[5], argv[6], tiles, 3), {0, 0}};
     Arguments numbers{argv + names + 5, argv + argc};
 
     if (strcmp(argv[7], "--size")) {
@@ -147,12 +147,12 @@ int main(int argc, char** argv) {
     for (int i = 0; i < 100; i++) {
         ObjPool::Ref scratch = ObjPool::fromMemory();
 
-        compile(*scratch, shader, options);
+        generic ? compileGeneric(*scratch, shader) : compile(*scratch, shader, options);
     }
 
     sysE << StringView(u8"compile ") << (monotonicNowUs() - start) * 10 << StringView(u8" ns") << endL;
 
-    CompiledShader compiled = compile(*owner, shader, options);
+    CompiledShader compiled = generic ? compileGeneric(*owner, shader) : compile(*owner, shader, options);
 
     sysO << (generic ? compiled.constants : compiled.code);
 

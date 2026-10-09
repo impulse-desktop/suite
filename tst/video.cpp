@@ -835,21 +835,17 @@ VideoFactory::VideoFactory(ObjPool* pool_, Ui* ui_, const VideoShader& facts_, b
 }
 
 RenderShader& VideoFactory::shader(const ShaderOptions& options) {
-    ShaderOptions wanted = options;
-
-    wanted.generic = generic;
-
     for (const Made& known : made) {
-        if (known.options.target == wanted.target && known.options.output == wanted.output && known.options.tiles == wanted.tiles && known.options.size[0] == wanted.size[0] && known.options.size[1] == wanted.size[1]) {
+        if (known.options.target == options.target && known.options.output == options.output && known.options.tiles == options.tiles && known.options.size[0] == options.size[0] && known.options.size[1] == options.size[1]) {
             return *known.shader;
         }
     }
 
     ScopedPtr<ObjPool> scratch{ObjPool::fromMemoryRaw()};
-    CompiledShader code = compile(*scratch.ptr, facts, wanted);
-    RenderShader* compiled = ui->compileKernel(*pool, code, facts.tile, wanted);
+    CompiledShader code = generic ? compileGeneric(*scratch.ptr, facts) : compile(*scratch.ptr, facts, options);
+    RenderShader* compiled = ui->compileKernel(*pool, code, facts.tile, options);
 
-    made.pushBack(Made{wanted, compiled});
+    made.pushBack(Made{options, compiled});
 
     return *compiled;
 }

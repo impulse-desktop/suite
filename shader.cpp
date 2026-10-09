@@ -4782,19 +4782,10 @@ namespace {
 CompiledShader compile(ObjPool& pool, const VideoShader& shader, const ShaderOptions& options) {
     static constexpr ShaderParameter kernelParameters[] = {{ShaderInput::TargetSize, 0, 8}, {ShaderInput::VideoOrigin, 8, 8}, {ShaderInput::TilesAcross, 16, 4}, {ShaderInput::FirstTile, 20, 4}, {ShaderInput::White, 24, 4}, {ShaderInput::Words, 0, 0}, {ShaderInput::Headers, 0, 0}, {ShaderInput::List, 0, 0}, {ShaderInput::Ops, 0, 0}, {ShaderInput::Tiles, 0, 0}, {ShaderInput::Target, 0, 0}};
     static constexpr ShaderParameter layerParameters[] = {{ShaderInput::TargetSize, 0, 8}, {ShaderInput::VideoOrigin, 8, 8}, {ShaderInput::TilesAcross, 16, 4}, {ShaderInput::FirstTile, 20, 4}, {ShaderInput::White, 24, 4}, {ShaderInput::Words, 0, 0}};
-    static constexpr ShaderParameter genericLayerParameters[] = {{ShaderInput::TargetSize, 0, 8}, {ShaderInput::VideoOrigin, 8, 8}, {ShaderInput::TilesAcross, 16, 4}, {ShaderInput::FirstTile, 20, 4}, {ShaderInput::White, 24, 4}, {ShaderInput::BoxSize, 32, 8}, {ShaderInput::Constant, 0, sizeof(Facts)}, {ShaderInput::Words, 0, 0}};
     bool mixed = options.tiles == ShaderTiles::Mixed;
 
     if (!shader.tile || shader.tile > 32) {
         fail(StringView(u8"a video layer has an invalid tile"));
-    }
-
-    if (options.generic) {
-        Facts* facts = (Facts*)pool.allocate(sizeof(Facts));
-
-        describeGeneric(shader, *facts);
-
-        return CompiledShader{StringView(), genericLayerParameters, (u32)sizeof(genericLayerParameters) / (u32)sizeof(ShaderParameter), StringView((const u8*)facts, sizeof(Facts))};
     }
 
     CompiledShader out{StringView(), mixed ? layerParameters : kernelParameters, (u32)(mixed ? sizeof(layerParameters) : sizeof(kernelParameters)) / (u32)sizeof(ShaderParameter), StringView()};
@@ -4821,4 +4812,18 @@ CompiledShader compile(ObjPool& pool, const VideoShader& shader, const ShaderOpt
     }
 
     return out;
+}
+
+CompiledShader compileGeneric(ObjPool& pool, const VideoShader& shader) {
+    static constexpr ShaderParameter parameters[] = {{ShaderInput::TargetSize, 0, 8}, {ShaderInput::VideoOrigin, 8, 8}, {ShaderInput::TilesAcross, 16, 4}, {ShaderInput::FirstTile, 20, 4}, {ShaderInput::White, 24, 4}, {ShaderInput::BoxSize, 32, 8}, {ShaderInput::Constant, 0, sizeof(Facts)}, {ShaderInput::Words, 0, 0}};
+
+    if (!shader.tile || shader.tile > 32) {
+        fail(StringView(u8"a video layer has an invalid tile"));
+    }
+
+    Facts* facts = (Facts*)pool.allocate(sizeof(Facts));
+
+    describeGeneric(shader, *facts);
+
+    return CompiledShader{StringView(), parameters, (u32)sizeof(parameters) / (u32)sizeof(ShaderParameter), StringView((const u8*)facts, sizeof(Facts))};
 }
