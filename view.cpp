@@ -60,6 +60,7 @@ namespace {
     constexpr float sideShare = .2f;
     // the mark of the current row: a frame inside its thumbnail's edge
     constexpr Design mark = 4_d;
+    constexpr Design panStep = 48_d;
     constexpr float bulge = .2f;
     constexpr Design bulgeReach = 240_d;
     constexpr float pi = 3.14159265f;
@@ -434,10 +435,11 @@ namespace {
         void keys();
         void step(long delta);
         void draw();
-        void drawTools();
+        void drawTools(float width);
         void drawGallery(ImVec2 size);
         void galleryKeys(ImGuiID owner);
-        void drawCanvas();
+        void drawCanvas(ImVec2 size);
+        void canvasKeys(ImGuiID owner);
         void drawInfo();
     };
 
@@ -1025,6 +1027,47 @@ void ViewApp::keys() {
     }
 }
 
+static bool holdBehavior(const ImRect& bb, ImGuiID id, bool* hovered, bool* keyboard, ImGuiButtonFlags flags) {
+    ImGuiContext& context = *GImGui;
+    ImGuiWindow* window = context.CurrentWindow;
+    bool pressed = false;
+
+    *hovered = ImGui::ItemHoverable(bb, id, context.LastItemData.ItemFlags);
+
+    for (int button = ImGuiMouseButton_Left; button <= ImGuiMouseButton_Middle; button++) {
+        if (*hovered && (flags & (ImGuiButtonFlags_MouseButtonLeft << button)) && ImGui::IsMouseClicked(button)) {
+            ImGui::SetActiveID(id, window);
+            context.ActiveIdMouseButton = button;
+            pressed = true;
+        }
+    }
+
+    if (context.NavActivateId == id) {
+        ImGui::SetActiveID(id, window);
+    }
+
+    if (pressed || context.NavActivateId == id) {
+        ImGui::SetFocusID(id, window);
+        ImGui::FocusWindow(window);
+    }
+
+    if (context.ActiveId == id && context.ActiveIdSource == ImGuiInputSource_Mouse && !ImGui::IsMouseDown(context.ActiveIdMouseButton)) {
+        ImGui::ClearActiveID();
+    }
+
+    if (context.ActiveId == id && context.ActiveIdSource != ImGuiInputSource_Mouse && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        ImGui::ClearActiveID();
+    }
+
+    *keyboard = context.ActiveId == id && context.ActiveIdSource != ImGuiInputSource_Mouse;
+
+    if (*keyboard) {
+        context.ActiveIdAllowOverlap = true;
+    }
+
+    return pressed;
+}
+
 // the rows down the list, the list's width each and the image's shape,
 // one against the next, the current one framed inside its edge in the
 // colour of an active item; the thumbnails bulge towards the pointer,
@@ -1041,27 +1084,12 @@ void ViewApp::drawGallery(ImVec2 size) {
         return;
     }
 
-    ImGuiContext& context = *GImGui;
-    bool hovered = ImGui::ItemHoverable(bb, id, context.LastItemData.ItemFlags);
-    bool clicked = hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+    bool hovered = false;
+    bool keyboard = false;
+    bool clicked = holdBehavior(bb, id, &hovered, &keyboard, ImGuiButtonFlags_MouseButtonLeft);
 
-    if (clicked || context.NavActivateId == id) {
-        ImGui::SetActiveID(id, window);
-        ImGui::SetFocusID(id, window);
-        ImGui::FocusWindow(window);
-    }
-
-    if (context.ActiveId == id && context.ActiveIdSource == ImGuiInputSource_Mouse && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-        ImGui::ClearActiveID();
-    }
-
-    if (context.ActiveId == id && context.ActiveIdSource != ImGuiInputSource_Mouse) {
-        if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-            ImGui::ClearActiveID();
-        } else {
-            context.ActiveIdAllowOverlap = true;
-            galleryKeys(id);
-        }
+    if (keyboard) {
+        galleryKeys(id);
     }
 
     if (hovered) {
@@ -1422,20 +1450,56 @@ void ViewApp::drawInfo() {
     }
 }
 
-void ViewApp::drawCanvas() {
-    ImVec2 origin = ImGui::GetCursorScreenPos();
-    ImVec2 size = ImGui::GetContentRegionAvail();
+void ViewApp::canvasKeys(ImGuiID owner) {
+    float delta = ui->px(panStep);
 
-    if (size.x < 1.f || size.y < 1.f) {
+    if (ImGui::Shortcut(ImGuiKey_LeftArrow, ImGuiInputFlags_Repeat, owner)) {
+        panX += delta;
+    }
+
+    if (ImGui::Shortcut(ImGuiKey_RightArrow, ImGuiInputFlags_Repeat, owner)) {
+        panX -= delta;
+    }
+
+    if (ImGui::Shortcut(ImGuiKey_UpArrow, ImGuiInputFlags_Repeat, owner)) {
+        panY += delta;
+    }
+
+    if (ImGui::Shortcut(ImGuiKey_DownArrow, ImGuiInputFlags_Repeat, owner)) {
+        panY -= delta;
+    }
+}
+
+void ViewApp::drawCanvas(ImVec2 size) {
+    ImGuiWindow* window = ImGui::GetCurrentWindow();
+    ImGuiID id = window->GetID("##canvas");
+    ImVec2 origin = ImGui::GetCursorScreenPos();
+    ImRect bb(origin, ImVec2(origin.x + size.x, origin.y + size.y));
+
+    ImGui::ItemSize(size);
+
+    if (!ImGui::ItemAdd(bb, id)) {
         return;
     }
 
-    ImGui::InvisibleButton("view", size, ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonMiddle);
+    bool hovered = false;
+    bool keyboard = false;
 
-    bool hovered = ImGui::IsItemHovered();
-    ImDrawList* dl = ImGui::GetWindowDrawList();
+    holdBehavior(bb, id, &hovered, &keyboard, ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonMiddle);
 
-    if (entries.empty()) {
+    if (keyboard) {
+        canvasKeys(id);
+    }
+
+    if (hovered) {
+        ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelY);
+    }
+
+    ImGui::RenderNavCursor(bb, id);
+
+    ImDrawList* dl = window->DrawList;
+
+    if (entries.empty() || size.x < 1.f || size.y < 1.f) {
         return;
     }
 
@@ -1489,17 +1553,21 @@ void ViewApp::drawCanvas() {
     const ImVec2 uv[4] = {ImVec2(0, 0), ImVec2(1, 0), ImVec2(1, 1), ImVec2(0, 1)};
     int r = rotation;
 
+    dl->PushClipRect(bb.Min, bb.Max, true);
     dl->AddImageQuad(shown->texture, p0, ImVec2(p1.x, p0.y), p1, ImVec2(p0.x, p1.y), uv[(4 - r) & 3], uv[(5 - r) & 3], uv[(6 - r) & 3], uv[(7 - r) & 3]);
+    dl->PopClipRect();
 }
 
 // the toolbar over the list: the info panel's switch, zoom in and out by
 // the wheel's step, and the zoom as a list of steps with the fit first
-void ViewApp::drawTools() {
+void ViewApp::drawTools(float width) {
     static const i64 steps[] = {25, 50, 75, 100, 150, 200, 300, 400};
     i64 percent = (i64)(zoom * 100.f + .5f);
     StringBuilder current;
 
     current << percent << StringView(u8"%");
+
+    float left = ImGui::GetCursorScreenPos().x;
 
     if (ImGui::Checkbox("I", &info)) {
         TRACE(ui, info ? StringView(u8"info on") : StringView(u8"info off"));
@@ -1518,7 +1586,7 @@ void ViewApp::drawTools() {
     }
 
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(-FLT_MIN);
+    ImGui::SetNextItemWidth(max(1.f, left + width - ImGui::GetCursorScreenPos().x));
 
     if (ImGui::BeginCombo("##zoom", fit ? "Fit" : (const char*)current.cStr())) {
         if (ImGui::Selectable("Fit", fit)) {
@@ -1556,18 +1624,16 @@ void ViewApp::draw() {
     // stands beside both
     if (left) {
         ImGui::BeginGroup();
-        ImGui::BeginChild("tools", ImVec2(sideW, ImGui::GetFrameHeight()), 0, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-        drawTools();
-        ImGui::EndChild();
+        drawTools(sideW);
         drawGallery(ImVec2(sideW, ImGui::GetContentRegionAvail().y));
         ImGui::EndGroup();
         ImGui::SameLine();
     }
 
     // the canvas leaves the info panel its width and the spacing before it
-    ImGui::BeginChild("canvas", ImVec2(right ? -(sideW + ImGui::GetStyle().ItemSpacing.x) : 0.f, 0.f), 0, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-    drawCanvas();
-    ImGui::EndChild();
+    ImVec2 room = ImGui::GetContentRegionAvail();
+
+    drawCanvas(ImVec2(right ? room.x - sideW - ImGui::GetStyle().ItemSpacing.x : room.x, room.y));
 
     if (right) {
         ImGui::SameLine();
