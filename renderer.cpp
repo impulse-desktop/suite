@@ -1959,6 +1959,7 @@ static Renderer* createRenderer(ObjPool& pool, plt::Platform& platform, plt::Win
 
     #include <std/alg/defer.h>
     #include <std/dbg/verify.h>
+    #include <std/lib/list.h>
     #include <std/lib/vector.h>
     #include <std/str/builder.h>
     #include <std/thr/runable.h>
@@ -2065,7 +2066,7 @@ namespace {
     struct VulkanImage;
     struct Gpu;
 
-    struct Flight final: public plt::PollCallback {
+    struct Flight final: public plt::PollCallback, public IntrusiveNode {
         Gpu* gpu;
         u64 serial;
         plt::PollWaiter waiter;
@@ -2098,6 +2099,7 @@ namespace {
         SmallObjAllocator* smallObjects = nullptr;
         PFN_vkGetFenceFdKHR fenceFd = nullptr;
         Vector<VulkanImage*> drawn;
+        IntrusiveList flying;
         u64 submitted = 0;
         u64 completed = 0;
         u64 frames = 0;
@@ -4132,6 +4134,7 @@ void Gpu::track(VkFence fence) {
     if (fd < 0) {
         landed(flight);
     } else {
+        flying.pushBack(flight);
         platform->poller()->arm(flight->waiter);
     }
 }
@@ -4142,6 +4145,7 @@ void Gpu::landed(Flight* flight) {
     if (flight->serial > completed) {
         completed = flight->serial;
     }
+    flight->unlink();
     done.xchg(flight->images);
     smallObjects->release(flight);
     for (VulkanImage* image : done) {
@@ -4567,6 +4571,14 @@ static Renderer* createRenderer(ObjPool& pool, plt::Platform& platform, plt::Win
     pio.Renderer_TextureMaxHeight = (int)props.limits.maxImageDimension2D;
     pooledGuard(pool, [&gpu] {
         vkDeviceWaitIdle(gpu.device);
+
+        while (!gpu.flying.empty()) {
+            Flight* flight = static_cast<Flight*>(gpu.flying.popFront());
+
+            gpu.platform->poller()->cancel(flight->waiter);
+            close(flight->waiter.fd.fd);
+            gpu.smallObjects->release(flight);
+        }
 
         for (ImTextureData* data : ImGui::GetPlatformIO().Textures) {
             Texture* texture = (Texture*)data->BackendUserData;
