@@ -430,6 +430,7 @@ namespace {
         void setZoom(float value);
         void fitView();
         void keys();
+        void step(long delta);
         void draw();
         void drawTools();
         void drawGallery();
@@ -880,6 +881,22 @@ void ViewApp::replaceShown(const ShownImage* next) {
     ui->requestFrame();
 }
 
+void ViewApp::step(long delta) {
+    if (entries.empty()) {
+        return;
+    }
+
+    long last = (long)entries.length() - 1;
+    long next = (long)current + delta;
+
+    next = next < 0 ? 0 : next > last ? last : next;
+
+    if ((size_t)next != current) {
+        scrollToCurrent = true;
+        show((size_t)next);
+    }
+}
+
 void ViewApp::setZoom(float value) {
     zoom = clampf(value, zoomMin, zoomMax);
     fit = false;
@@ -900,25 +917,46 @@ void ViewApp::keys() {
         leaving = true;
     }
 
-    if (ImGui::Shortcut(ImGuiKey_W) || ImGui::Shortcut(ImGuiKey_0) || ImGui::Shortcut(ImGuiKey_Keypad0)) {
+    bool fitting = ImGui::Shortcut(ImGuiKey_W);
+
+    fitting |= ImGui::Shortcut(ImGuiKey_0);
+    fitting |= ImGui::Shortcut(ImGuiKey_Keypad0);
+
+    if (fitting) {
         fitView();
     }
 
-    if (ImGui::Shortcut(ImGuiKey_1) || ImGui::Shortcut(ImGuiKey_Keypad1)) {
+    bool actual = ImGui::Shortcut(ImGuiKey_1);
+
+    actual |= ImGui::Shortcut(ImGuiKey_Keypad1);
+
+    if (actual) {
         panX = 0.f;
         panY = 0.f;
         setZoom(1.f);
     }
 
-    if (ImGui::Shortcut(ImGuiKey_Equal, ImGuiInputFlags_Repeat) || ImGui::Shortcut(ImGuiKey_KeypadAdd, ImGuiInputFlags_Repeat)) {
+    bool closer = ImGui::Shortcut(ImGuiKey_Equal, ImGuiInputFlags_Repeat);
+
+    closer |= ImGui::Shortcut(ImGuiKey_KeypadAdd, ImGuiInputFlags_Repeat);
+
+    if (closer) {
         setZoom(zoom * zoomStep);
     }
 
-    if (ImGui::Shortcut(ImGuiKey_Minus, ImGuiInputFlags_Repeat) || ImGui::Shortcut(ImGuiKey_KeypadSubtract, ImGuiInputFlags_Repeat)) {
+    bool farther = ImGui::Shortcut(ImGuiKey_Minus, ImGuiInputFlags_Repeat);
+
+    farther |= ImGui::Shortcut(ImGuiKey_KeypadSubtract, ImGuiInputFlags_Repeat);
+
+    if (farther) {
         setZoom(zoom / zoomStep);
     }
 
-    if (ImGui::Shortcut(ImGuiKey_F) || ImGui::Shortcut(ImGuiKey_F11)) {
+    bool flip = ImGui::Shortcut(ImGuiKey_F);
+
+    flip |= ImGui::Shortcut(ImGuiKey_F11);
+
+    if (flip) {
         fullscreen = !fullscreen;
         ui->requestFullscreen(fullscreen);
         TRACE(ui, fullscreen ? StringView(u8"fullscreen on") : StringView(u8"fullscreen off"));
@@ -935,6 +973,50 @@ void ViewApp::keys() {
     if (ImGui::Shortcut(ImGuiKey_I)) {
         info = !info;
         TRACE(ui, info ? StringView(u8"info on") : StringView(u8"info off"));
+    }
+
+    if (ImGui::GetIO().NavVisible) {
+        return;
+    }
+
+    bool next = ImGui::Shortcut(ImGuiKey_RightArrow, ImGuiInputFlags_Repeat);
+
+    next |= ImGui::Shortcut(ImGuiKey_DownArrow, ImGuiInputFlags_Repeat);
+    next |= ImGui::Shortcut(ImGuiKey_Space, ImGuiInputFlags_Repeat);
+    next |= ImGui::Shortcut(ImGuiKey_PageDown, ImGuiInputFlags_Repeat);
+    next |= ImGui::Shortcut(ImGuiKey_J, ImGuiInputFlags_Repeat);
+    next |= ImGui::Shortcut(ImGuiKey_N, ImGuiInputFlags_Repeat);
+
+    if (next) {
+        step(1);
+    }
+
+    bool previous = ImGui::Shortcut(ImGuiKey_LeftArrow, ImGuiInputFlags_Repeat);
+
+    previous |= ImGui::Shortcut(ImGuiKey_UpArrow, ImGuiInputFlags_Repeat);
+    previous |= ImGui::Shortcut(ImGuiKey_Backspace, ImGuiInputFlags_Repeat);
+    previous |= ImGui::Shortcut(ImGuiKey_PageUp, ImGuiInputFlags_Repeat);
+    previous |= ImGui::Shortcut(ImGuiKey_K, ImGuiInputFlags_Repeat);
+    previous |= ImGui::Shortcut(ImGuiKey_P, ImGuiInputFlags_Repeat);
+
+    if (previous) {
+        step(-1);
+    }
+
+    bool first = ImGui::Shortcut(ImGuiKey_Home);
+
+    first |= ImGui::Shortcut(ImGuiKey_G);
+
+    if (first) {
+        step(-(long)entries.length());
+    }
+
+    bool last = ImGui::Shortcut(ImGuiKey_End);
+
+    last |= ImGui::Shortcut(ImGuiMod_Shift | ImGuiKey_G);
+
+    if (last) {
+        step((long)entries.length());
     }
 }
 

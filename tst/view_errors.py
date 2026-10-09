@@ -11,7 +11,7 @@ import os
 import shutil
 from pathlib import Path
 
-from session import Session, png, write_png
+from session import KEY_RIGHT, Session, png, write_png
 
 with Session("view_errors", tool="view") as s:
     code, log = s.run()
@@ -57,15 +57,9 @@ with Session("view_errors", tool="view") as s:
     s.said("cannot show bad.png: ")
     s.said("no thumbnail bad.png: ")
     s.said("thumbnail good.png")
-    s.close()
-
-    s.launch(str(pics / "good.png"))
-    s.focus()
+    s.tap(KEY_RIGHT)
     s.said("showing good.png 64x48")
-    s.close()
-
-    s.launch(str(pics / "trunc.png"))
-    s.focus()
+    s.tap(KEY_RIGHT)
     s.said("selected trunc.png")
     s.said("cannot show trunc.png: ")
     s.close()

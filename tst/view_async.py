@@ -5,7 +5,7 @@ import errno
 import os
 from pathlib import Path
 
-from session import KEY_I, Session, near, png, write_png
+from session import KEY_HOME, KEY_I, KEY_LEFT, KEY_RIGHT, Session, near, png, write_png
 
 
 with Session("view_async", tool="view") as s:
@@ -36,7 +36,7 @@ with Session("view_async", tool="view") as s:
     s.said("loading image b.png")
     shows((255, 0, 0), "old-image-during-load")
     s.same(first_panel, "old-panel-during-load", region=panel)
-    s.click(100, 400)
+    s.tap(KEY_RIGHT)
     s.said("showing c.png")
     shows((0, 0, 255), "newer-selection")
     s.changed(first_panel, "newer-panel", region=panel, threshold=20)
@@ -63,11 +63,11 @@ with Session("view_async", tool="view") as s:
     s.same(newer_panel, "late-success-panel-ignored", region=panel)
 
     # A stale error must also leave the newer selection alone.
-    s.click(100, 220)
+    s.tap(KEY_LEFT)
     s.said("loading image b.png", 2)
     shows((0, 0, 255), "old-image-during-second-load")
     s.same(newer_panel, "old-panel-during-second-load", region=panel)
-    s.click(100, 100)
+    s.tap(KEY_HOME)
     s.said("showing a.png", 2)
     release(b"not an image")
     s.said("discarded image b.png", 2)
@@ -76,7 +76,7 @@ with Session("view_async", tool="view") as s:
 
     # Exit while a worker is blocked in file I/O: the test build joins it
     # once its read ends.
-    s.click(100, 220)
+    s.tap(KEY_RIGHT)
     s.said("loading image b.png", 3)
     s.close_releasing([blocked])
 

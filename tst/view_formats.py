@@ -6,7 +6,7 @@ import shutil
 import struct
 from pathlib import Path
 
-from session import Session, near, png
+from session import KEY_RIGHT, Session, near, png
 
 with Session("view_formats", tool="view") as s:
     pics = s.artifacts / "pics"
@@ -38,12 +38,15 @@ with Session("view_formats", tool="view") as s:
     for name, colour in (("h.jpg", (255, 0, 0)), ("i.webp", (0, 255, 0)), ("j.jxl", (0, 0, 255)), ("k.gif", (255, 255, 0))):
         shutil.copy(kept / f"solid_{name}", pics / name)
         files.append((name, None, colour))
-    for name, _, colour in files:
-        s.launch(str(pics / name))
-        s.focus()
-        r = s.window()["rect"]
-        canvas = (250, 0, r["width"] - 250, r["height"] - 30)
+    s.launch(str(pics))
+    s.focus()
+    s.said(f"listed {len(files)}")
+    r = s.window()["rect"]
+    canvas = (250, 0, r["width"] - 250, r["height"] - 30)
+    for i, (name, _, colour) in enumerate(files):
+        if i:
+            s.tap(KEY_RIGHT)
         s.said(f"showing {name} {w}x{h}")
         s.wait(lambda: near(s.capture(name, region=canvas), colour, tolerance=12) >= n * 9 // 10, f"the canvas showing {name}")
-        s.close()
+    s.close()
     print("OK: every format decodes to its pixels")
