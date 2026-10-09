@@ -9,6 +9,15 @@ on:
       repeat:
         description: Runs of each scenario
         default: "10"
+      trace:
+        description: The tools trace their frames and keys
+        type: boolean
+        default: false
+      platform:
+        description: Where the scenarios run
+        type: choice
+        options: [both, darwin, ubuntu]
+        default: both
 
 permissions:
   contents: read
@@ -20,6 +29,7 @@ env:
 jobs:
   stress-darwin:
     name: Stress Darwin
+    if: inputs.platform != 'ubuntu'
     runs-on: macos-15
     timeout-minutes: 180
     steps:
@@ -29,6 +39,7 @@ jobs:
       - name: Build the tools and repeat the scenarios
         run: |
           set -o pipefail
+          if [ "${{ inputs.trace }}" = true ]; then export IM_TRACE_FRAMES=1; fi
           bash dev/ci_darwin.sh test 2>&1 | tee "$RUNNER_TEMP/stress-darwin.log"
 
       - name: Upload what the failed scenarios captured
@@ -44,6 +55,7 @@ jobs:
 
   stress-ubuntu:
     name: Stress Ubuntu
+    if: inputs.platform != 'darwin'
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     steps:
@@ -59,7 +71,8 @@ jobs:
       - name: Build the tools and repeat the scenarios
         run: |
           set -o pipefail
-          docker run --rm --device /dev/udmabuf --env CI_TEST_FLAGS \
+          if [ "${{ inputs.trace }}" = true ]; then export IM_TRACE_FRAMES=1; fi
+          docker run --rm --device /dev/udmabuf --env CI_TEST_FLAGS --env IM_TRACE_FRAMES \
             --volume "$GITHUB_WORKSPACE:/workspace" --workdir /workspace \
             "$UBUNTU_IMAGE" sh dev/ci_linux.sh test clang \
             2>&1 | tee "$RUNNER_TEMP/stress-ubuntu.log"

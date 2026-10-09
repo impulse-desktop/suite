@@ -119,22 +119,6 @@ def debugger():
     return shutil.which("gdb")
 
 
-def debugged(command):
-    tool = debugger()
-    if tool is None:
-        return command
-    if sys.platform == "darwin":
-        return [
-            tool, "--batch", "--no-lldbinit",
-            "-O", "settings set interpreter.prompt-on-quit false",
-            "-O", "settings set platform.plugin.darwin.ignored-exceptions EXC_BAD_ACCESS|EXC_BAD_INSTRUCTION|EXC_ARITHMETIC",
-            "-o", "process launch", "-o", LLDB_EXIT,
-            "-k", "thread backtrace all", "-k", "thread backtrace", "-k", LLDB_CRASH,
-            "--", *command,
-        ]
-    return [tool, "-q", "-nx", "-batch", "-x", str(Path(__file__).with_name("stacks.gdb")), "--args", *command]
-
-
 class Skip(Exception):
     """The compositor lacks what the scenario needs; the scenario ends as
     skipped, saying what."""
@@ -164,6 +148,7 @@ class Session:
         self.runtime = None
         self.env = os.environ.copy()
         self.env["IM_SCALE"] = "1"
+        self.env["SHELL"] = "/bin/sh"
         for key in ("DISPLAY", "WAYLAND_DISPLAY", "WAYLAND_SOCKET", "SWAYSOCK"):
             self.env.pop(key, None)
 
@@ -220,7 +205,7 @@ class Session:
             self.socket = self.wait(lambda: next(runtime.glob("sway-ipc.*.sock"), None), "Sway IPC", client=False)
             self.env["WAYLAND_DISPLAY"] = wayland.name
             self.env["SWAYSOCK"] = str(self.socket)
-            self.devices = self.start(debugged([str(self.devices_binary)]), "devices", stdin=subprocess.PIPE)
+            self.devices = self.start(self.debugged([str(self.devices_binary)], "devices"), "devices", stdin=subprocess.PIPE)
             self.wait(lambda: "READY" in (self.artifacts / "devices.log").read_text(), "virtual devices", client=False)
             for line in (self.artifacts / "devices.log").read_text().splitlines():
                 word = line.split()
@@ -265,6 +250,27 @@ class Session:
         env.update(overrides)
         return env
 
+    def debugged(self, command, label):
+        tool = debugger()
+        if tool is None:
+            return command
+        if sys.platform == "darwin":
+            return [
+                tool, "--batch", "--no-lldbinit",
+                "-O", "settings set interpreter.prompt-on-quit false",
+                "-O", "settings set platform.plugin.darwin.ignored-exceptions EXC_BAD_ACCESS|EXC_BAD_INSTRUCTION|EXC_ARITHMETIC",
+                "-o", "process launch", "-o", LLDB_EXIT,
+                "-k", "thread backtrace all", "-k", "thread backtrace", "-k", LLDB_CRASH,
+                "--", *command,
+            ]
+        stacks = self.artifacts / f"{label}-stacks.log"
+        return [
+            tool, "-q", "-nx", "-batch",
+            "-iex", f"set logging file {stacks}", "-iex", "set logging overwrite on", "-iex", "set logging redirect on",
+            "-iex", "set logging debugredirect on", "-iex", "set logging enabled on",
+            "-x", str(Path(__file__).with_name("stacks.gdb")), "--args", *command,
+        ]
+
     def start(self, command, label, stdin=None, cwd=None, unset=(), fd3=None, **environment):
         """A process of the session; fd3 names a descriptor it gets as its
         fd 3, as the compositor hands the tool a capture."""
@@ -285,7 +291,7 @@ class Session:
         names the variables it must not see); a mapped launch waits for
         its window."""
         self.clients += 1
-        self.client = self.start(debugged([self.link, *args]), f"client{self.clients}", cwd=cwd, unset=unset, fd3=fd3, **environment)
+        self.client = self.start(self.debugged([self.link, *args], f"client{self.clients}"), f"client{self.clients}", cwd=cwd, unset=unset, fd3=fd3, **environment)
         if mapped:
             self.wait(lambda: self.windows(), "mapped window")
         return self.client
@@ -298,7 +304,7 @@ class Session:
         log = self.artifacts / f"client{self.clients}.log"
         with log.open("wb") as out:
             process = subprocess.Popen(
-                debugged([str(command or self.link), *args]), env=self.environment(unset, environment), stdout=out, stderr=subprocess.STDOUT,
+                self.debugged([str(command or self.link), *args], f"client{self.clients}"), env=self.environment(unset, environment), stdout=out, stderr=subprocess.STDOUT,
                 cwd=cwd, **as_fd3(fd3),
             )
             try:

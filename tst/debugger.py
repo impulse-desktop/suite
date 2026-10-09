@@ -11,6 +11,8 @@ with Session("debugger") as s:
     assert code == 3, f"exit status {code}\n{log}"
     assert "fault: none" in log, log
     code, log = s.run("fault", command=helper)
+    stacks = s.artifacts / f"client{s.clients}-stacks.log"
+    log += stacks.read_text(errors="replace") if stacks.exists() else ""
     assert code == 128 + signal.SIGSEGV, f"exit status {code}\n{log}"
     assert "fault.cpp:" in log, log
     print(f"exit status {code}, the stacks in the log")

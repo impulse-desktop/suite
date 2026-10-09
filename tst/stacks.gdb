@@ -1,6 +1,6 @@
 set pagination off
 set confirm off
-set startup-with-shell off
+set auto-load off
 set disable-randomization off
 set print thread-events off
 set print inferior-events off
