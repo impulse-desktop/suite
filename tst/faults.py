@@ -10,8 +10,8 @@ a swapchain the driver refuses; a discrete GPU is taken as it comes, and
 a surface's image count limits are honoured. An encoder without memory
 for libpng's or libjxl's objects, or a JPEG XL encoder that fails to
 produce its output, makes a save fail without a file: the window a save
-never shows comes up on the error panel, and Escape ends the tool
-cleanly; with memory to spare the save writes its file without a window."""
+never shows comes up on the error panel, and closing the window ends
+the tool cleanly; with memory to spare the save writes its file without a window."""
 
 import time
 

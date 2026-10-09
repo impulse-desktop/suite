@@ -659,10 +659,6 @@ namespace {
             reset = true;
         }
 
-        if (ImGui::Shortcut(ImGuiKey_Escape, ImGuiInputFlags_RouteFromRootWindow)) {
-            result = -1;
-        }
-
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::Spacing();

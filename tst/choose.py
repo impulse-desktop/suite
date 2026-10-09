@@ -1,13 +1,13 @@
 """The chooser: `imchoose DIR` lists the directory, the line at the bottom
 holds its path and what is typed after the slash narrows the list; Enter
 on a directory enters it, on a file takes it and the path comes out on
-stdout with status 0; Escape leaves the line, and a second Escape leaves
-with status 1 and nothing; a filter
+stdout with status 0; closing the window leaves with status 1 and
+nothing; a filter
 of globs or types keeps the rest out; `--save --name N` answers with the
 name typed, asking before an existing file is replaced; `--directory`
 answers with the directory; Ctrl+G shows the grid with thumbnails."""
 
-from session import KEY_BACKSPACE, KEY_ENTER, KEY_ESC, KEY_G, KEY_LEFTCTRL, Session, write_png
+from session import KEY_BACKSPACE, KEY_ENTER, KEY_G, KEY_LEFTCTRL, Session, write_png
 
 
 def answer(s):
@@ -52,7 +52,7 @@ with Session("choose", tool="choose") as s:
     assert s.finished() == 0
     assert answer(s) == [str(root / "pics" / "b.png")], f"the narrowed answer is wrong: {answer(s)!r}"
 
-    # Backspace on an empty name goes up, a typed directory goes down, Escape leaves
+    # Backspace on an empty name goes up, a typed directory goes down, closing leaves
     s.launch(str(root / "pics"))
     s.focus()
     s.said("listed 5")
@@ -62,12 +62,10 @@ with Session("choose", tool="choose") as s:
     s.type("pics/")
     s.said(f"going {root / 'pics'}", 2)
     s.said("listed 5", 2)
-    s.tap(KEY_ESC)
-    s.tap(KEY_ESC, client=False)
-    s.said("cancelled")
+    s.shut()
     s.gone()
-    assert s.finished() == 1, "Escape did not exit 1"
-    assert answer(s) == [], f"Escape answered: {answer(s)!r}"
+    assert s.finished() == 1, "closing did not exit 1"
+    assert answer(s) == [], f"closing answered: {answer(s)!r}"
 
     # save: the name typed is the answer; an existing one asks first
     s.launch("--save", "--name", "out.png", str(root / "pics"))
@@ -111,8 +109,7 @@ with Session("choose", tool="choose") as s:
     s.said("grid on")
     s.said("thumbnail a.png")
     s.said("thumbnail b.png")
-    s.tap(KEY_ESC)
-    s.tap(KEY_ESC, client=False)
+    s.shut()
     s.gone()
     assert s.finished() == 1
     print("OK: the chooser lists, narrows, walks, saves, picks a directory and draws thumbnails")

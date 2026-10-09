@@ -2278,7 +2278,7 @@ void Screen::setClock(double base, bool running, u64 at) {
 void Screen::keys() {
     double at = position(monotonicNowUs());
 
-    if (ImGui::Shortcut(ImGuiKey_Escape) || ImGui::Shortcut(ImGuiKey_Q)) {
+    if (ImGui::Shortcut(ImGuiKey_Q)) {
         leaving = true;
     }
 

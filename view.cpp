@@ -896,7 +896,7 @@ void ViewApp::fitView() {
 }
 
 void ViewApp::keys() {
-    if (ImGui::Shortcut(ImGuiKey_Escape) || ImGui::Shortcut(ImGuiKey_Q)) {
+    if (ImGui::Shortcut(ImGuiKey_Q)) {
         leaving = true;
     }
 

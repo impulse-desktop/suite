@@ -1,12 +1,12 @@
 """`imscreenshot PATH` on files: a raw capture file loads through the file
 path and Enter saves it as JPEG XL into IM_SHOT_DIR; a file that is too
 small, one with a bad header and a truncated one each open the error
-panel, which Escape dismisses, and so does Enter."""
+panel, which closing the window dismisses, and so does Enter."""
 
 import struct
 import time
 
-from session import KEY_ENTER, KEY_ESC, Session, is_jxl
+from session import KEY_ENTER, Session, is_jxl
 
 with Session("file") as s:
     w, h = 64, 48
@@ -28,7 +28,7 @@ with Session("file") as s:
     assert saved.is_file() and saved.stat().st_size, "Enter did not save the file capture"
     assert is_jxl(saved), f"{saved} is not a JPEG XL stream"
 
-    for path, key in ((small, KEY_ESC), (bad, KEY_ESC), (trunc, KEY_ENTER)):
+    for path, key in ((small, None), (bad, None), (trunc, KEY_ENTER)):
         s.launch(str(path), IM_SHOT_DIR=str(shots), IM_SHOT_NAME="broken")
         s.focus()
         assert s.size() == (480, 180), f"{path.name}: not the error panel ({s.size()})"

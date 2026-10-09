@@ -494,18 +494,29 @@ class Session:
         path.write_bytes(struct.pack("<III", 0x31574D49, width, height) + data)
         return path
 
-    def close(self, code=KEY_ESC):
-        """Escape (or another key) leaves the tool; it must exit 0."""
-        self.tap(code, client=False)
+    def shut(self):
+        node = self.window()
+        self.ipc(f'[con_id={node["id"]}] kill')
+
+    def close(self, code=None):
+        """The compositor closes the window (or a key leaves the tool); it
+        must exit 0."""
+        if code is None:
+            self.shut()
+        else:
+            self.tap(code, client=False)
         self.gone()
         assert self.finished() == 0, "the tool did not exit cleanly"
 
-    def close_releasing(self, fifos, code=KEY_ESC):
-        """Escape leaves a tool whose workers may still read these FIFOs:
-        the test build joins its workers before it exits, so every FIFO a
-        worker opens gets a writer that closes at once, an end of file,
-        until the tool is gone; it must exit 0."""
-        self.tap(code, client=False)
+    def close_releasing(self, fifos, code=None):
+        """The compositor closes a tool whose workers may still read these
+        FIFOs: the test build joins its workers before it exits, so every
+        FIFO a worker opens gets a writer that closes at once, an end of
+        file, until the tool is gone; it must exit 0."""
+        if code is None:
+            self.shut()
+        else:
+            self.tap(code, client=False)
         deadline = time.monotonic() + 12
         while self.client.poll() is None:
             if time.monotonic() > deadline:

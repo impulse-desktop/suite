@@ -3,7 +3,7 @@ whose header claims a zero width or height, and shared-buffer metadata it
 cannot parse (too few, empty, negative or run-together fields, a field past
 64 bits, a GPU id that is not 32 lowercase hex digits, a zero width,
 height, stride or size), or whose buffer cannot be opened, each open the
-480x180 error panel, which Escape dismisses with status 0. Well-formed
+480x180 error panel, which closing the window dismisses with status 0. Well-formed
 metadata naming a GPU no device has gets no window: the tool says so and
 exits 1. Colour metadata it only partly understands falls back to SDR and
 still shows the image, and a ui scale below zero falls back to the default."""

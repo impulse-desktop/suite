@@ -2,7 +2,7 @@
 slider zooms the canvas in, the Reset button puts the view back exactly
 as it opened, and Ctrl+click on the slider makes it a text field."""
 
-from session import KEY_ESC, KEY_LEFTCTRL, Session
+from session import KEY_LEFTCTRL, Session
 
 with Session("panel_mouse") as s:
     w, h = 1280, 800
@@ -24,7 +24,7 @@ with Session("panel_mouse") as s:
     s.pointer(400, 300)
     s.same(opened, "reset")
     # Ctrl+click turns the slider into a text field, over which ImGui asks
-    # for the text cursor; Escape leaves the field and the editor
+    # for the text cursor
     s.key(KEY_LEFTCTRL, 1)
     s.click(100, 27)
     s.key(KEY_LEFTCTRL, 0)
@@ -32,6 +32,5 @@ with Session("panel_mouse") as s:
     s.changed(opened, "editing", threshold=200)
     s.pointer(120, 27)
     s.settled("hovering")
-    s.tap(KEY_ESC)
     s.close()
     print("OK: the zoom slider zooms, Reset restores the view, and Ctrl+click edits the zoom")

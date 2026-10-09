@@ -1274,10 +1274,6 @@ void ChooseApp::finish(bool ok) {
 }
 
 void ChooseApp::keys() {
-    if (ImGui::Shortcut(ImGuiKey_Escape)) {
-        finish(false);
-    }
-
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_H)) {
         showHidden = !showHidden;
         TRACE(ui, showHidden ? StringView(u8"hidden on") : StringView(u8"hidden off"));

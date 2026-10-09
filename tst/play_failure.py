@@ -1,6 +1,6 @@
 """A media the player cannot open ends it before its window; a failure while playing stops every component and leaves an idle error panel; both exit 1."""
 import time
-from session import KEY_ESC, Session, write_video
+from session import Session, write_video
 
 
 def idle(s):
@@ -32,7 +32,7 @@ with Session("play_failure_texture", tool="play") as s:
     s.focus()
     s.said("failed: ")
     idle(s)
-    s.tap(KEY_ESC, client=False)
+    s.shut()
     s.gone()
     assert s.finished() == 1, "a failed player must exit 1"
 

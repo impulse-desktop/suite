@@ -1,7 +1,7 @@
 """The editor from the keyboard: zoom in, out and reset with the = - 0
 shortcuts, the wheel over the canvas, keys and buttons it has no use for
 leaving it alone, then Enter saves the crop as the configured PNG and the
-tool exits; a second capture left with Escape writes nothing."""
+tool exits; a second capture closed without a save writes nothing."""
 
 import time
 
@@ -39,7 +39,7 @@ with Session("editor_keys") as s:
     # input path names one by one, two letters, one held until it repeats,
     # and the mouse buttons that are not the primary
     idle = s.settled("idle")
-    for code in (40, 51, 52, 53, 39, 26, 43, 27, 41, 30, 44):
+    for code in (40, 51, 52, 53, 39, 26, 43, 27, 41, 57, 30, 44):
         s.tap(code)
     s.tap(KEY_A, hold=1.0)
     for code in (BTN_RIGHT, BTN_MIDDLE, 275, 276, 277):
@@ -57,5 +57,5 @@ with Session("editor_keys") as s:
     s.focus()
     time.sleep(0.5)
     s.close()
-    assert not (shots / "discard.png").exists(), "Escape saved a file"
-    print("OK: the editor zooms from the keyboard, Enter saves the PNG crop, Escape discards")
+    assert not (shots / "discard.png").exists(), "closing saved a file"
+    print("OK: the editor zooms from the keyboard, Enter saves the PNG crop, closing discards")

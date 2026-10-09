@@ -951,7 +951,7 @@ void ReadApp::goTo(size_t index) {
 }
 
 void ReadApp::keys() {
-    if (ImGui::Shortcut(ImGuiKey_Escape) || ImGui::Shortcut(ImGuiKey_Q)) {
+    if (ImGui::Shortcut(ImGuiKey_Q)) {
         leaving = true;
     }
 
