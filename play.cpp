@@ -2616,7 +2616,59 @@ void Screen::drawPanel() {
             row(name, StringView(StringBuilder() << (bitrate + 500) / 1000 << StringView(u8" kb/s")));
         }
     };
-    auto tracks = [&](const char* title, AVMediaType type, int current) {
+    auto videoDetails = [&]() {
+        if (!video || !table("video")) {
+            return;
+        }
+
+        StringBuilder size;
+        StringBuilder rate;
+
+        size << (i64)video->width << StringView(u8" \xc3\x97 ") << (i64)video->height;
+
+        if (video->aspect.num > 0 && video->aspect.den > 0 && video->aspect.num != video->aspect.den) {
+            size << StringView(u8"  SAR ") << (i64)video->aspect.num << StringView(u8":") << (i64)video->aspect.den;
+        }
+
+        row("Codec", StringView(video->codec));
+        row("Pixels", StringView(video->pixels));
+        row("Size", StringView(size));
+
+        if (video->rate.num > 0 && video->rate.den > 0) {
+            rate << (i64)video->rate.num;
+
+            if (video->rate.den != 1) {
+                rate << StringView(u8"/") << (i64)video->rate.den;
+            }
+
+            row("Frame rate", StringView(rate));
+        }
+
+        row("Primaries", StringView(video->primaries));
+        row("Transfer", StringView(video->transfer));
+        row("Matrix", StringView(video->matrix));
+        row("Range", StringView(video->range));
+        kilobits("Bitrate", video->bitrate);
+        ImGui::EndTable();
+    };
+    auto audioDetails = [&]() {
+        if (!audio || !table("audio")) {
+            return;
+        }
+
+        row("Codec", StringView(audio->codec));
+        row("Sample rate", StringView(StringBuilder() << (i64)audio->rate << StringView(u8" Hz")));
+        row("Channels", StringView(audio->layout));
+        row("Samples", StringView(audio->samples));
+        kilobits("Bitrate", audio->bitrate);
+
+        if (!audio->language.empty()) {
+            row("Language", StringView(audio->language));
+        }
+
+        ImGui::EndTable();
+    };
+    auto tracks = [&](const char* title, AVMediaType type, int current, auto&& details) {
         if (!file || !ImGui::CollapsingHeader(title, ImGuiTreeNodeFlags_DefaultOpen)) {
             return;
         }
@@ -2647,6 +2699,12 @@ void Screen::drawPanel() {
             if (ImGui::Selectable(label.cStr(), track.index == current, 0, ImVec2(ImGui::GetContentRegionAvail().x, 0.f)) && track.index != current) {
                 select(type, track.index);
             }
+
+            if (track.index == current) {
+                ImGui::Indent();
+                details();
+                ImGui::Unindent();
+            }
         }
     };
 
@@ -2667,54 +2725,8 @@ void Screen::drawPanel() {
         ImGui::EndTable();
     }
 
-    if (video && ImGui::CollapsingHeader("Video", ImGuiTreeNodeFlags_DefaultOpen) && table("video")) {
-        StringBuilder size;
-        StringBuilder rate;
-
-        size << (i64)video->width << StringView(u8" \xc3\x97 ") << (i64)video->height;
-
-        if (video->aspect.num > 0 && video->aspect.den > 0 && video->aspect.num != video->aspect.den) {
-            size << StringView(u8"  SAR ") << (i64)video->aspect.num << StringView(u8":") << (i64)video->aspect.den;
-        }
-
-        row("Codec", StringView(video->codec));
-        row("Pixels", StringView(video->pixels));
-        row("Size", StringView(size));
-
-        if (video->rate.num > 0 && video->rate.den > 0) {
-            rate << (i64)video->rate.num;
-
-            if (video->rate.den != 1) {
-                rate << StringView(u8"/") << (i64)video->rate.den;
-            }
-
-            row("Frame rate", StringView(rate));
-        }
-
-        row("Primaries", StringView(video->primaries));
-        row("Transfer", StringView(video->transfer));
-        row("Matrix", StringView(video->matrix));
-        row("Range", StringView(video->range));
-        kilobits("Bitrate", video->bitrate);
-        ImGui::EndTable();
-    }
-
-    if (audio && ImGui::CollapsingHeader("Audio", ImGuiTreeNodeFlags_DefaultOpen) && table("audio")) {
-        row("Codec", StringView(audio->codec));
-        row("Sample rate", StringView(StringBuilder() << (i64)audio->rate << StringView(u8" Hz")));
-        row("Channels", StringView(audio->layout));
-        row("Samples", StringView(audio->samples));
-        kilobits("Bitrate", audio->bitrate);
-
-        if (!audio->language.empty()) {
-            row("Language", StringView(audio->language));
-        }
-
-        ImGui::EndTable();
-    }
-
-    tracks("Audio tracks", AVMEDIA_TYPE_AUDIO, audio ? audio->index : -1);
-    tracks("Video tracks", AVMEDIA_TYPE_VIDEO, video ? video->index : -1);
+    tracks("Video", AVMEDIA_TYPE_VIDEO, video ? video->index : -1, videoDetails);
+    tracks("Audio", AVMEDIA_TYPE_AUDIO, audio ? audio->index : -1, audioDetails);
 }
 
 CallScreen::CallScreen(Player* player_)
