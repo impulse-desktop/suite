@@ -1282,7 +1282,7 @@ void ChooseApp::keys() {
         return;
     }
 
-    if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
         finish(false);
     }
 
@@ -1304,7 +1304,7 @@ void ChooseApp::keys() {
         go(StringView(joinPath(StringView(dir), StringView(u8".."))));
     }
 
-    if (!fieldActive && ImGui::IsKeyPressed(ImGuiKey_Enter)) {
+    if (!fieldActive && ImGui::IsKeyPressed(ImGuiKey_Enter, false)) {
         enter();
     }
 
@@ -1654,11 +1654,11 @@ void ChooseApp::draw() {
         ImGui::Text("%.*s is there already. Replace it?", (int)name.length(), (const char*)name.begin());
         ImGui::Spacing();
 
-        bool yes = ImGui::Button("Replace") || ImGui::IsKeyPressed(ImGuiKey_Enter);
+        bool yes = ImGui::Button("Replace") || ImGui::IsKeyPressed(ImGuiKey_Enter, false);
 
         ImGui::SameLine();
 
-        bool no = ImGui::Button("Cancel") || ImGui::IsKeyPressed(ImGuiKey_Escape);
+        bool no = ImGui::Button("Cancel") || ImGui::IsKeyPressed(ImGuiKey_Escape, false);
 
         if (yes) {
             askingOverwrite = false;

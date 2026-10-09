@@ -648,7 +648,7 @@ namespace {
         float avail = ImGui::GetContentRegionAvail().x;
         float bw = (avail - ImGui::GetStyle().ItemSpacing.x) / 2.f;
 
-        if (ImGui::Button("Save", ImVec2(bw, 0)) || ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter)) {
+        if (ImGui::Button("Save", ImVec2(bw, 0)) || ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false)) {
             result = 1;
         }
 
@@ -659,7 +659,7 @@ namespace {
             reset = true;
         }
 
-        if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
             result = -1;
         }
 

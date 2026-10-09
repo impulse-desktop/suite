@@ -1280,7 +1280,7 @@ int mainRead(ObjPool& pool, int argc, char** argv) {
                 return;
             }
 
-            if (ImGui::IsKeyPressed(ImGuiKey_Escape) || ImGui::IsKeyPressed(ImGuiKey_Q)) {
+            if (ImGui::IsKeyPressed(ImGuiKey_Escape, false) || ImGui::IsKeyPressed(ImGuiKey_Q, false)) {
                 return;
             }
 

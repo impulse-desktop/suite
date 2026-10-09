@@ -268,7 +268,7 @@ void EditApp::draw() {
 
         ImGui::SameLine();
 
-        bool doCancel = ImGui::Button("Cancel") || ImGui::IsKeyPressed(ImGuiKey_Escape);
+        bool doCancel = ImGui::Button("Cancel") || ImGui::IsKeyPressed(ImGuiKey_Escape, false);
 
         if (doSave) {
             save();
