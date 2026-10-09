@@ -1,4 +1,5 @@
 """Four blocked file reads prove concurrency, bounded dispatch and selection priority."""
+import errno
 import os
 import time
 from pathlib import Path
@@ -23,8 +24,13 @@ with Session("view_four_workers", tool="view") as s:
     # A nonblocking writer opens only when a different worker is reading each FIFO.
     readers = []
     try:
-        for i in range(4):
-            readers.append(os.open(pics / f"f{i:02}.png", os.O_WRONLY | os.O_NONBLOCK))
+        for fifo in sorted(pics.iterdir()):
+            try:
+                readers.append(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+            except OSError as error:
+                if error.errno != errno.ENXIO:
+                    raise
+        assert len(readers) == 4, f"{len(readers)} files are being read, not four"
         w, h = s.size()
         s.pointer(100, h // 2)
         s.scroll(100)

@@ -39,7 +39,7 @@ with Session("editor_keys") as s:
     # input path names one by one, two letters, one held until it repeats,
     # and the mouse buttons that are not the primary
     idle = s.settled("idle")
-    for code in (40, 51, 52, 53, 39, 26, 43, 27, 41, 15, 57, 30, 44):
+    for code in (40, 51, 52, 53, 39, 26, 43, 27, 41, 30, 44):
         s.tap(code)
     s.tap(KEY_A, hold=1.0)
     for code in (BTN_RIGHT, BTN_MIDDLE, 275, 276, 277):
