@@ -44,6 +44,8 @@ namespace {
     constexpr Design windowWidth = 1000_d;
     constexpr Design windowHeight = 700_d;
     constexpr float sideShare = .2f;
+    constexpr Design scrollStep = 48_d;
+    constexpr float screenShare = .9f;
     constexpr float placeholderAspect = 1.4142f;
     constexpr u32 thumbTexelsStep = 64;
     constexpr u32 thumbTexelsMin = 128;
@@ -955,10 +957,85 @@ void ReadApp::keys() {
         leaving = true;
     }
 
-    if (ImGui::Shortcut(ImGuiKey_F) || ImGui::Shortcut(ImGuiKey_F11)) {
+    bool flip = ImGui::Shortcut(ImGuiKey_F);
+
+    flip |= ImGui::Shortcut(ImGuiKey_F11);
+
+    if (flip) {
         fullscreen = !fullscreen;
         ui->requestFullscreen(fullscreen);
         TRACE(ui, fullscreen ? StringView(u8"fullscreen on") : StringView(u8"fullscreen off"));
+    }
+
+    if (ImGui::GetIO().NavVisible) {
+        return;
+    }
+
+    float step = ui->px(scrollStep);
+    size_t at = current == (size_t)-1 ? 0 : current;
+
+    bool next = ImGui::Shortcut(ImGuiKey_RightArrow, ImGuiInputFlags_Repeat);
+
+    next |= ImGui::Shortcut(ImGuiKey_N, ImGuiInputFlags_Repeat);
+
+    if (next) {
+        goTo(at + 1);
+    }
+
+    bool previous = ImGui::Shortcut(ImGuiKey_LeftArrow, ImGuiInputFlags_Repeat);
+
+    previous |= ImGui::Shortcut(ImGuiKey_P, ImGuiInputFlags_Repeat);
+
+    if (previous) {
+        goTo(at > 0 ? at - 1 : 0);
+    }
+
+    bool down = ImGui::Shortcut(ImGuiKey_DownArrow, ImGuiInputFlags_Repeat);
+
+    down |= ImGui::Shortcut(ImGuiKey_J, ImGuiInputFlags_Repeat);
+
+    if (down) {
+        scrollTo(scrollY + step);
+    }
+
+    bool up = ImGui::Shortcut(ImGuiKey_UpArrow, ImGuiInputFlags_Repeat);
+
+    up |= ImGui::Shortcut(ImGuiKey_K, ImGuiInputFlags_Repeat);
+
+    if (up) {
+        scrollTo(scrollY - step);
+    }
+
+    bool pageDown = ImGui::Shortcut(ImGuiKey_Space, ImGuiInputFlags_Repeat);
+
+    pageDown |= ImGui::Shortcut(ImGuiKey_PageDown, ImGuiInputFlags_Repeat);
+
+    if (pageDown) {
+        scrollTo(scrollY + viewH * screenShare);
+    }
+
+    bool pageUp = ImGui::Shortcut(ImGuiKey_Backspace, ImGuiInputFlags_Repeat);
+
+    pageUp |= ImGui::Shortcut(ImGuiKey_PageUp, ImGuiInputFlags_Repeat);
+
+    if (pageUp) {
+        scrollTo(scrollY - viewH * screenShare);
+    }
+
+    bool top = ImGui::Shortcut(ImGuiKey_Home);
+
+    top |= ImGui::Shortcut(ImGuiKey_G);
+
+    if (top) {
+        scrollTo(0.f);
+    }
+
+    bool bottom = ImGui::Shortcut(ImGuiKey_End);
+
+    bottom |= ImGui::Shortcut(ImGuiMod_Shift | ImGuiKey_G);
+
+    if (bottom) {
+        scrollTo(totalH);
     }
 }
 
