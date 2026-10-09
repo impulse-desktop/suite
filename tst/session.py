@@ -597,13 +597,18 @@ class Session:
         if sys.platform != "darwin":
             return
         reports = Path.home() / "Library" / "Logs" / "DiagnosticReports"
-        deadline = time.monotonic() + 20
+        deadline = time.monotonic() + 60
         while time.monotonic() < deadline:
             found = sorted((path for path in reports.glob(f"{Path(binary).name}-*.ips") if path.stat().st_mtime >= started), key=lambda path: path.stat().st_mtime)
             if found:
                 break
             time.sleep(0.5)
         else:
+            listing = sorted(reports.glob("*"), key=lambda path: path.stat().st_mtime)[-20:] if reports.is_dir() else []
+            (self.artifacts / f"{label}-crash.log").write_text(
+                f"no crash report for {Path(binary).name} in {reports} after 60s; newest there:\n"
+                + "".join(f"{path.name} {path.stat().st_mtime - started:+.1f}s\n" for path in listing)
+            )
             return
         text = found[-1].read_text(errors="replace")
         (self.artifacts / f"{label}-crash.ips").write_text(text)

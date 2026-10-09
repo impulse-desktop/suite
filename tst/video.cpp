@@ -1245,7 +1245,13 @@ bool FormatCheck::mine(StringView what) {
         hash = (hash ^ *c) * 16777619u;
     }
 
-    return hash % buckets == bucket;
+    if (hash % buckets != bucket) {
+        return false;
+    }
+
+    sysE << StringView(u8"video check: ") << what << (generic ? StringView(u8" generic") : StringView(u8"")) << endL;
+
+    return true;
 }
 
 void FormatCheck::check(const Case& kase, StringView what) {
