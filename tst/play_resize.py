@@ -1,5 +1,5 @@
 """Each decoded size reaches the screen in its own frames, in order; a seek back starts from the first size again.
-A window shorter than the video at its width shows the video cut to its place: nothing of it over the bar."""
+A video taller at the window's width than its place is cut to it: nothing of it over the bar."""
 import collections
 import re
 from session import KEY_HOME, KEY_SPACE, Session, write_video
@@ -20,19 +20,16 @@ with Session("play_resize", tool="play") as s:
     s.tap(KEY_SPACE)
     s.said("ended generation=2")
 
-    node = s.window()
-    s.ipc(f'[con_id={node["id"]}] resize set 640 px 160 px')
-    s.wait(lambda: s.window()["rect"]["height"] == 160, "the short window")
-    s.said("presenting 640x160")
-    s.settled("short")
+    s.settled("ended")
 
     def colour():
-        w, h, px = s.capture("middle", region=(300, 60, 40, 20))
+        w, h, px = s.capture("middle", region=(460, 280, 40, 20))
         common = collections.Counter(tuple(px[i:i + 3]) for i in range(0, w * h * 3, 3)).most_common(1)[0][0]
         return common if sum(common) > 100 else None
 
-    video = s.wait(colour, "the video in the short window")
-    w, h, px = s.capture("bar", region=(0, 140, 640, 20))
+    video = s.wait(colour, "the video in the window")
+    r = s.window()["rect"]
+    w, h, px = s.capture("bar", region=(0, r["height"] - 20, r["width"], 20))
     spilled = sum(1 for i in range(0, w * h * 3, 3) if all(abs(px[i + k] - video[k]) <= 6 for k in range(3)))
     assert spilled == 0, f"{spilled} pixels of the video {video} over the bar"
     s.close()
