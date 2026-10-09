@@ -314,6 +314,7 @@ namespace {
         ImGuiIO& io = ImGui::GetIO();
 
         io.IniFilename = nullptr;
+        io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
         ImGui::GetStyle() = scaledStyle(scale);
         io.MouseDragThreshold = scaledPx(mouseThreshold, scale);
         io.MouseDoubleClickMaxDist = scaledPx(mouseThreshold, scale);

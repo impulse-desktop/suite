@@ -2282,6 +2282,18 @@ void Screen::keys() {
         leaving = true;
     }
 
+    bool flip = ImGui::Shortcut(ImGuiKey_F);
+
+    flip |= ImGui::Shortcut(ImGuiKey_F11);
+
+    if (flip) {
+        flipFullscreen();
+    }
+
+    if (ImGui::GetIO().NavVisible) {
+        return;
+    }
+
     if (ImGui::Shortcut(ImGuiKey_Space)) {
         toggle();
     }
@@ -2296,10 +2308,6 @@ void Screen::keys() {
 
     if (ImGui::Shortcut(ImGuiKey_Home)) {
         seek(0., false);
-    }
-
-    if (ImGui::Shortcut(ImGuiKey_F) || ImGui::Shortcut(ImGuiKey_F11)) {
-        flipFullscreen();
     }
 }
 
