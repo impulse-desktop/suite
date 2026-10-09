@@ -1523,7 +1523,7 @@ void ChooseApp::drawLine() {
 
     ImGui::SetNextItemWidth(max(80.f, ImGui::GetContentRegionAvail().x - buttons - filterW));
 
-    if (fieldFocus) {
+    if (fieldFocus && !ImGui::IsPopupOpen("Replace")) {
         ImGui::SetKeyboardFocusHere();
         fieldFocus = false;
     }
