@@ -72,7 +72,8 @@ namespace {
         MediaInfo,
         VideoInfo,
         AudioInfo,
-        Select
+        Select,
+        Shown
     };
 
     struct Message {
@@ -240,6 +241,12 @@ namespace {
         Select(int index, u64 generation, double position, bool playing);
     };
 
+    struct Shown final: public Typed<Kind::Shown> {
+        u64 generation;
+
+        explicit Shown(u64 generation);
+    };
+
     struct Compiler final: public Runable {
         Player* player;
 
@@ -286,7 +293,7 @@ namespace {
         Stream stream;
         Vector<VideoImage*> idle;
         AVFrame* last;
-        u64 generation = 1;
+        u64 generation = 0;
         double target = 0.;
         double pts = 0.;
         double lastPts = 0.;
@@ -323,9 +330,13 @@ namespace {
         Buffer pcm;
         double pcmStart = 0.;
         double queuedStart = 0.;
-        u64 generation = 1;
+        u64 generation = 0;
         double target = 0.;
+        double clockBase = 0.;
+        u64 clockAt = 0;
         bool playing = true;
+        bool ready = false;
+        bool ticking = false;
         bool skipping = true;
         bool drained = false;
         bool ended = false;
@@ -333,6 +344,8 @@ namespace {
         explicit Audio(Player* player);
         void run() override;
         void apply(const Control& control);
+        void show(u64 shown);
+        double position(u64 now) const;
         void service();
         bool step();
         void convert();
@@ -359,6 +372,8 @@ namespace {
         int shownFormat = AV_PIX_FMT_NONE;
         Vector<Frame*> waiting;
         Frame* shown = nullptr;
+        VideoImage* first = nullptr;
+        bool announced = false;
         u64 generation = 1;
         double target = 0.;
         bool playing = true;
@@ -406,7 +421,7 @@ namespace {
         void flipFullscreen();
         void sendControl(Channel* to);
         void halt(StringView text);
-        bool audioMaster() const;
+        void announce();
         double position(u64 now) const;
         void setClock(double base, bool running, u64 at);
         void keys();
@@ -811,6 +826,11 @@ Frame::Frame(VideoImage* image_, u64 generation_, double pts_, double aspect_)
 }
 
 End::End(u64 generation_)
+    : generation(generation_)
+{
+}
+
+Shown::Shown(u64 generation_)
     : generation(generation_)
 {
 }
@@ -1225,7 +1245,7 @@ void Video::apply(const Control& control) {
 }
 
 bool Video::step() {
-    if (stream.index < 0 || ended) {
+    if (generation == 0 || stream.index < 0 || ended) {
         return false;
     }
 
@@ -1431,15 +1451,13 @@ void Audio::run() {
                 return;
             }
 
-            if (stream.index < 0) {
-                continue;
-            }
-
             if (Control* control = cast<Control>(message.ptr)) {
                 apply(*control);
+            } else if (Shown* shown = cast<Shown>(message.ptr)) {
+                show(shown->generation);
             } else if (cast<Pulse>(message.ptr)) {
                 service();
-            } else if (Select* select = cast<Select>(message.ptr)) {
+            } else if (Select* select = cast<Select>(message.ptr); select && stream.index >= 0) {
                 stream.select(select->index);
                 player->post(stream.describeAudio());
                 apply(Control(select->generation, select->position, select->playing));
@@ -1451,40 +1469,69 @@ void Audio::run() {
 }
 
 void Audio::apply(const Control& control) {
+    u64 now = monotonicNowUs();
+
     if (control.generation != generation) {
         generation = control.generation;
         target = control.position;
-        alSourceStop(source);
-        alSourcei(source, AL_BUFFER, 0);
-        checkAl();
-        idle.clear();
-
-        for (ALuint buffer : buffers) {
-            idle.pushBack(buffer);
-        }
-
-        ringHead = 0;
-        ringLength = 0;
-
-        stream.seek(target);
-        swr_free(&resampler);
-        pcm.reset();
-        pcmStart = target;
-        queuedStart = target;
-        skipping = true;
-        drained = false;
+        clockBase = target;
+        clockAt = now;
+        ready = false;
+        ticking = false;
         ended = false;
+
+        if (stream.index >= 0) {
+            alSourceStop(source);
+            alSourcei(source, AL_BUFFER, 0);
+            checkAl();
+            idle.clear();
+
+            for (ALuint buffer : buffers) {
+                idle.pushBack(buffer);
+            }
+
+            ringHead = 0;
+            ringLength = 0;
+
+            stream.seek(target);
+            swr_free(&resampler);
+            pcm.reset();
+            pcmStart = target;
+            queuedStart = target;
+            skipping = true;
+            drained = false;
+        }
     }
 
     playing = control.playing;
 
-    if (!playing && state() == AL_PLAYING) {
+    if (!playing && ticking) {
+        clockBase = position(now);
+        clockAt = now;
+        ticking = false;
+    }
+
+    if (!playing && stream.index >= 0 && state() == AL_PLAYING) {
         alSourcePause(source);
         checkAl();
     }
 
     start();
     report();
+}
+
+void Audio::show(u64 shown) {
+    if (shown != generation || ready) {
+        return;
+    }
+
+    ready = true;
+    start();
+    report();
+}
+
+double Audio::position(u64 now) const {
+    return clockBase + (ticking && now > clockAt ? (double)(now - clockAt) / 1e6 : 0.);
 }
 
 void Audio::service() {
@@ -1515,7 +1562,7 @@ void Audio::service() {
 }
 
 bool Audio::step() {
-    if (stream.index < 0 || ended) {
+    if (generation == 0 || stream.index < 0 || ended) {
         return false;
     }
 
@@ -1646,7 +1693,20 @@ void Audio::enqueue() {
 }
 
 void Audio::start() {
-    if (!playing || ringLength == 0) {
+    if (!playing || !ready) {
+        return;
+    }
+
+    if (stream.index < 0 || ended) {
+        if (!ticking) {
+            ticking = true;
+            clockAt = monotonicNowUs();
+        }
+
+        return;
+    }
+
+    if (ringLength == 0) {
         return;
     }
 
@@ -1668,12 +1728,24 @@ void Audio::start() {
 void Audio::finish() {
     if (drained && !ended && pcm.empty() && ringLength == 0) {
         ended = true;
+        clockBase = queuedStart;
+        clockAt = monotonicNowUs();
+        ticking = false;
+        start();
         report();
     }
 }
 
 void Audio::report() {
-    ALint now = state();
+    u64 now = monotonicNowUs();
+
+    if (stream.index < 0 || ended) {
+        player->post(new Clock(generation, position(now), now, ticking, ended));
+
+        return;
+    }
+
+    ALint state = this->state();
     double offsets[2] = {0., 0.};
 
     if (ringLength > 0) {
@@ -1681,9 +1753,9 @@ void Audio::report() {
         checkAl();
     }
 
-    bool running = now == AL_PLAYING;
+    bool running = state == AL_PLAYING;
 
-    player->post(new Clock(generation, queuedStart + offsets[0] - (running ? offsets[1] : 0.), monotonicNowUs(), running, ended));
+    player->post(new Clock(generation, queuedStart + offsets[0] - (running ? offsets[1] : 0.), now, running, ended));
 }
 
 ALint Audio::state() {
@@ -1714,6 +1786,13 @@ Screen::Screen(Player* player_)
     }
 
     fiber = player->ui->platform()->scheduler()->create(*player->pool, *this, controllerStack);
+    sendControl(player->videoInbox);
+    sendControl(player->audioInbox);
+
+    if (!hasVideo) {
+        announce();
+    }
+
     TRACE(player->ui, StringView(StringBuilder() << StringView(u8"opened duration_ms=") << (i64)llround(duration * 1000.) << StringView(u8" video=") << (i64)hasVideo << StringView(u8" audio=") << (i64)hasAudio));
 }
 
@@ -1790,6 +1869,10 @@ void Screen::drain() {
             applyClock(*clock);
         } else if (End* end = cast<End>(message.ptr)) {
             videoEnded = videoEnded || end->generation == generation;
+
+            if (end->generation == generation && !first && waiting.empty() && (!shown || shown->generation != generation)) {
+                announce();
+            }
         } else if (Failure* failure = cast<Failure>(message.ptr)) {
             halt(StringView(failure->text));
         } else if (Compiled* compiled = cast<Compiled>(message.ptr)) {
@@ -1819,10 +1902,6 @@ u64 Screen::present() {
 
     if (!waiting.empty() && (!shown || shown->generation != generation)) {
         show(takeFirst());
-    }
-
-    if (playing && !ended && !clockRunning && !audioMaster() && shown && shown->generation == generation) {
-        setClock(clockBase > shown->pts ? clockBase : shown->pts, true, now);
     }
 
     double at = position(now);
@@ -1881,6 +1960,7 @@ void Screen::finishIfEnded(u64 now) {
     ended = true;
     playing = false;
     setClock(position(now), false, now);
+    sendControl(player->audioInbox);
     TRACE(player->ui, StringView(StringBuilder() << StringView(u8"ended generation=") << (i64)generation));
     player->ui->requestFrame();
 }
@@ -1889,6 +1969,10 @@ void Screen::show(Frame* frame) {
     Frame* previous = shown;
 
     shown = frame;
+
+    if (frame->generation == generation && !announced && !first) {
+        first = frame->image;
+    }
 
     if (previous) {
         if (previous->image->draws == 0) {
@@ -1928,18 +2012,23 @@ void Screen::release(VideoImage* image) {
 }
 
 void Screen::retired(VideoImage* image) {
+    if (image == first) {
+        first = nullptr;
+        announce();
+    }
+
     if (--image->draws == 0 && (!shown || shown->image != image)) {
         release(image);
     }
 }
 
 void Screen::applyClock(const Clock& clock) {
-    if (clock.generation != generation) {
+    if (clock.generation != generation || ended) {
         return;
     }
 
     audioEnded = clock.ended;
-    setClock(clock.position, clock.running && !clock.ended, clock.at);
+    setClock(clock.position, clock.running, clock.at);
 }
 
 void Screen::makeRender(VideoImage* image) {
@@ -2172,6 +2261,8 @@ void Screen::rewind(double to, bool play) {
 
     to = to < 0. ? 0. : to > end ? end : to;
     generation++;
+    first = nullptr;
+    announced = false;
     target = to;
     playing = play;
     ended = false;
@@ -2196,6 +2287,11 @@ void Screen::seek(double to, bool play) {
     rewind(to, play);
     sendControl(player->videoInbox);
     sendControl(player->audioInbox);
+
+    if (!hasVideo) {
+        announce();
+    }
+
     player->ui->requestFrame();
     resume();
 }
@@ -2210,6 +2306,11 @@ void Screen::select(AVMediaType type, int index) {
     rewind(position(monotonicNowUs()), playing && !ended);
     (chosen ? player->videoInbox : player->audioInbox)->enqueue(new Select(index, generation, target, playing));
     sendControl(chosen ? player->audioInbox : player->videoInbox);
+
+    if (!hasVideo) {
+        announce();
+    }
+
     player->ui->requestFrame();
     resume();
 }
@@ -2228,10 +2329,7 @@ void Screen::toggle() {
     u64 now = monotonicNowUs();
 
     playing = !playing;
-
-    if (!audioMaster()) {
-        setClock(position(now), false, now);
-    }
+    setClock(position(now), false, now);
 
     TRACE(player->ui, StringView(StringBuilder() << (playing ? StringView(u8"play generation=") : StringView(u8"pause generation=")) << (i64)generation));
     sendControl(player->audioInbox);
@@ -2257,8 +2355,13 @@ void Screen::halt(StringView text) {
     player->ui->requestFrame();
 }
 
-bool Screen::audioMaster() const {
-    return hasAudio && !audioEnded;
+void Screen::announce() {
+    if (announced) {
+        return;
+    }
+
+    announced = true;
+    player->audioInbox->enqueue(new Shown(generation));
 }
 
 double Screen::position(u64 now) const {
