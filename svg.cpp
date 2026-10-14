@@ -2,18 +2,33 @@
 
 #include "error.h"
 
-#include <std/thr/guard.h>
-#include <std/thr/mutex.h>
+#include <std/alg/defer.h>
 #include <std/lib/buffer.h>
 #include <std/str/builder.h>
 #include <std/mem/obj_pool.h>
 
 #include <math.h>
-#include <lunasvg.h>
+#include <string.h>
+
+#define WASM_RT_CORE_TYPES_DEFINED
+typedef int8_t s8;
+typedef int16_t s16;
+typedef int32_t s32;
+typedef int64_t s64;
+typedef float f32;
+typedef double f64;
+
+// the svg module, compiled under the name vector: svg.h is the suite's own;
+// a trap throws out of it through the handler decoder.cpp defines
+extern "C" {
+#include <vector.h>
+}
 
 using namespace stl;
 
 namespace {
+    constexpr u32 causeLimit = 256;
+
     struct RasterImage final: Image {
         Buffer rgba;
         u32 width_;
@@ -27,29 +42,29 @@ namespace {
         u32 height() const override;
     };
 
+    // a drawing open in an instance of its own: one job parses and draws it
     struct DocumentImpl final: SvgDocument {
-        Mutex* lock;
-        lunasvg::Document* document;
-        float width_;
-        float height_;
+        w2c_vector wasm;
+        u32 doc = 0;
+        float width_ = 0.f;
+        float height_ = 0.f;
 
-        DocumentImpl(Mutex* lock, lunasvg::Document* document);
+        explicit DocumentImpl(StringView file);
         ~DocumentImpl() noexcept;
 
         float width() const override;
         float height() const override;
         Image* render(ObjPool& pool, u32 width, u32 height) override;
+
+        u8* at(u64 offset, u64 length);
+        Buffer cause();
     };
 
     struct LibraryImpl final: SvgLibrary {
-        Mutex* lock;
-
-        explicit LibraryImpl(ObjPool& pool);
-
         SvgDocument* parse(ObjPool& pool, StringView file) override;
     };
 
-    StringView xmlOf(StringView file) {
+    bool xml(StringView file) {
         const u8* p = file.begin();
         const u8* end = file.end();
 
@@ -57,13 +72,11 @@ namespace {
             p += 3;
         }
 
-        const u8* text = p;
-
         while (p != end && (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')) {
             p++;
         }
 
-        return p != end && *p == '<' ? StringView(text, end) : StringView();
+        return p != end && *p == '<';
     }
 }
 
@@ -90,18 +103,39 @@ u32 RasterImage::height() const {
     return height_;
 }
 
-DocumentImpl::DocumentImpl(Mutex* lock_, lunasvg::Document* document_)
-    : lock(lock_)
-    , document(document_)
-    , width_(document_->width())
-    , height_(document_->height())
-{
+// the module opens the file or traps: a file that is no SVG, which the
+// caller hands to the image decoder
+DocumentImpl::DocumentImpl(StringView file) {
+    if (file.length() > 0xffffffffu) {
+        fail(StringView(u8"the file is too large for the SVG engine"));
+    }
+
+    u32 length = (u32)file.length();
+
+    wasm2c_vector_instantiate(&wasm);
+    ScopedGuard cleanup = [&] {
+        if (!doc) {
+            wasm2c_vector_free(&wasm);
+        }
+    };
+
+    u32 data = w2c_vector_malloc(&wasm, length);
+
+    if (!data) {
+        fail(StringView(u8"the SVG engine is out of memory"));
+    }
+
+    memcpy(at(data, length), file.data(), length);
+    // the document copies the file: the engine's own copy goes at once
+    doc = w2c_vector_svg_open(&wasm, data, length);
+    w2c_vector_free(&wasm, data);
+    width_ = w2c_vector_svg_width(&wasm, doc, 0);
+    height_ = w2c_vector_svg_height(&wasm, doc, 0);
 }
 
 DocumentImpl::~DocumentImpl() noexcept {
-    LockGuard guard(lock);
-
-    delete document;
+    // an instance that trapped is dead, and goes as it is
+    wasm2c_vector_free(&wasm);
 }
 
 float DocumentImpl::width() const {
@@ -113,41 +147,88 @@ float DocumentImpl::height() const {
 }
 
 Image* DocumentImpl::render(ObjPool& pool, u32 width, u32 height) {
-    if (!width || !height || (u64)width * 4 > 0x7fffffffu || (u64)height > 0x7fffffffu) {
+    if (!width || !height || (u64)width * height * 4 > 0x7fffffffu) {
         raiseError(StringView(StringBuilder() << StringView(u8"cannot draw the SVG at ") << (i64)width << StringView(u8"x") << (i64)height));
     }
 
-    RasterImage* image = pool.make<RasterImage>(width, height);
-    lunasvg::Bitmap bitmap((uint8_t*)image->rgba.mutData(), (int)width, (int)height, (int)width * 4);
-    lunasvg::Matrix matrix((float)width / width_, 0.f, 0.f, (float)height / height_, 0.f, 0.f);
-    LockGuard guard(lock);
+    u64 bytes = (u64)width * height * 4;
+    u32 res = 0;
 
-    document->render(bitmap, matrix);
-    bitmap.convertToRGBA();
+    try {
+        res = w2c_vector_svg_render(&wasm, doc, 0, width, height);
+    } catch (...) {
+        Buffer why = cause();
+
+        raiseError(StringView(StringBuilder() << StringView(u8"the SVG engine failed: ") << (why.empty() ? StringView(u8"a trap") : StringView(why))));
+    }
+
+    if (!res) {
+        raiseError(StringView(u8"the SVG engine is out of memory"));
+    }
+
+    ScopedGuard release = [&] {
+        w2c_vector_free(&wasm, res);
+    };
+
+    const u8* block = at(res, 8 + bytes);
+    u32 header[2];
+
+    memcpy(header, block, sizeof(header));
+
+    if (header[0] != width || header[1] != height) {
+        fail(StringView(StringBuilder() << StringView(u8"the SVG engine drew ") << (i64)header[0] << StringView(u8"x") << (i64)header[1] << StringView(u8" for ") << (i64)width << StringView(u8"x") << (i64)height));
+    }
+
+    RasterImage* image = pool.make<RasterImage>(width, height);
+
+    memcpy(image->rgba.mutData(), block + 8, bytes);
 
     return image;
 }
 
-LibraryImpl::LibraryImpl(ObjPool& pool)
-    : lock(Mutex::create(&pool))
-{
+u8* DocumentImpl::at(u64 offset, u64 length) {
+    wasm_rt_memory_t* memory = w2c_vector_memory(&wasm);
+
+    if (offset + length > memory->size) {
+        fail(StringView(u8"the SVG engine answered out of its memory"));
+    }
+
+    return (u8*)memory->data + offset;
+}
+
+// the engine's cause of its trap, the name of the SvgError: a C string in
+// its memory, read as far as the memory and the limit allow
+Buffer DocumentImpl::cause() {
+    u32 text = w2c_vector_svg_error(&wasm);
+    wasm_rt_memory_t* memory = w2c_vector_memory(&wasm);
+
+    if (!text || text >= memory->size) {
+        return Buffer();
+    }
+
+    const u8* begin = (const u8*)memory->data + text;
+    const u8* end = begin;
+    const u8* limit = (const u8*)memory->data + (memory->size - text < causeLimit ? memory->size : (u64)text + causeLimit);
+
+    while (end < limit && *end) {
+        end++;
+    }
+
+    return Buffer(StringView(begin, end));
 }
 
 SvgDocument* LibraryImpl::parse(ObjPool& pool, StringView file) {
-    StringView xml = xmlOf(file);
-
-    if (xml.empty()) {
+    if (!xml(file)) {
         return nullptr;
     }
 
-    LockGuard guard(lock);
-    lunasvg::Document* document = lunasvg::Document::loadFromData((const char*)xml.data(), xml.length()).release();
+    DocumentImpl* parsed = nullptr;
 
-    if (!document) {
+    try {
+        parsed = pool.make<DocumentImpl>(file);
+    } catch (...) {
         return nullptr;
     }
-
-    DocumentImpl* parsed = pool.make<DocumentImpl>(lock, document);
 
     if (!isfinite(parsed->width_) || !isfinite(parsed->height_) || parsed->width_ <= 0.f || parsed->height_ <= 0.f) {
         raiseError(StringView(u8"the SVG has no size"));
@@ -157,5 +238,5 @@ SvgDocument* LibraryImpl::parse(ObjPool& pool, StringView file) {
 }
 
 SvgLibrary* SvgLibrary::create(ObjPool& pool) {
-    return pool.make<LibraryImpl>(pool);
+    return pool.make<LibraryImpl>();
 }

@@ -20,7 +20,7 @@ and the editor open what the user opens. Every tool is a small native
 program in a process of its own, drawn on Vulkan straight to Wayland,
 with no toolkit underneath. Images, documents and file types are read by
 sandboxed decoders, so a hostile file cannot reach past the decoder's own
-memory; SVG alone is drawn natively, by lunasvg.
+memory; SVG among them, drawn by impulse-desktop/svg.
 
 ## Running
 
@@ -57,7 +57,7 @@ Linux. You need clang 21 or GCC 16, python3, pkg-config,
 wayland-scanner, glslangValidator, `wasm2c` from wabt with the runtime it
 ships, and the development files of wayland-client, xkbcommon, vulkan,
 libpng, libjxl, FFmpeg (libavformat, libavcodec, libavutil,
-libswresample), OpenAL and lunasvg.
+libswresample) and OpenAL.
 
 ```
 ./build          # .build/im and the im<tool> links
@@ -70,8 +70,8 @@ installs the binary, its `im<tool>` links, the desktop entries and the
 icons under PREFIX.
 
 The decoders are WebAssembly modules vendored under `ext/`.
-`-Ddecode_wasm=PATH`, `-Dpdf_wasm=PATH`, `-Ddjvu_wasm=PATH` and
-`-Dmagic_wasm=PATH` build with other ones instead.
+`-Ddecode_wasm=PATH`, `-Dpdf_wasm=PATH`, `-Ddjvu_wasm=PATH`,
+`-Dmagic_wasm=PATH` and `-Dsvg_wasm=PATH` build with other ones instead.
 
 On [IX](https://github.com/pg83/ix), `ix build bin/im/suite` builds the
 package, with modules IX builds itself. `bin/im/pulse` is the whole
@@ -81,5 +81,5 @@ desktop.
 
 MIT, see [LICENSE](LICENSE). The vendored code under `ext/` keeps its
 own license: ImGui, the text editor widget, libstd and plt are MIT; the
-WebAssembly modules are ImageMagick, PDFium, libmagic and DjVuLibre, the
-last under the GPL, version 2 or later.
+WebAssembly modules are ImageMagick, PDFium, libmagic, impulse-desktop/svg
+and DjVuLibre, the last under the GPL, version 2 or later.

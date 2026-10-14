@@ -39,6 +39,7 @@ flags.allow({
     "pdf_wasm": {"descr": "the PDF module, in place of ext/pdf/pdf.wasm", "default": ""},
     "djvu_wasm": {"descr": "the DjVu module, in place of ext/djvu/djvu.wasm", "default": ""},
     "magic_wasm": {"descr": "the MIME module, in place of ext/magic/magic.wasm", "default": ""},
+    "svg_wasm": {"descr": "the SVG module, in place of ext/svg/svg.wasm", "default": ""},
 })
 
 
@@ -98,7 +99,6 @@ plt = import_build(
 )
 system = dependency(ldflags=["-lm"])
 media = [pkg_config(name) for name in ("libavformat", "libavcodec", "libavutil", "libswresample", "openal")]
-svg = pkg_config("lunasvg")
 # Vulkan's canonical `VkFoo info{VK_STRUCTURE_TYPE_FOO}` initialization zeros
 # the remaining aggregate fields by design; Clang otherwise diagnoses every
 # such declaration under -Wextra.
@@ -271,6 +271,9 @@ djvu = wasm_library("djvu", wasm_module(flags.djvu_wasm, "$(S)/ext/djvu/djvu.was
 # libmagic (ext/magic), the viewer's MIME type of a file; under the name
 # mime, as the realm may carry libmagic's own magic.h
 mime = wasm_library("mime", wasm_module(flags.magic_wasm, "$(S)/ext/magic/magic.wasm"), 4, False, ["-O1"])
+# impulse-desktop/svg (ext/svg), the viewer's SVG, with the same page
+# exports; under the name vector, as svg.h is the suite's own
+vector = wasm_library("vector", wasm_module(flags.svg_wasm, "$(S)/ext/svg/svg.wasm"), 2, False)
 
 
 # Linux builds every tool over Vulkan; macOS the runtime's tools over Metal.
@@ -297,7 +300,7 @@ if darwin:
 # graph hands over its archive, not what the archive wants linked
 im_deps = [
     *shader_rules, codes, imgui, textedit, pdf, djvu, mime, decode, plt, libstd,
-    *platform_deps, *encoders, *media, svg, system,
+    *platform_deps, *encoders, *media, vector, system,
 ]
 
 # one binary, every tool: `im screenshot ...`, and a link named after the
