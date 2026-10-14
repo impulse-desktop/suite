@@ -5,7 +5,7 @@ renderer, as one pure WebAssembly module, from
 [impulse-desktop/decode](https://github.com/impulse-desktop/decode). Built
 by [ix](https://github.com/pg83/ix) as `lib/svg/wasm` for the
 `wasm32-none` target (sha256 of the module
-0465a5995286e9faa283ac2549a68639bcec584402ce954fd2c0f30dd2ef10e3). The
+244b669672d8b5215a8adeb0c4bdb7614bfc072788610178da0809acfcbbce5a). The
 build behind it proves the module imports nothing and draws a small
 drawing through it on WAMR, twice in one instance, checking its pixels.
 
