@@ -2,7 +2,7 @@
 past its own size; the raster is drawn at the zoom's level, scales in steps
 of sqrt 2, and drawn again only when the level changes: 1:1 is level 0,
 40x30, 125% level 1, 57x43, 156% level 2, 80x60; a byte order mark before
-the markup is fine; a drawing of no size is 300x150, as an <img> shows it."""
+the markup is fine; a drawing of nothing has no size and cannot be shown."""
 
 from session import KEY_1, KEY_EQUAL, KEY_RIGHT, Session, colour_box
 
@@ -56,7 +56,7 @@ with Session("view_svg", tool="view") as s:
     size("bom", 63, 47)
 
     s.tap(KEY_RIGHT)
-    s.said("showing c.svg 300x150")
+    s.said("cannot show c.svg: the SVG has no size")
     log = s.client_log()
     assert log.count("im view: drawn a.svg level 2 80x60") == 1, "the drawing was drawn again at the same level"
     s.close()
