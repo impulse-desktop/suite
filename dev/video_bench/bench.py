@@ -45,6 +45,12 @@ def bits(value):
     return format(struct.unpack("<Q", struct.pack("<d", float(value)))[0], "x")
 
 
+def screen_curve(eotf, srgb):
+    """The curves of SDR screens, sRGB's and the pure powers of 2.2 and 2.4,
+    whose codes an SDR output shows as they are (play.cpp's screenCurve)."""
+    return eotf == srgb or eotf in ([[1, 2.2, 1, 0, 0]], [[1, 2.4, 1, 0, 0]])
+
+
 def facts(case, layout, components, offsets, lines):
     sx, sy = case["subsampling"]
     model = layout["model"]
@@ -57,8 +63,10 @@ def facts(case, layout, components, offsets, lines):
     same = all(abs(to_output[i][j] - (i == j)) < 1e-6 for i in range(3) for j in range(3))
     sdr = case["output"] == "sdr"
     shape, conversion, output = transfer["shape"], "same" if same else "convert", case["output"]
-    curve = table(transfer.get("eotf"))
-    if shape == "curve" and same and case["transfer"] == (13 if sdr else 8):
+    srgb = MODULE.transfers[13]
+    coded = sdr and shape == "curve" and screen_curve(transfer["eotf"], srgb["eotf"])
+    curve = table((srgb if coded else transfer).get("eotf"))
+    if shape == "curve" and same and (coded if sdr else case["transfer"] == 8):
         shape = "identity"
     levels, scales = [0.0] * 4, [1.0] * 4
     for c, component in enumerate(components if model != "palette" and "float" not in layout["flags"] else []):

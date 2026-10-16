@@ -458,6 +458,14 @@ namespace {
         fail(StringView(StringBuilder() << StringView(u8"no table entry for code ") << (i64)code));
     }
 
+    // the curves of SDR screens, whose codes an SDR output shows as they are
+    static bool screenCurve(const VideoTransfer& transfer) {
+        const double* c = transfer.eotf;
+        bool power = c[10] < 0. && c[0] == 1. && c[2] == 1. && c[3] == 0. && c[4] == 0. && (c[1] == 2.2 || c[1] == 2.4);
+
+        return power || !memcmp(c, entryOf(videoTransfers, AVCOL_TRC_IEC61966_2_1).eotf, sizeof(transfer.eotf));
+    }
+
     static Model modelOf(const VideoLayout& layout) {
         StringView model(layout.model);
 
@@ -736,11 +744,13 @@ VideoShader FormatCheck::describe(const AVFrame* frame, const char* output) {
     out.conversion = same ? "same" : "convert";
     out.output = output;
     out.tile = kernelTile;
-    memcpy(out.curve, transfer.eotf, sizeof(out.curve));
+    bool coded = sdr && shape == StringView(u8"curve") && screenCurve(transfer);
+
+    memcpy(out.curve, coded ? entryOf(videoTransfers, AVCOL_TRC_IEC61966_2_1).eotf : transfer.eotf, sizeof(out.curve));
     memcpy(out.oetf, transfer.oetf, sizeof(out.oetf));
     memcpy(out.inverse, transfer.inverse, sizeof(out.inverse));
 
-    if (shape == StringView(u8"curve") && same && transferCode == (sdr ? AVCOL_TRC_IEC61966_2_1 : AVCOL_TRC_LINEAR)) {
+    if (shape == StringView(u8"curve") && same && (sdr ? coded : transferCode == AVCOL_TRC_LINEAR)) {
         out.transfer = "identity";
     }
 
@@ -1203,6 +1213,17 @@ void FormatCheck::compare(StringView what, StringView output, const Vector<doubl
 
 void FormatCheck::verify(AVFrame* frame, StringView what, double tolerance) {
     Vector<double> got;
+    Vector<double> codes = expected;
+
+    // the SDR output shows the codes on its own curve: a palette's signals
+    // are made for that already, BT.709's codes are put through it
+    if (frame->color_trc != AVCOL_TRC_IEC61966_2_1) {
+        for (size_t i = 0; i < samplePixels * 4; i++) {
+            if (i % 4 != 3) {
+                expected.mut(i) = pow(srgbDecode(codes[i]), 1. / 2.4);
+            }
+        }
+    }
 
     shade(frame, "sdr", got);
 
@@ -1213,6 +1234,7 @@ void FormatCheck::verify(AVFrame* frame, StringView what, double tolerance) {
     }
 
     compare(what, StringView(u8"sdr"), got, tolerance, false);
+    expected.xchg(codes);
     shade(frame, "hdr", got);
 
     Matrix back = invert(toBt2020(1));

@@ -561,6 +561,18 @@ namespace {
         return nullptr;
     }
 
+    // The curves of SDR screens, sRGB's and the pure powers of 2.2 and 2.4:
+    // those libplacebo keeps from the source for a screen it knows nothing
+    // of. Codes made for such a screen go to an SDR output as they are, so
+    // there the output's curve stands for the source's, and the light the
+    // output encodes turns back into the codes.
+    static bool screenCurve(const VideoTransfer& transfer, const VideoTransfer& srgb) {
+        const double* c = transfer.eotf;
+        bool power = c[10] < 0. && c[0] == 1. && c[2] == 1. && c[3] == 0. && c[4] == 0. && (c[1] == 2.2 || c[1] == 2.4);
+
+        return power || !memcmp(c, srgb.eotf, sizeof(transfer.eotf));
+    }
+
     static const VideoLayout* layoutNamed(const char* name) {
         for (const VideoFormat& format : videoFormats) {
             if (name && !strcmp(format.name, name)) {
@@ -693,17 +705,19 @@ namespace {
 
         StringView shape(transfer->shape);
         bool sdr = !strcmp(target->name, "sdr");
+        const VideoTransfer* srgb = entryOf(videoTransfers, AVCOL_TRC_IEC61966_2_1);
+        bool coded = sdr && shape == StringView(u8"curve") && screenCurve(*transfer, *srgb);
 
         out.system = yuv ? matrix->system : layout->model;
         out.transfer = transfer->shape;
         out.conversion = same ? "same" : "convert";
         out.output = target->name;
         out.tile = kernelTile;
-        memcpy(out.curve, transfer->eotf, sizeof(out.curve));
+        memcpy(out.curve, coded ? srgb->eotf : transfer->eotf, sizeof(out.curve));
         memcpy(out.oetf, transfer->oetf, sizeof(out.oetf));
         memcpy(out.inverse, transfer->inverse, sizeof(out.inverse));
 
-        if (shape == StringView(u8"curve") && same && (sdr ? transferCode == AVCOL_TRC_IEC61966_2_1 : transferCode == AVCOL_TRC_LINEAR)) {
+        if (shape == StringView(u8"curve") && same && (sdr ? coded : transferCode == AVCOL_TRC_LINEAR)) {
             out.transfer = "identity";
         }
 
