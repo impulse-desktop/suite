@@ -1122,6 +1122,12 @@ static float3 pqDecode(float3 e) {
     return pow(max(p - 0.8359375, 0.0) / (18.8515625 - 18.6875 * p), float3(16384.0 / 2610.0)) * 10000.0;
 }
 
+static float3 pqEncode(float3 nits) {
+    float3 y = pow(clamp(nits / 10000.0, 0.0, 1.0), float3(2610.0 / 16384.0));
+
+    return pow((0.8359375 + 18.8515625 * y) / (1.0 + 18.6875 * y), float3(2523.0 / 32.0));
+}
+
 static float noise(int2 pixel) {
     float2 at = float2(pixel) + 0.5;
     float inner = at.x * 0.06711056 + at.y * 0.00583715;
@@ -1132,6 +1138,10 @@ static float noise(int2 pixel) {
 static float3 encode(float3 c, int2 pixel, constant Frame& frame) {
     if (OUTPUT == 0) {
         return srgbEncode(clamp(c, 0.0, 1.0)) + noise(pixel) / 255.0;
+    }
+
+    if (OUTPUT == 1) {
+        return pqEncode(c * WHITE) + noise(pixel) / 1023.0;
     }
 
     return c;
@@ -1454,9 +1464,9 @@ id<MTLLibrary> MetalRenderer::composeLibrary(const char* defines, bool generic) 
 
 id<MTLComputePipelineState> MetalRenderer::pipeline(id<MTLLibrary> from, ShaderOutput output, u32 side, id<MTLFunction> linked) {
     MTLFunctionConstantValues* constants = [[MTLFunctionConstantValues alloc] init];
-    int encoding = output == ShaderOutput::Srgb ? 0 : 2;
-    bool wideOutput = output == ShaderOutput::WideLinear;
-    float white = outputWhiteNits(output);
+    int encoding = output == ShaderOutput::Srgb ? 0 : output == ShaderOutput::Pq ? 1 : 2;
+    bool wideOutput = output == ShaderOutput::Pq || output == ShaderOutput::WideLinear;
+    float white = pqWhiteNits;
     NSError* error = nil;
     [constants setConstantValue:&encoding type:MTLDataTypeInt atIndex:0];
     [constants setConstantValue:&wideOutput type:MTLDataTypeBool atIndex:1];
@@ -1693,11 +1703,11 @@ bool MetalRenderer::beginFrame(u32 width, u32 height) {
 }
 
 void MetalRenderer::setMode(bool want) {
-    CGColorSpaceRef color = CGColorSpaceCreateWithName(want ? kCGColorSpaceExtendedLinearITUR_2020 : kCGColorSpaceSRGB);
+    CGColorSpaceRef color = CGColorSpaceCreateWithName(want ? kCGColorSpaceITUR_2100_PQ : kCGColorSpaceSRGB);
     if (!color) {
         fail(StringView(u8"cannot create Metal color space"));
     }
-    layer.pixelFormat = want ? MTLPixelFormatRGBA16Float : MTLPixelFormatBGRA8Unorm;
+    layer.pixelFormat = want ? MTLPixelFormatBGR10A2Unorm : MTLPixelFormatBGRA8Unorm;
     layer.colorspace = color;
     layer.wantsExtendedDynamicRangeContent = want;
     CGColorSpaceRelease(color);
@@ -1731,7 +1741,7 @@ bool MetalRenderer::endFrame(ImDrawData* draw) {
         drawn.clear();
         tiles.compose(draw, Vector<Layer>(), (u32)drawable.texture.width, (u32)drawable.texture.height, wide, ++frames);
         stamp(command);
-        encode(command, drawable.texture, wide ? ShaderOutput::WideLinear : ShaderOutput::Srgb);
+        encode(command, drawable.texture, wide ? ShaderOutput::Pq : ShaderOutput::Srgb);
         Channel* done = landed;
         plt::LoopWake* completed = wake;
         [command addCompletedHandler:^(id<MTLCommandBuffer>) {
@@ -3122,7 +3132,7 @@ VkPipeline Gpu::pipeline(const u32* code, size_t bytes, ShaderOutput output) {
         u32 output;
         u32 wide;
         float white;
-    } constants{output == ShaderOutput::Srgb ? 0u : output == ShaderOutput::Pq ? 1u : 2u, output == ShaderOutput::Pq || output == ShaderOutput::WideLinear ? 1u : 0u, outputWhiteNits(output)};
+    } constants{output == ShaderOutput::Srgb ? 0u : output == ShaderOutput::Pq ? 1u : 2u, output == ShaderOutput::Pq || output == ShaderOutput::WideLinear ? 1u : 0u, pqWhiteNits};
 
     VkSpecializationMapEntry entries[3] = {{0, 0, 4}, {1, 4, 4}, {2, 8, 4}};
     VkSpecializationInfo spec{3, entries, sizeof(constants), &constants};

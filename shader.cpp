@@ -1438,7 +1438,7 @@ namespace {
                 luminance = g.add(luminance, g.mul(scene[i], s.luminance[i]));
             }
 
-            Node* factor = g.mul(g.pow(luminance, 0.2), s.light[2] / outputWhiteNits(o.output));
+            Node* factor = g.mul(g.pow(luminance, 0.2), s.light[2] / pqWhiteNits);
 
             for (int i = 0; i < 3; i++) {
                 scene[i] = g.mul(scene[i], factor);
@@ -1567,7 +1567,7 @@ namespace {
                 rows(toLight, lms, scene);
 
                 for (int i = 0; i < 3; i++) {
-                    light[i] = pq ? g.mul(scene[i], s.light[1] / outputWhiteNits(o.output)) : scene[i];
+                    light[i] = pq ? g.mul(scene[i], s.light[1] / pqWhiteNits) : scene[i];
                 }
 
                 if (!pq) {
@@ -1583,7 +1583,7 @@ namespace {
                 }
             } else if (!strcmp(s.transfer, "pq")) {
                 for (int i = 0; i < 3; i++) {
-                    light[i] = g.mul(pqLight(signal[i]), s.light[1] / outputWhiteNits(o.output));
+                    light[i] = g.mul(pqLight(signal[i]), s.light[1] / pqWhiteNits);
                 }
             } else {
                 for (int i = 0; i < 3; i++) {
@@ -2313,7 +2313,7 @@ namespace {
 
                     k.encoded[c] = g.add(g.select(g.le(v, 0.0031308), g.mul(v, 12.92), g.sub(g.mul(g.pow(v, 1. / 2.4), 1.055), 0.055)), g.mul(noise, 1. / 255.));
                 } else if (o.output == ShaderOutput::Pq) {
-                    Node* y = g.pow(g.clamp(g.mul(straight, outputWhiteNits(o.output) / 10000.), 0., 1.), 2610. / 16384.);
+                    Node* y = g.pow(g.clamp(g.mul(straight, pqWhiteNits / 10000.), 0., 1.), 2610. / 16384.);
 
                     k.encoded[c] = g.add(g.pow(g.div(g.add(g.mul(y, 18.8515625), 0.8359375), g.add(g.mul(y, 18.6875), 1.)), 2523. / 32.), g.mul(noise, 1. / 1023.));
                 } else {

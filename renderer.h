@@ -86,12 +86,9 @@ enum class ShaderOutput : u8 {
     WideLinear
 };
 
-// The nits a PQ source shows at 1 of an output's light. On EDR it is 100,
-// as Apple maps PQ; everywhere else 203, the reference luminance of the PQ
-// output's description, which the window system shows at its SDR white.
-inline float outputWhiteNits(ShaderOutput output) {
-    return output == ShaderOutput::WideLinear ? 100.f : 203.f;
-}
+// The nits of PQ at 1 of the frame's light: the reference luminance of the
+// PQ output, which the window system shows at its SDR white.
+constexpr float pqWhiteNits = 203.f;
 
 enum class ShaderTiles : u8 {
     Inside,

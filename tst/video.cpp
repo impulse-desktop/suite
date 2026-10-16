@@ -390,7 +390,7 @@ namespace {
     }
 
     static void displayLight(int transfer, int primaries, const double* signal, double* light) {
-        double white = outputWhiteNits(ShaderOutput::WideLinear);
+        double white = pqWhiteNits;
         Matrix toXyz = primariesToXyz(primaries);
 
         for (int c = 0; c < 3; c++) {
@@ -1665,7 +1665,7 @@ void FormatCheck::systems() {
 }
 
 void FormatCheck::transfers() {
-    float white = outputWhiteNits(ShaderOutput::WideLinear);
+    float white = pqWhiteNits;
 
     for (const VideoTransfer& entry : videoTransfers) {
         Case kase;
