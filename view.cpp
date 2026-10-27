@@ -1300,7 +1300,10 @@ void ViewApp::drawGallery(ImVec2 size) {
         top = bottom;
     }
 
-    ImDrawList* fg = ImGui::GetForegroundDrawList();
+    // A popup is a window under the viewport's foreground list. Keep the
+    // gallery in its own window's list while one is open, so no thumbnail
+    // covers it; otherwise the bulge may reach over the canvas.
+    ImDrawList* fg = GImGui->OpenPopupStack.Size == 0 ? ImGui::GetForegroundDrawList() : dl;
 
     // the frame of the current row, inside the edge of what it is drawn on:
     // four filled bands flush with the edge, as a stroked rectangle keeps
